@@ -79,6 +79,7 @@ from .review_disposition import (
     reconcile_withdrawals,
     unresolved_adverse_review_findings,
 )
+from .auto_plan import outside_label_selector
 from .scheduling import Scheduler
 from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .task_completion import record_task_owner_state
@@ -142,6 +143,7 @@ class Coordinator:
         self.integrator = integrator or Integrator(require_independent_review=require_independent_review)
         self.remediation_policy = remediation_policy or RemediationPolicy()
         self.target = target
+        self.required_label: str | None = None  # the run's --label selector, enforced again at actual stage admission
         self.adverse_policy = adverse_policy
         self.adverse_override: dict[str, str] | None = None
         self.last_adverse_block: tuple[str, ...] | None = None
@@ -261,6 +263,15 @@ class Coordinator:
                 "task_id": task_id, "execution_ids": [], "kinds": [],
                 "reason_code": "stage_dispatch_ineligible",
                 "reason": f"task is no longer eligible at stage dispatch: {decision.reason}",
+            })
+            return 0
+        if outside_label_selector(self.store, task, self.required_label):
+            if not hasattr(self, "last_execution_refusals"):
+                self.last_execution_refusals = []
+            self.last_execution_refusals.append({
+                "task_id": task_id, "execution_ids": [], "kinds": [],
+                "reason_code": "stage_dispatch_ineligible",
+                "reason": f"task no longer carries the active label selector {self.required_label!r} at stage dispatch",
             })
             return 0
         # Selection can precede another connection's ownership publication.
