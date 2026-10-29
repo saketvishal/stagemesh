@@ -19,7 +19,7 @@ from stagemesh.providers import (
     _build_task_prompt,
     adapters_from_config,
 )
-from stagemesh.research_context import ResearchBlocked
+from stagemesh.research_context import ResearchBlocked, source_snapshot
 
 RESEARCHER = r'''
 import json, re, sys
@@ -40,6 +40,8 @@ elif mode == "mutate":
     open("src/service.py", "a").write("# changed\n")
 elif mode == "untracked":
     open("new.txt", "w").write("x")
+elif mode == "ignored":
+    open("ignored.txt", "a").write("changed")
 elif mode == "fail":
     sys.exit(3)
 elif mode == "garbage":
@@ -57,6 +59,8 @@ def rig(tmp_path: Path):
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
     (project / "src" / "service.py").write_text("x = 1\n", encoding="utf-8")
+    (project / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (project / "ignored.txt").write_text("original\n", encoding="utf-8")
     git(project, "init", "-q")
     git(project, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
     git(project, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
@@ -81,6 +85,44 @@ def rig(tmp_path: Path):
 
 def events(store: Store) -> list[dict]:
     return [json.loads(r["payload"]) for r in store.audit_events() if r["event_type"] == "research_stage"]
+
+
+def test_source_snapshot_includes_ignored_authority_but_skips_dependency_caches(tmp_path: Path) -> None:
+    project = tmp_path / "snapshot-project"
+    project.mkdir()
+    git(project, "init", "-q")
+    (project / ".gitignore").write_text(".stagemesh/\n.venv/\n", encoding="utf-8")
+    (project / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    (project / ".stagemesh").mkdir()
+    (project / ".stagemesh" / "config.json").write_text("{}\n", encoding="utf-8")
+    (project / ".venv").mkdir()
+    (project / ".venv" / "cache.bin").write_text("first\n", encoding="utf-8")
+    git(project, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    git(project, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+
+    before = source_snapshot(project)
+    (project / ".venv" / "cache.bin").write_text("second\n", encoding="utf-8")
+    assert source_snapshot(project) == before
+    (project / ".stagemesh" / "config.json").write_text('{"changed": true}\n', encoding="utf-8")
+    assert source_snapshot(project) != before
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_source_snapshot_hashes_tracked_paths_hidden_by_index_flags(tmp_path: Path, flag: str) -> None:
+    project = tmp_path / flag.removeprefix("--")
+    project.mkdir()
+    git(project, "init", "-q")
+    target = project / "tracked.txt"
+    target.write_text("original\n", encoding="utf-8")
+    git(project, "-c", "user.name=t", "-c", "user.email=t@t", "add", "tracked.txt")
+    git(project, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    git(project, "update-index", flag, "tracked.txt")
+
+    before = source_snapshot(project)
+    target.write_text("researcher changed this\n", encoding="utf-8")
+
+    assert git(project, "status", "--porcelain") == ""
+    assert source_snapshot(project) != before
 
 
 def test_accepted_research_feeds_bounded_findings_and_audits(rig) -> None:
@@ -111,6 +153,7 @@ def test_findings_appear_in_implementation_prompt_only_when_supplied(rig) -> Non
         ("fail", "research_failed"),
         ("mutate", "research_mutated_source"),
         ("untracked", "research_mutated_source"),
+        ("ignored", "research_mutated_source"),
     ],
 )
 def test_rejected_research_blocks_implementation(rig, mode: str, reason: str) -> None:
