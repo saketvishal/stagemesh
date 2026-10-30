@@ -264,6 +264,23 @@ def clear_dead_child_owner(project: Path) -> bool:
     return True
 
 
+def _wait_to_clear_dead_child_owner(project: Path, *, timeout_seconds: float = 5.0) -> bool:
+    """Boundedly wait for a confirmed tree kill to become observable as DEAD.
+
+    On POSIX a killed grandchild can remain briefly visible while it is being reaped.  A single immediate ownership
+    check would retain ``active-window.json`` forever even though the tree is gone.  Keep ownership fail-closed while
+    the process is LIVE or UNKNOWN, and release it only after the recorded wrapper and child are both proven dead.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while child_owner_path(project).exists():
+        if clear_dead_child_owner(project):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 def child_owner_fully_dead(project: Path) -> bool:
     """True when the record names BOTH the wrapper and its run-window child and both are proven dead.
 
@@ -447,8 +464,13 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
             pass
         if tree_killed and wrapper_exited:
             finish_child_cleanup(project)
-            clear_child_owner(project, identity) or clear_dead_child_owner(project)
-            clear_child_owner(project, launch_identity, allow_live=True)
+            if not clear_child_owner(project, identity) and not clear_child_owner(
+                project, launch_identity, allow_live=True
+            ):
+                # A wrapper may have published its run-window child before the parent observes the timeout.  POSIX
+                # can report that killed child until it is reaped, so allow that confirmed tree kill a bounded period
+                # to become observable.  A pre-launch sentinel remains safe to clear by its exact identity.
+                _wait_to_clear_dead_child_owner(project)
         return 124
     if child_owner_fully_dead(project):
         clear_dead_child_owner(project)
