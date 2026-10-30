@@ -597,3 +597,98 @@ def test_real_reconstruction_preserves_origin_only_after_success(tmp_path, confl
         assert store.conn.execute("SELECT COUNT(*) FROM executions WHERE kind='IMPLEMENTATION'").fetchone()[0] == 1
     finally:
         store.close()
+
+
+# --- operator recovery of a legacy candidate's implementer identity ---------------------------------
+
+
+@pytest.fixture
+def legacy_rig(role_rig):
+    _, store, candidate, _, pool, _, _ = role_rig
+    execution = store.conn.execute("SELECT id FROM executions WHERE kind='IMPLEMENTATION'").fetchone()["id"]
+    store.conn.execute("UPDATE executions SET executable='C:/tools/controlled-review.exe' WHERE id=?", (execution,))
+    store.conn.execute("DELETE FROM audit_events WHERE event_type=?", (IMPLEMENTATION_IDENTITY,))
+    store.conn.commit()
+    return role_rig, execution, list(pool.adapters.values())
+
+
+def _recover(rig, execution_id, adapters, **overrides):
+    from stagemesh.operator_actions import recover_implementation_identity
+
+    _, store, candidate, *_ = rig
+    args = {"task": TASK, "candidate": candidate, "execution": execution_id, "reason": "operator inspected legacy run"}
+    args.update(overrides)
+    return recover_implementation_identity(store, args["task"], args["candidate"], args["execution"], args["reason"], adapters)
+
+
+def test_recovered_legacy_identity_is_audited_and_review_stays_independent(legacy_rig):
+    rig, execution, adapters = legacy_rig
+    _, store, candidate, _, pool, _, _ = rig
+    assert implementation_identity(store, TASK, candidate) is None and _run(rig) == EvidenceStatus.CAPACITY
+    before = tuple(store.conn.execute("SELECT * FROM candidates WHERE sha=?", (candidate,)).fetchone())
+    report = _recover(rig, execution, adapters)
+    assert report["recovered"] and report["provider_invoked"] is False
+    assert all(not adapter.calls for adapter in adapters)
+    assert not _gate(rig).allowed
+    identity = implementation_identity(store, TASK, candidate)
+    assert identity["provider"] == "codex" and identity["execution_ids"] == [execution]
+    audit = store.conn.execute("SELECT payload FROM audit_events WHERE event_type='candidate.implementation_identity_reconstructed'").fetchall()
+    assert len(audit) == 1 and "controlled-review" not in audit[0]["payload"] and "operator inspected" in audit[0]["payload"]
+    assert _run(rig) == EvidenceStatus.PASSED
+    assert len(pool.adapters["claude"].calls) == 1 and not pool.adapters["grok"].calls
+    assert not _gate(rig).allowed
+    assert _run(rig) == EvidenceStatus.PASSED and _gate(rig).allowed
+    assert len(pool.adapters["claude"].calls) == len(pool.adapters["grok"].calls) == 1
+    assert not pool.adapters["codex"].calls
+    assert tuple(store.conn.execute("SELECT * FROM candidates WHERE sha=?", (candidate,)).fetchone()) == before
+
+
+def test_repeated_recovery_is_idempotent(legacy_rig):
+    rig, execution, adapters = legacy_rig
+    _, store, candidate, *_ = rig
+    assert _recover(rig, execution, adapters)["recovered"]
+    count = store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    execution_row = tuple(store.conn.execute("SELECT * FROM executions WHERE id=?", (execution,)).fetchone())
+    assert not _recover(rig, execution, adapters)["recovered"]
+    assert store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == count
+    assert tuple(store.conn.execute("SELECT * FROM executions WHERE id=?", (execution,)).fetchone()) == execution_row
+
+
+@pytest.mark.parametrize("problem", [
+    "wrong_execution", "wrong_task", "wrong_candidate", "wrong_status", "wrong_kind", "wrong_actor", "wrong_executable",
+    "no_executable", "no_reason", "unconfigured_provider", "missing_command", "ambiguous", "conflicting", "unresolved",
+])
+def test_recovery_fails_closed_on_bad_evidence(legacy_rig, problem):
+    from stagemesh.operator_actions import OperatorActionError
+
+    rig, execution, adapters = legacy_rig
+    _, store, candidate, *_ = rig
+    overrides = {}
+    if problem == "wrong_execution":
+        overrides["execution"] = "missing-execution"
+    elif problem == "wrong_task":
+        overrides["task"] = "T-other"
+    elif problem == "wrong_candidate":
+        overrides["candidate"] = "0" * 40
+    elif problem == "no_reason":
+        overrides["reason"] = " "
+    elif problem in {"wrong_status", "wrong_kind", "wrong_actor", "wrong_executable", "no_executable"}:
+        column, value = {"wrong_status": ("status", "FAILED"), "wrong_kind": ("kind", "REVIEW"), "wrong_actor": ("actor", "claude"),
+                         "wrong_executable": ("executable", "other.exe"), "no_executable": ("executable", None)}[problem]
+        store.conn.execute(f"UPDATE executions SET {column}=? WHERE id=?", (value, execution))
+    elif problem == "unconfigured_provider":
+        adapters = [a for a in adapters if a.name != "codex"]
+    elif problem == "missing_command":
+        adapters[0].command = ()
+    elif problem == "ambiguous":
+        other = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, candidate_sha=candidate, actor="codex")
+        store.finish_execution(other, ExecutionStatus.SUCCEEDED, candidate)
+    elif problem == "conflicting":
+        record_implementation_identity(store, TASK, candidate, execution, command_snapshot("codex", ("other-command",)))
+    else:  # unresolved identity evidence of any kind, even if it does not resolve today
+        store.add_audit_event(IMPLEMENTATION_IDENTITY, {"task_id": TASK, "candidate_sha": candidate, "provider": "codex"})
+    store.conn.commit()
+    events = store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    with pytest.raises(OperatorActionError):
+        _recover(rig, execution, adapters, **overrides)
+    assert store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == events
