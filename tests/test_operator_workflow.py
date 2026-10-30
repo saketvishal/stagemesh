@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -276,15 +277,42 @@ def test_health_flags_stale_running_execution(tmp_path: Path) -> None:
     assert "stale_running_executions" in report.current_problems
 
 
+def _fake_executable(directory: Path, name: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (name + (".exe" if sys.platform == "win32" else ""))
+    path.write_bytes(b"")
+    path.chmod(0o755)
+    return path
+
+
+def test_recovery_executable_requires_exact_resolved_path(tmp_path: Path, monkeypatch) -> None:
+    from stagemesh.operator_actions import _same_executable
+
+    real = _fake_executable(tmp_path / "real", "codex")
+    other = _fake_executable(tmp_path / "other", "codex")
+    monkeypatch.setenv("PATH", str(real.parent))
+    assert _same_executable(str(real), "codex")
+    assert _same_executable(str(real), str(real))
+    assert not _same_executable(str(other), "codex")  # same name, different directory
+    assert not _same_executable(str(real), str(other))  # absolute configured path elsewhere
+    assert not _same_executable(str(real), "no-such-command")  # unresolvable
+    assert not _same_executable(str(tmp_path / "missing" / real.name), "codex")  # recorded path differs
+    assert not _same_executable(real.name, "codex")  # recorded is not a canonical path
+    monkeypatch.setenv("PATH", str(other.parent))
+    assert not _same_executable(str(real), "codex")  # PATH now resolves to the substitute
+
+
 def test_recover_implementation_identity_cli_records_audit_without_provider(tmp_path: Path, monkeypatch) -> None:
     from stagemesh.persistence import Store
     from stagemesh.providers import RuntimeCommandAdapter
     from stagemesh.review_identity import implementation_identity
 
     project, store, _ = _with_baseline(tmp_path)
+    exe = _fake_executable(tmp_path / "bin", "codex")
+    monkeypatch.setenv("PATH", str(exe.parent) + os.pathsep + os.environ["PATH"])
     sha = _commit(project, {"docs/a.md": "legacy\n"})
     store.add_candidate(TASK, sha, "codex", True)
-    execution = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, executable="codex.exe",
+    execution = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, executable=str(exe),
                                       candidate_sha=sha, actor="codex")
     store.finish_execution(execution, ExecutionStatus.SUCCEEDED, sha)
     store.close()

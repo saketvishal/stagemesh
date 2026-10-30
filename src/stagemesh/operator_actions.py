@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -316,11 +317,16 @@ def adopt_candidate(
 
 
 def _same_executable(recorded: str, configured: str) -> bool:
-    rec, conf = Path(recorded), Path(configured)
-    if rec.name.casefold() == conf.name.casefold() or rec.stem.casefold() == conf.stem.casefold():
-        return True
-    found = shutil.which(configured)
-    return bool(found) and Path(found).resolve() == rec.resolve()
+    """Fail closed: the configured command must resolve to exactly the recorded executable path."""
+    if not Path(recorded).is_absolute():
+        return False
+    try:
+        found = shutil.which(configured)
+        if not found:
+            return False
+        return os.path.normcase(os.path.realpath(found)) == os.path.normcase(os.path.realpath(recorded))
+    except (OSError, ValueError):
+        return False
 
 
 def recover_implementation_identity(
