@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -316,11 +317,16 @@ def adopt_candidate(
 
 
 def _same_executable(recorded: str, configured: str) -> bool:
-    rec, conf = Path(recorded), Path(configured)
-    if rec.name.casefold() == conf.name.casefold() or rec.stem.casefold() == conf.stem.casefold():
-        return True
-    found = shutil.which(configured)
-    return bool(found) and Path(found).resolve() == rec.resolve()
+    """Fail closed: the configured command must resolve to exactly the recorded executable path."""
+    if not Path(recorded).is_absolute():
+        return False
+    try:
+        found = shutil.which(configured)
+        if not found:
+            return False
+        return os.path.normcase(os.path.realpath(found)) == os.path.normcase(os.path.realpath(recorded))
+    except (OSError, ValueError):
+        return False
 
 
 def recover_implementation_identity(
@@ -360,16 +366,28 @@ def recover_implementation_identity(
     if len(matching) != 1:
         raise OperatorActionError(f"provider {producer} is not configured exactly once")
     adapter = matching[0]
-    command = adapter.command_for("code") if "code" in getattr(adapter, "capabilities", ()) else None
-    if not command:
+    if "code" not in getattr(adapter, "capabilities", ()):
+        raise OperatorActionError(f"provider {producer} has no configured implementation command")
+    configured = (
+        getattr(adapter, "implement_command", None)
+        if getattr(adapter, "implement_command", None) is not None
+        else getattr(adapter, "command", None)
+    )
+    if not configured and hasattr(adapter, "command_for"):
+        configured = adapter.command_for("code")
+    if not configured:
         raise OperatorActionError(f"provider {producer} has no configured implementation command")
     recorded = execution["executable"]
-    if not isinstance(recorded, str) or not recorded or not _same_executable(recorded, command[0]):
+    if not isinstance(recorded, str) or not recorded or not _same_executable(recorded, configured[0]):
         raise OperatorActionError(
             f"execution {execution_id} recorded executable does not match the configured {producer} command"
         )
+    command = adapter.command_for("code") if hasattr(adapter, "command_for") else configured
+    if not command:
+        raise OperatorActionError(f"provider {producer} has no configured implementation command")
     try:
-        snapshot = command_snapshot(producer, command, adapter.all_commands())
+        all_cmds = adapter.all_commands() if hasattr(adapter, "all_commands") else (command,)
+        snapshot = command_snapshot(producer, command, all_cmds)
     except ValueError as exc:
         raise OperatorActionError(f"provider {producer} command identity is unusable: {exc}") from exc
     report: dict[str, Any] = {
