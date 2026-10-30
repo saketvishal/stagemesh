@@ -139,6 +139,9 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
     if classification == CORE_LIFECYCLE_OR_SCHEMA_SECURITY:
         scope = {path.replace("\\", "/").casefold() for path in changed_files or contract.allowed_files}
         impact = [entry for root, entry in _AUDITED_COMPONENTS.items() if root in scope]
+        # Supporting docs/tests are neutral; any other unaudited path invalidates the map.
+        if any(path not in _AUDITED_COMPONENTS and not path.startswith(("docs/", "tests/")) for path in scope):
+            impact = []
         return ValidationPlan(
             classification,
             "HIGH",

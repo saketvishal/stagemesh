@@ -58,10 +58,12 @@ directories, glob patterns and test filenames do not infer component membership.
 Concrete changed files take precedence; when none are supplied, matching uses
 the contract's allowed scope, as classification already does.
 
-Unmapped or cross-cutting paths contribute no inferred names or targets. In mixed
-scope, these arrays describe only the exact audited roots present, not all impact.
-An empty array means no audited match, not that validation is unnecessary. Existing
-escalation reasons, including explicit unknown-impact reasons, remain unchanged.
+Supporting `docs/**` and `tests/**` paths are neutral. If the actual scope (or the
+allowed-scope fallback) contains any other path outside the three exact audited
+source roots, all three inferred arrays are empty, including for mixed scope.
+An empty array means no audited match or an incomplete map, not that validation is
+unnecessary. Existing escalation reasons, including explicit unknown-impact reasons,
+remain unchanged.
 These fields invent no commands, select no gates and claim no transitive coverage
 or execution result. Required checks and executable invariants keep their existing
 semantics, and `with_required_checks` retains the evidence fields. Validator
