@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -213,6 +214,45 @@ def test_weekly_limit_phrase_is_quota_not_an_implementation_defect() -> None:
     assert is_cap is False and reason == "implementation_failure"
     is_cap, reason = classify_failure(1, stderr="the diff hit the file limit")
     assert is_cap is False and reason == "implementation_failure"
+
+
+def test_http_402_usage_exhaustion_is_quota_but_real_auth_failures_stay_auth() -> None:
+    from stagemesh.execution import classify_failure
+
+    wrapped = "authentication wrapper: request failed\nAPI error (status 402 Payment Required): Grok Build usage balance exhausted"
+    assert classify_failure(1, stderr=wrapped) == (True, "quota_rate_limit")
+    assert classify_failure(1, stderr="401 Unauthorized: invalid api key") == (True, "authentication_failure")
+    assert classify_failure(1, stderr="403 Forbidden") == (True, "authentication_failure")
+    assert classify_failure(1, stderr="authentication_error: not logged in") == (True, "authentication_failure")
+
+
+def test_payment_exhaustion_classifier_is_bounded_for_verbose_output() -> None:
+    # Run in a child so a regex regression fails promptly instead of hanging the gate.
+    script = r"""
+from stagemesh.execution import classify_failure
+
+banner = 'provider diagnostic line\n' * 10000
+cases = [
+    ('', 'AssertionError: mismatch', (False, 'implementation_failure')),
+    ('', 'authentication_error: not logged in', (True, 'authentication_failure')),
+    ('402 Payment Required\n', 'authentication_error', (True, 'authentication_failure')),
+    ('usage balance exhausted\n', 'authentication_error', (True, 'authentication_failure')),
+    ('authentication wrapper\n', '402 Payment Required: usage balance exhausted',
+     (True, 'quota_rate_limit')),
+    ('usage balance exhausted\n', 'authentication wrapper: 402 Payment Required',
+     (True, 'quota_rate_limit')),
+]
+for prefix, error, expected in cases:
+    assert classify_failure(1, stdout=prefix + banner, stderr=error) == expected
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1] / "src",
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
 
 
 def test_weekly_limit_falls_through_to_the_next_provider_without_naming_it(tmp_path: Path) -> None:
