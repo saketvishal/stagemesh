@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
 from .contracts import candidate_hygiene_findings, changed_files
-from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
+from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .execution_ownership import (
     execution_tree_unresolved,
     recovery_identity_state,
@@ -20,6 +21,13 @@ from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .process_identity import classify_process, process_identity
+from .review_identity import (
+    IMPLEMENTATION_DERIVATION,
+    IMPLEMENTATION_IDENTITY,
+    command_snapshot,
+    implementation_identity,
+    record_implementation_identity,
+)
 from .validation import Validator
 from .workspace_guard import pin_candidate
 
@@ -304,4 +312,88 @@ def adopt_candidate(
                 )
     task = store.get_task(task_id)
     report["stage"], report["status"] = task["stage"], task["status"]
+    return report
+
+
+def _same_executable(recorded: str, configured: str) -> bool:
+    rec, conf = Path(recorded), Path(configured)
+    if rec.name.casefold() == conf.name.casefold() or rec.stem.casefold() == conf.stem.casefold():
+        return True
+    found = shutil.which(configured)
+    return bool(found) and Path(found).resolve() == rec.resolve()
+
+
+def recover_implementation_identity(
+    store: Store, task_id: str, candidate_sha: str, execution_id: str, reason: str, adapters: list[Any],
+) -> dict[str, Any]:
+    """Re-establish the frozen implementer identity of a legacy candidate from proven execution evidence.
+
+    Never invokes a provider, never alters the candidate or the execution, and does not touch review requirements: the
+    recovered identity is the same event a fresh implementation would have recorded, so independent review still applies.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        raise OperatorActionError("a non-empty --reason is required: say what evidence shows this execution produced the candidate")
+    if store.get_task(task_id) is None:
+        raise OperatorActionError(f"task does not exist: {task_id}")
+    candidate = store.conn.execute("SELECT * FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)).fetchone()
+    if candidate is None:
+        raise OperatorActionError(f"candidate {candidate_sha} is not registered for task {task_id}; the exact sha is required")
+    producer = str(candidate["produced_by"])
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    if execution is None:
+        raise OperatorActionError(f"execution does not exist: {execution_id}")
+    if (execution["kind"] != ExecutionKind.IMPLEMENTATION or execution["status"] != ExecutionStatus.SUCCEEDED
+            or execution["task_id"] != task_id or execution["candidate_sha"] != candidate_sha
+            or execution["actor"] != producer):
+        raise OperatorActionError(
+            f"execution {execution_id} is not a SUCCEEDED IMPLEMENTATION execution of {producer} that produced "
+            f"candidate {candidate_sha} for task {task_id}"
+        )
+    others = store.conn.execute(
+        "SELECT id FROM executions WHERE task_id=? AND kind=? AND status=? AND candidate_sha=? AND id!=?",
+        (task_id, ExecutionKind.IMPLEMENTATION, ExecutionStatus.SUCCEEDED, candidate_sha, execution_id),
+    ).fetchall()
+    if others:
+        raise OperatorActionError(f"ambiguous evidence: other successful implementation executions produced {candidate_sha}")
+    matching = [a for a in adapters if getattr(a, "name", None) == producer]
+    if len(matching) != 1:
+        raise OperatorActionError(f"provider {producer} is not configured exactly once")
+    adapter = matching[0]
+    command = adapter.command_for("code") if "code" in getattr(adapter, "capabilities", ()) else None
+    if not command:
+        raise OperatorActionError(f"provider {producer} has no configured implementation command")
+    recorded = execution["executable"]
+    if not isinstance(recorded, str) or not recorded or not _same_executable(recorded, command[0]):
+        raise OperatorActionError(
+            f"execution {execution_id} recorded executable does not match the configured {producer} command"
+        )
+    try:
+        snapshot = command_snapshot(producer, command, adapter.all_commands())
+    except ValueError as exc:
+        raise OperatorActionError(f"provider {producer} command identity is unusable: {exc}") from exc
+    report: dict[str, Any] = {
+        "task_id": task_id, "candidate_sha": candidate_sha, "execution_id": execution_id, "provider": producer,
+        "command_digest": snapshot["command_digest"], "alias_digests": snapshot["alias_digests"],
+        "provider_invoked": False, "recovered": False,
+    }
+    existing = implementation_identity(store, task_id, candidate_sha)
+    if existing is not None and existing["command_digest"] == snapshot["command_digest"]:
+        return report  # idempotent: the identity is already proven and identical
+    prior = store.conn.execute(
+        "SELECT 1 FROM audit_events WHERE event_type IN (?, ?) "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.candidate_sha')=? LIMIT 1",
+        (IMPLEMENTATION_IDENTITY, IMPLEMENTATION_DERIVATION, task_id, candidate_sha),
+    ).fetchone()
+    if existing is not None or prior is not None:
+        raise OperatorActionError(f"candidate {candidate_sha} already has conflicting or unresolved identity evidence; refusing to add more")
+    record_audit(store, "candidate.implementation_identity_reconstructed", {
+        "task_id": task_id, "candidate_sha": candidate_sha, "execution_id": execution_id, "provider": producer,
+        "command_digest": snapshot["command_digest"], "alias_digests": snapshot["alias_digests"],
+        "reason": reason, "operator": _operator(), "operator_action": "RECOVER_IMPLEMENTATION_IDENTITY",
+        "provider_invoked": False,
+    })
+    record_implementation_identity(store, task_id, candidate_sha, execution_id, snapshot)
+    report["recovered"] = True
     return report

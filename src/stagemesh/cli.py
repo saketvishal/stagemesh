@@ -66,6 +66,7 @@ from .operator_actions import (
     OperatorActionError,
     adopt_candidate,
     recover_stale,
+    recover_implementation_identity,
     release_unknown_execution,
     task_details,
 )
@@ -2740,6 +2741,26 @@ def command_recover_stale(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_recover_implementation_identity(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        adapters = adapters_from_config(load_config(project))
+        report = recover_implementation_identity(store, args.task, args.candidate, args.execution, args.reason or "", adapters)
+    except (OperatorActionError, StoreValidationError, ConfigValidationError, ProviderValidationError) as exc:
+        print(f"recover-implementation-identity rejected: {exc}", file=sys.stderr)
+        store.close()
+        return 2
+    store.close()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        state = "recovered" if report["recovered"] else "already recorded"
+        print(f"implementation identity {state} for {report['candidate_sha']} (task {args.task}, provider {report['provider']})")
+    return 0
+
+
 def command_adopt_candidate(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -4614,6 +4635,16 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--reason", help="What you inspected that shows the execution is dead (recorded in the audit log)")
     recover.add_argument("--json", action="store_true")
     recover.set_defaults(func=command_recover_stale)
+    identity_cmd = sub.add_parser(
+        "recover-implementation-identity",
+        help="Audited recovery of a legacy candidate's implementer identity from a proven successful implementation execution",
+    )
+    identity_cmd.add_argument("--task", required=True)
+    identity_cmd.add_argument("--candidate", required=True, help="Exact full candidate sha")
+    identity_cmd.add_argument("--execution", required=True, help="Id of the successful IMPLEMENTATION execution that produced it")
+    identity_cmd.add_argument("--reason", required=True, help="Evidence that justifies the recovery (recorded in the audit log)")
+    identity_cmd.add_argument("--json", action="store_true")
+    identity_cmd.set_defaults(func=command_recover_implementation_identity)
     adopt = sub.add_parser("adopt-candidate", help="Register an existing commit as the task's latest candidate")
     adopt.add_argument("--task", required=True)
     adopt.add_argument("--sha", required=True)

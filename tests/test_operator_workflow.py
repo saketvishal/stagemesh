@@ -274,3 +274,32 @@ def test_health_flags_stale_running_execution(tmp_path: Path) -> None:
     report = health(store)
     assert report.ok is False and report.stale_execution_count == 1
     assert "stale_running_executions" in report.current_problems
+
+
+def test_recover_implementation_identity_cli_records_audit_without_provider(tmp_path: Path, monkeypatch) -> None:
+    from stagemesh.persistence import Store
+    from stagemesh.providers import RuntimeCommandAdapter
+    from stagemesh.review_identity import implementation_identity
+
+    project, store, _ = _with_baseline(tmp_path)
+    sha = _commit(project, {"docs/a.md": "legacy\n"})
+    store.add_candidate(TASK, sha, "codex", True)
+    execution = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, executable="codex.exe",
+                                      candidate_sha=sha, actor="codex")
+    store.finish_execution(execution, ExecutionStatus.SUCCEEDED, sha)
+    store.close()
+    monkeypatch.setattr(cli_module, "adapters_from_config", lambda _config: [RuntimeCommandAdapter("codex", ("codex", "--fixture-secret"))])
+    argv = ("recover-implementation-identity", "--task", TASK, "--candidate", sha, "--execution", execution, "--json")
+
+    assert _cli(project, *argv, "--reason", " ")[0] == 2
+    code, out = _cli(project, *argv, "--reason", "inspected legacy run")
+    assert code == 0 and json.loads(out)["recovered"] is True
+    code, out = _cli(project, *argv, "--reason", "inspected legacy run")
+    assert code == 0 and json.loads(out)["recovered"] is False
+
+    reopened = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    assert implementation_identity(reopened, TASK, sha)["provider"] == "codex"
+    blob = "\n".join(r["payload"] for r in reopened.conn.execute("SELECT payload FROM audit_events"))
+    assert "fixture-secret" not in blob
+    assert reopened.conn.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE event_type='candidate.implementation_identity_reconstructed'").fetchone()[0] == 1
