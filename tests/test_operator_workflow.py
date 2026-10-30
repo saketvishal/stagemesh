@@ -331,3 +331,48 @@ def test_recover_implementation_identity_cli_records_audit_without_provider(tmp_
     assert "fixture-secret" not in blob
     assert reopened.conn.execute(
         "SELECT COUNT(*) FROM audit_events WHERE event_type='candidate.implementation_identity_reconstructed'").fetchone()[0] == 1
+
+
+def test_recover_implementation_identity_rejects_missing_configured_executable_relocation(tmp_path: Path, monkeypatch) -> None:
+    from stagemesh.operator_actions import OperatorActionError, recover_implementation_identity
+    from stagemesh.providers import RuntimeCommandAdapter
+
+    project, store, _ = _with_baseline(tmp_path)
+    real_python = sys.executable
+    sha = _commit(project, {"docs/a.md": "legacy\n"})
+    store.add_candidate(TASK, sha, "codex", True)
+    execution = store.start_execution(
+        task_id=TASK, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, executable=real_python,
+        candidate_sha=sha, actor="codex",
+    )
+    store.finish_execution(execution, ExecutionStatus.SUCCEEDED, sha)
+
+    # 1. Nonexistent absolute path with same binary name as a valid PATH executable fails closed:
+    missing_cmd = str(tmp_path / "nonexistent" / Path(real_python).name)
+    adapter = RuntimeCommandAdapter("codex", (missing_cmd, "--run"))
+    with pytest.raises(OperatorActionError, match="recorded executable does not match the configured codex command"):
+        recover_implementation_identity(store, TASK, sha, execution, "reason", [adapter])
+
+    # 2. Nonexistent implement_command override fails closed:
+    adapter_override = RuntimeCommandAdapter("codex", ("python",), implement_command=(missing_cmd, "--run"))
+    with pytest.raises(OperatorActionError, match="recorded executable does not match the configured codex command"):
+        recover_implementation_identity(store, TASK, sha, execution, "reason", [adapter_override])
+
+    # 3. Same-name executable in a different directory fails closed:
+    other_exe = _fake_executable(tmp_path / "other", Path(real_python).stem)
+    adapter_other = RuntimeCommandAdapter("codex", (str(other_exe), "--run"))
+    with pytest.raises(OperatorActionError, match="recorded executable does not match the configured codex command"):
+        recover_implementation_identity(store, TASK, sha, execution, "reason", [adapter_other])
+
+    # 4. Bare unresolvable command fails closed:
+    adapter_unresolvable = RuntimeCommandAdapter("codex", ("nonexistent-binary-xyz", "--run"))
+    with pytest.raises(OperatorActionError, match="recorded executable does not match the configured codex command"):
+        recover_implementation_identity(store, TASK, sha, execution, "reason", [adapter_unresolvable])
+
+    # 5. Bare command resolving on PATH to a different executable fails closed:
+    substitute_bin = tmp_path / "substitute"
+    _fake_executable(substitute_bin, "codex")
+    monkeypatch.setenv("PATH", str(substitute_bin))
+    adapter_bare_sub = RuntimeCommandAdapter("codex", ("codex", "--run"))
+    with pytest.raises(OperatorActionError, match="recorded executable does not match the configured codex command"):
+        recover_implementation_identity(store, TASK, sha, execution, "reason", [adapter_bare_sub])

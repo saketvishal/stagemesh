@@ -366,16 +366,28 @@ def recover_implementation_identity(
     if len(matching) != 1:
         raise OperatorActionError(f"provider {producer} is not configured exactly once")
     adapter = matching[0]
-    command = adapter.command_for("code") if "code" in getattr(adapter, "capabilities", ()) else None
-    if not command:
+    if "code" not in getattr(adapter, "capabilities", ()):
+        raise OperatorActionError(f"provider {producer} has no configured implementation command")
+    configured = (
+        getattr(adapter, "implement_command", None)
+        if getattr(adapter, "implement_command", None) is not None
+        else getattr(adapter, "command", None)
+    )
+    if not configured and hasattr(adapter, "command_for"):
+        configured = adapter.command_for("code")
+    if not configured:
         raise OperatorActionError(f"provider {producer} has no configured implementation command")
     recorded = execution["executable"]
-    if not isinstance(recorded, str) or not recorded or not _same_executable(recorded, command[0]):
+    if not isinstance(recorded, str) or not recorded or not _same_executable(recorded, configured[0]):
         raise OperatorActionError(
             f"execution {execution_id} recorded executable does not match the configured {producer} command"
         )
+    command = adapter.command_for("code") if hasattr(adapter, "command_for") else configured
+    if not command:
+        raise OperatorActionError(f"provider {producer} has no configured implementation command")
     try:
-        snapshot = command_snapshot(producer, command, adapter.all_commands())
+        all_cmds = adapter.all_commands() if hasattr(adapter, "all_commands") else (command,)
+        snapshot = command_snapshot(producer, command, all_cmds)
     except ValueError as exc:
         raise OperatorActionError(f"provider {producer} command identity is unusable: {exc}") from exc
     report: dict[str, Any] = {
