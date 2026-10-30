@@ -215,6 +215,16 @@ def test_weekly_limit_phrase_is_quota_not_an_implementation_defect() -> None:
     assert is_cap is False and reason == "implementation_failure"
 
 
+def test_http_402_usage_exhaustion_is_quota_but_real_auth_failures_stay_auth() -> None:
+    from stagemesh.execution import classify_failure
+
+    wrapped = "authentication wrapper: request failed\nAPI error (status 402 Payment Required): Grok Build usage balance exhausted"
+    assert classify_failure(1, stderr=wrapped) == (True, "quota_rate_limit")
+    assert classify_failure(1, stderr="401 Unauthorized: invalid api key") == (True, "authentication_failure")
+    assert classify_failure(1, stderr="403 Forbidden") == (True, "authentication_failure")
+    assert classify_failure(1, stderr="authentication_error: not logged in") == (True, "authentication_failure")
+
+
 def test_weekly_limit_falls_through_to_the_next_provider_without_naming_it(tmp_path: Path) -> None:
     rig = Rig(tmp_path, {"provider-a": "weekly-limit", "provider-b": "ok"}, pools={IMPLEMENT: ("provider-a", "provider-b"), REVIEW: ("provider-b",)})
 
