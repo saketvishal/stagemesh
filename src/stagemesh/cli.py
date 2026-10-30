@@ -2135,6 +2135,7 @@ def command_cooldown(args: argparse.Namespace) -> int:
 
 def command_retry_task(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
     task = store.get_task(args.task)
@@ -2146,7 +2147,6 @@ def command_retry_task(args: argparse.Namespace) -> int:
         print(f"task is not blocked: {args.task} (status {task['status']})", file=sys.stderr)
         store.close()
         return 2
-    config = load_config(project)
     try:
         _sync_all_sources(store, project, config, args.task)
     except Exception:
@@ -2180,7 +2180,11 @@ def command_retry_task(args: argparse.Namespace) -> int:
         )
         store.close()
         return 2
-    resume_task(store, args.task)
+    resume_task(
+        store,
+        args.task,
+        adverse_policy=config.adverse_review if config.require_independent_review else None,
+    )
     task = store.get_task(args.task)
     if args.json:
         print(json.dumps({"task_id": args.task, "status": task["status"], "stage": task["stage"]}, sort_keys=True))
