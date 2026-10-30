@@ -23,8 +23,19 @@ python -m pip install -e ".[dev]"
 Or install the known-good stable package tag:
 
 ```bash
-python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.4.0"
+python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.5.0"
 ```
+
+On Windows, the reviewed per-user installer creates an isolated runtime and a Start Menu shortcut without administrator rights:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-stagemesh.ps1
+```
+
+The default package source is pinned to the exact reviewed desktop-launcher commit. A different Git source must pin a 40-character commit;
+a wheel source requires `-WheelSha256`. Preview the exact paths without changing the machine with `-Action Plan -Json`, and remove
+only an installer-owned runtime and shortcut with `-Action Uninstall`. The shortcut opens the project passed with `-Project` (the
+current directory by default). Installing the application never enables a StageMesh schedule.
 
 See [docs/versioning.md](docs/versioning.md) for the stable-tag workflow.
 
