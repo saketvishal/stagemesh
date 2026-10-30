@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 from test_review_terminalization import TASK, JsonReviewAdapter, _project_with_candidate
@@ -605,8 +607,10 @@ def test_real_reconstruction_preserves_origin_only_after_success(tmp_path, confl
 @pytest.fixture
 def legacy_rig(role_rig):
     _, store, candidate, _, pool, _, _ = role_rig
+    executable = str(Path(sys.executable).resolve(strict=True))
+    pool.adapters["codex"].command = (executable, "codex")
     execution = store.conn.execute("SELECT id FROM executions WHERE kind='IMPLEMENTATION'").fetchone()["id"]
-    store.conn.execute("UPDATE executions SET executable='C:/tools/controlled-review.exe' WHERE id=?", (execution,))
+    store.conn.execute("UPDATE executions SET executable=? WHERE id=?", (executable, execution))
     store.conn.execute("DELETE FROM audit_events WHERE event_type=?", (IMPLEMENTATION_IDENTITY,))
     store.conn.commit()
     return role_rig, execution, list(pool.adapters.values())
