@@ -4,16 +4,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
+from test_distinct_review_roles import ControlledAdapter
 from test_parallel import Rig, ScriptedExecutor
 from test_review_reliability import ScriptedReviewAdapter, _coordinator
 
 from stagemesh.block_kinds import BlockKind, classify_block
+from stagemesh.config import AdverseReviewPolicy
 from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
+from stagemesh.domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    ExecutionStatus,
+    Stage,
+    TaskStatus,
+)
+from stagemesh.provider_pool import REVIEW, ProviderLog, ProviderPool
 from stagemesh.recovery import _resume_at_validate, resume_task
-from stagemesh.review import INFRASTRUCTURE_FAILURE
+from stagemesh.review import INFRASTRUCTURE_FAILURE, Reviewer
+from stagemesh.review_identity import command_snapshot, record_implementation_identity
 
 TASK = "TASK-1"
 
@@ -99,6 +109,61 @@ def test_stage_specific_resumption_resumes_validated_candidate_directly_at_revie
         "SELECT COUNT(*) FROM executions WHERE task_id=? AND kind=?", (TASK, ExecutionKind.VALIDATION)
     ).fetchone()[0]
     assert val_count == 1
+
+
+def test_resume_requires_verified_adverse_pair_when_policy_is_configured(tmp_path: Path) -> None:
+    """A normal-role PASS alone cannot let retry-task skip the required adverse role."""
+    rig = Rig(tmp_path, [TASK])
+    executor = ScriptedExecutor(rig.files)
+    coord = _coordinator(rig, executor, ScriptedReviewAdapter('{"decision":"PASS"}'))
+    policy = AdverseReviewPolicy()
+
+    _advance_to_stage(rig, coord, TASK, Stage.REVIEW)
+    candidate_sha = rig.store.latest_candidate(TASK)["sha"]
+    producer = rig.store.conn.execute(
+        "SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (TASK, candidate_sha)
+    ).fetchone()["produced_by"]
+    implementation = rig.store.start_execution(
+        task_id=TASK,
+        claim_id=None,
+        kind=ExecutionKind.IMPLEMENTATION,
+        candidate_sha=candidate_sha,
+        actor=producer,
+    )
+    rig.store.finish_execution(implementation, ExecutionStatus.SUCCEEDED, candidate_sha, actor=producer)
+    record_implementation_identity(
+        rig.store,
+        TASK,
+        candidate_sha,
+        implementation,
+        command_snapshot(producer, ("scripted-implementation",)),
+    )
+    pool = ProviderPool(
+        [ControlledAdapter("claude"), ControlledAdapter("grok")],
+        {REVIEW: ("claude", "grok")},
+        policy="priority",
+        log=ProviderLog(echo=False),
+    )
+    reviewer = Reviewer(
+        review_pool=pool,
+        require_independent=True,
+        separate_roles=True,
+        adverse_policy=policy,
+    )
+    normal_status = reviewer.review(rig.store, TASK, candidate_sha, rig.project)
+    assert normal_status == EvidenceStatus.PASSED
+    rig.store.block_task(TASK)
+
+    normal_only = resume_task(rig.store, TASK, adverse_policy=policy)
+    assert normal_only == {"unblocked": True, "stage": Stage.REVIEW}
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.OPEN
+
+    assert reviewer.review(rig.store, TASK, candidate_sha, rig.project) == EvidenceStatus.PASSED
+    rig.store.block_task(TASK)
+
+    complete_pair = resume_task(rig.store, TASK, adverse_policy=policy)
+    assert complete_pair == {"unblocked": True, "stage": Stage.INTEGRATE}
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.OPEN
 
 
 def test_resume_at_validate_advances_validated_candidate_to_review(tmp_path: Path) -> None:
