@@ -40,6 +40,33 @@ execution; this document does not change frozen contracts.
 These contracts overlap deliberately: a shared test file can exercise more than
 one boundary. Listing them does not claim they were all run for this slice.
 
+## Machine-readable plan evidence
+
+`ValidationPlan.to_dict()` exposes the audited map as three additive JSON arrays:
+
+| Field | Meaning |
+| --- | --- |
+| `affected_components` | Stable names: `planning`, `validation_execution`, `review`. |
+| `direct_test_targets` | Repository-relative pytest targets from the matching direct-check rows above. |
+| `dependent_test_targets` | Repository-relative pytest targets from the matching dependent-check rows above. |
+
+Each array is sorted and de-duplicated independently. A target can appear in both
+test arrays when it has both roles across affected components. Matching uses only
+the three exact source paths above, normalizing Windows separators and case in
+the same way as existing planner classification. Client modules, helper names,
+directories, glob patterns and test filenames do not infer component membership.
+Concrete changed files take precedence; when none are supplied, matching uses
+the contract's allowed scope, as classification already does.
+
+Unmapped or cross-cutting paths contribute no inferred names or targets. In mixed
+scope, these arrays describe only the exact audited roots present, not all impact.
+An empty array means no audited match, not that validation is unnecessary. Existing
+escalation reasons, including explicit unknown-impact reasons, remain unchanged.
+These fields invent no commands, select no gates and claim no transitive coverage
+or execution result. Required checks and executable invariants keep their existing
+semantics, and `with_required_checks` retains the evidence fields. Validator
+evidence and CLI JSON expose the fields through their existing plan serialization.
+
 ## Escalation and unknown impact
 
 | Trigger | Reason to record / required response |
@@ -57,10 +84,9 @@ manufactured from this table. No test commands are invented for unknown impact.
 If broader coverage is missing from a frozen contract, use the existing approved
 contract revision/rebind process; do not silently narrow or rewrite it.
 
-The only runtime code change in this slice adds the exact StageMesh `review.py`
-path to the existing core path list, alongside planning and validation. It does
-not match arbitrary client review modules or similarly named helper files.
-Provider names and client-specific suites are not introduced. Authorization,
+All three exact StageMesh source paths remain in the existing core path list.
+The machine-readable map adds evidence only; it does not change classification
+or gate selection. Provider names and client-specific suites are not introduced. Authorization,
 independent review requirements and candidate identity remain unchanged.
 
 ## Measured boundary and follow-up
@@ -71,6 +97,8 @@ slice, not transitive dependency coverage, coverage percentage or speedup.
 The added planner regressions exercise all three roots with four declaration
 states, allowed-scope fallback, concrete changed files and Windows separators;
 they also cover explicit unknown escalation and unrelated client/helper paths.
+Evidence regressions additionally cover exact target lists, deterministic unions,
+changed-file precedence, mixed and unmapped scope, and persistence through Validator.
 
 Still unmeasured: the full coordinator/integration call graph, dynamic adapter
 behavior, CLI end-to-end behavior, all shared storage/schema dependencies, and
