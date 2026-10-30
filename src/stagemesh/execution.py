@@ -57,10 +57,10 @@ _QUOTA = re.compile(
     re.IGNORECASE,
 )
 # HTTP 402 that explicitly says the balance is spent; wins over generic auth wording in wrappers.
+# Two independent linear searches (marker and exhaustion text) avoid quadratic backtracking.
+_PAYMENT_MARKER = re.compile(r"\b402\b|payment required", re.IGNORECASE)
 _PAYMENT_EXHAUSTED = re.compile(
-    r"(?=[\s\S]*(?:\b402\b|payment required))"
-    r"[\s\S]*(?:balance[^\n]{0,20}exhausted|out of credits|insufficient credits)",
-    re.IGNORECASE,
+    r"balance[^\n]{0,20}exhausted|out of credits|insufficient credits", re.IGNORECASE
 )
 _SECRET = re.compile(r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+")
 _RETRY = re.compile(r"(?i)(?:resets\s+[^\n]{1,80}|retry[- ]after[:\s]+[^\n]{1,40})")
@@ -110,7 +110,7 @@ def classify_failure(
     if any(m in combined for m in ["not found", "no such file or directory", "command not found", "cannot find"]):
         return True, "provider_unavailable"
 
-    if _PAYMENT_EXHAUSTED.search(combined):
+    if _PAYMENT_MARKER.search(combined) and _PAYMENT_EXHAUSTED.search(combined):
         return True, "quota_rate_limit"
 
     if any(m in combined for m in [
