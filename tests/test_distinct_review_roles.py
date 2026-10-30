@@ -612,11 +612,11 @@ def legacy_rig(role_rig):
     return role_rig, execution, list(pool.adapters.values())
 
 
-def _recover(rig, execution, adapters, **overrides):
+def _recover(rig, execution_id, adapters, **overrides):
     from stagemesh.operator_actions import recover_implementation_identity
 
     _, store, candidate, *_ = rig
-    args = {"task": TASK, "candidate": candidate, "execution": execution, "reason": "operator inspected legacy run"}
+    args = {"task": TASK, "candidate": candidate, "execution": execution_id, "reason": "operator inspected legacy run"}
     args.update(overrides)
     return recover_implementation_identity(store, args["task"], args["candidate"], args["execution"], args["reason"], adapters)
 
@@ -628,11 +628,17 @@ def test_recovered_legacy_identity_is_audited_and_review_stays_independent(legac
     before = tuple(store.conn.execute("SELECT * FROM candidates WHERE sha=?", (candidate,)).fetchone())
     report = _recover(rig, execution, adapters)
     assert report["recovered"] and report["provider_invoked"] is False
+    assert all(not adapter.calls for adapter in adapters)
+    assert not _gate(rig).allowed
     identity = implementation_identity(store, TASK, candidate)
     assert identity["provider"] == "codex" and identity["execution_ids"] == [execution]
     audit = store.conn.execute("SELECT payload FROM audit_events WHERE event_type='candidate.implementation_identity_reconstructed'").fetchall()
     assert len(audit) == 1 and "controlled-review" not in audit[0]["payload"] and "operator inspected" in audit[0]["payload"]
+    assert _run(rig) == EvidenceStatus.PASSED
+    assert len(pool.adapters["claude"].calls) == 1 and not pool.adapters["grok"].calls
+    assert not _gate(rig).allowed
     assert _run(rig) == EvidenceStatus.PASSED and _gate(rig).allowed
+    assert len(pool.adapters["claude"].calls) == len(pool.adapters["grok"].calls) == 1
     assert not pool.adapters["codex"].calls
     assert tuple(store.conn.execute("SELECT * FROM candidates WHERE sha=?", (candidate,)).fetchone()) == before
 
