@@ -628,10 +628,14 @@ def test_audited_component_evidence_preserves_required_checks_with_mixed_scope()
         contract, ("src/stagemesh/review.py", "src/stagemesh/contracts.py", "src/unknown.py"),
     )
 
-    # Only the exact audited root contributes evidence, not its shared dependencies.
-    assert mixed.to_dict() == known.to_dict()
+    assert known.to_dict()["affected_components"] == ["review"]
+    # An unaudited production path makes the mapping incomplete, so the evidence
+    # fails closed instead of presenting a partial set as the affected test map.
+    assert mixed.to_dict()["affected_components"] == []
+    assert mixed.to_dict()["direct_test_targets"] == []
+    assert mixed.to_dict()["dependent_test_targets"] == []
     required = with_required_checks(contract, mixed)
-    assert required.to_dict()["affected_components"] == ["review"]
+    assert required.to_dict()["affected_components"] == []
     assert required.direct_test_targets == mixed.direct_test_targets
     assert required.dependent_test_targets == mixed.dependent_test_targets
     assert required.escalation_reasons == ("unknown impact: shared contract callers",)
