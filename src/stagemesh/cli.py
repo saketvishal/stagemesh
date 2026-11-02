@@ -2128,6 +2128,40 @@ def command_retry_task(args: argparse.Namespace) -> int:
         print(f"task is not blocked: {args.task} (status {task['status']})", file=sys.stderr)
         store.close()
         return 2
+    config = load_config(project)
+    try:
+        _sync_all_sources(store, project, config, args.task)
+    except Exception:
+        pass
+    task = store.get_task(args.task)
+    if task is None:
+        print(f"task does not exist: {args.task}", file=sys.stderr)
+        store.close()
+        return 2
+    from .objective_roots import objective_root_reason
+    from .scheduling import _source_refusal_reason
+
+    obj_reason = objective_root_reason(store, task)
+    if obj_reason:
+        print(
+            f"retry refused: task {args.task} is an objective root ({obj_reason}); "
+            "plan child tasks (stagemesh plan) instead of retrying directly",
+            file=sys.stderr,
+        )
+        store.close()
+        return 2
+    source_reason = _source_refusal_reason(store, task)
+    if source_reason:
+        state = store.source_state(str(task["source"]), str(task["source_id"])) if task["source"] and task["source_id"] else {}
+        detail = state.get("eligibility_reason")
+        reason_msg = f"{source_reason} ({detail})" if detail and detail not in source_reason else source_reason
+        print(
+            f"retry refused: task {args.task} cannot be unblocked because {reason_msg}; "
+            "resolve the source condition before retrying",
+            file=sys.stderr,
+        )
+        store.close()
+        return 2
     resume_task(store, args.task)
     task = store.get_task(args.task)
     if args.json:

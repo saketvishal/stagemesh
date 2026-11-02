@@ -927,10 +927,21 @@ def run_ready(
         selected = selection.task_id
         recovered.extend(_recover_dead(store, selected))  # this runner is about to drive it: an owner-less stage row is its own
         if store.get_task(selected)["status"] == TaskStatus.BLOCKED:
+            from .block_kinds import classify_block
+            from .scheduling import _source_refusal_reason
+            from .observability import _latest_blocked_reason
+
+            block_info = classify_block(store, selected)
+            block_reason = block_info.reason if block_info else None
+            source_reason = _source_refusal_reason(store, store.get_task(selected))
+            specific_reason = block_reason or source_reason or _latest_blocked_reason(store, selected)
+            if specific_reason and specific_reason != "blocked":
+                message = f"task {selected} is BLOCKED ({specific_reason}); inspect diagnosis and use retry-task after remediation"
+            else:
+                message = f"task {selected} is BLOCKED; inspect diagnosis and use retry-task after remediation"
             raise RunReadyRefusal(
                 "task_blocked",
-                exhaustion_message(store, selected)
-                or f"task {selected} is BLOCKED; inspect diagnosis and use retry-task after remediation",
+                exhaustion_message(store, selected) or message,
                 task_id=selected,
             )
         if outside_label_selector(store, store.get_task(selected), policy.required_label if policy is not None else None):

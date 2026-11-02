@@ -109,7 +109,7 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
     """The kind of the task's current block, or None when its cause was not recorded (such a block is never retried automatically)."""
     reset = _last_reset(store, task_id)
     rows = store.conn.execute(
-        "SELECT event_type, payload FROM audit_events WHERE event_type IN (?, 'task.remediation_exhausted', 'task.diagnosis_stop', 'task.blocked') "
+        "SELECT event_type, payload FROM audit_events WHERE event_type IN (?, 'task.remediation_exhausted', 'task.diagnosis_stop', 'task.blocked', 'task.source_retired') "
         "AND created_at>=? ORDER BY created_at DESC, rowid DESC LIMIT 300",
         (BLOCK_EVENT, reset),
     )
@@ -141,6 +141,11 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
 
 def _legacy(event: str, payload: dict[str, Any]) -> BlockInfo:
     """Blocks written before kinds were recorded: remediation budgets and integration states are operational, scope and safety are not."""
+    if event == "task.source_retired":
+        reason = str(payload.get("reason") or "source retired")
+        if payload.get("objective_root") or "objective root" in reason:
+            return BlockInfo(BlockKind.HUMAN_DECISION, reason, f"legacy:{event}")
+        return BlockInfo(BlockKind.EXTERNAL_DEPENDENCY, reason, f"legacy:{event}")
     if event == "task.blocked":
         reason = str(payload.get("reason", "blocked by a safety rule"))
         if reason == EXTERNAL_WORKSPACE_MUTATION:

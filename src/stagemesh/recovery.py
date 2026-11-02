@@ -899,6 +899,11 @@ def _recommend(report: dict[str, Any], task_id: str, ref: str | None) -> tuple[s
     if report["baseline"].get("stale"):
         return f"stagemesh rebaseline-task --task {task_id} --to {ref}", "the baseline is stale: other work's files appear in this task's diff"
     if report["status"] == "BLOCKED":
+        block = report.get("block")
+        if block and block["kind"] == "BLOCKED_EXTERNAL_DEPENDENCY":
+            return f"stagemesh retry-task --task {task_id}", f"external condition not met: {block['reason']}; resolve condition before retrying"
+        if block and block["kind"] == "BLOCKED_HUMAN_DECISION" and "objective root" in str(block["reason"]):
+            return "stagemesh plan", f"task {task_id} is an objective root ({block['reason']}); plan child tasks instead"
         return f"stagemesh retry-task --task {task_id}", diagnosis["recommendation"] if diagnosis else "task is blocked; unblock it once the cause is fixed"
     if contract["frozen"] is None and contract["file"]["path"] is None:
         return "stagemesh continue", "no contract yet; continue auto-plans one deterministically"
