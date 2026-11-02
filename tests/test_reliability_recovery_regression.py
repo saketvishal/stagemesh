@@ -154,3 +154,44 @@ def test_selection_scope_raises_transient_scope_error_on_unknown(tmp_path: Path)
         assert "source sync temporarily unavailable: mock-github (UNKNOWN)" in str(exc_info.value)
         assert exc_info.value.retry_after == 1500.0
         assert mock_store.selection_fresh is False
+
+
+def test_bind_candidate_spec_manifest_fail_closed_on_scope_drift(tmp_path: Path) -> None:
+    from stagemesh.spec_integrity import bind_candidate_spec_manifest
+
+    project = tmp_path
+    (project / ".stagemesh" / "contracts").mkdir(parents=True)
+    task_manifest = project / ".stagemesh" / "contracts" / "424.spec_manifest.json"
+    task_manifest.write_text("{}", encoding="utf-8")
+
+    store = MagicMock()
+    contract = MagicMock()
+    contract.allowed_files = ["src/**"]
+    contract.forbidden_files = [".git/**"]
+
+    prereq = {
+        "assessment": "structural-only",
+        "adapter": {"name": "openspec", "version": "layout-v1"},
+        "owners": ["owner_a"],
+        "requirements": ["req_1"],
+    }
+
+    # Discovering different owners must fail closed
+    with patch("stagemesh.spec_integrity.resolve_pinned_adapter") as mock_resolve, \
+         patch("stagemesh.contracts.candidate_workspace") as mock_ws, \
+         patch("stagemesh.spec_integrity.structural_impact_manifest") as mock_impact:
+        mock_impact.return_value = {
+            "adapter": {"name": "openspec", "version": "layout-v1"},
+            "owners": ["owner_b"],  # DRIFT
+            "requirements": ["req_1"],
+            "unresolved_references": [],
+            "candidate_revision": "cand123",
+            "base_revision": "base123",
+            "changed_files": ["src/app.py"],
+            "unmapped_files": ["src/app.py"],
+        }
+        bound, errors = bind_candidate_spec_manifest(
+            store, project, "424", "cand123", "base123", contract, ["src/app.py"], prereq
+        )
+        assert bound is None
+        assert any("owners" in e for e in errors)

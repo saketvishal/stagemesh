@@ -175,58 +175,66 @@ class Validator:
             spec_verdict = None
             if prerequisite_manifest is not None:
                 from .spec_integrity import (
+                    bind_candidate_spec_manifest,
                     resolve_pinned_adapter,
                     validate_manifest_discovery,
                     validate_prerequisite_manifest,
                 )
-                if isinstance(prerequisite_manifest, dict) and prerequisite_manifest.get("assessment") == "structural-only":
-                    from .contracts import _matches
-                    if all(_matches(f, contract.allowed_files) for f in inspected_files):
-                        prerequisite_manifest["candidate_revision"] = candidate_sha
-                        prerequisite_manifest["changed_files"] = list(inspected_files)
-                        prerequisite_manifest["unmapped_files"] = [f for f in inspected_files if not ("openspec/" in f or f == "adapter.json")]
-                        task_manifest_path = project / ".stagemesh" / "contracts" / f"{task_id}.spec_manifest.json"
-                        if task_manifest_path.is_file():
-                            try:
-                                task_manifest_path.write_text(json.dumps(prerequisite_manifest, indent=2), encoding="utf-8")
-                            except OSError:
-                                pass
-
                 discovery_errors: tuple[str, ...] = ()
-                if isinstance(prerequisite_manifest, dict):
-                    adapter_info = prerequisite_manifest.get("adapter", {})
+                if (
+                    isinstance(prerequisite_manifest, dict)
+                    and prerequisite_manifest.get("candidate_revision") != candidate_sha
+                ):
+                    bound_manifest, bind_errors = bind_candidate_spec_manifest(
+                        store,
+                        project,
+                        task_id,
+                        candidate_sha,
+                        bound.baseline_sha,
+                        contract,
+                        inspected_files,
+                        prerequisite_manifest,
+                    )
+                    if bound_manifest is not None:
+                        prerequisite_manifest = bound_manifest
+                    elif bind_errors:
+                        discovery_errors = bind_errors
                 else:
-                    adapter_info = {}
-                if isinstance(adapter_info, dict) and isinstance(prerequisite_manifest, dict):
-                    name = adapter_info.get("name")
-                    version = adapter_info.get("version")
-                    if isinstance(name, str) and isinstance(version, str):
-                        try:
-                            adapter = resolve_pinned_adapter(
-                                name,
-                                version,
-                                contract_path=adapter_info.get("contract_path")
-                                or prerequisite_manifest.get("contract_path")
-                                or "adapter.json",
-                            )
-                            with candidate_workspace(project, bound.baseline_sha) as baseline_project:
-                                before_snapshot = adapter.discover(baseline_project)
-                            with candidate_workspace(project, candidate_sha) as candidate_project:
-                                after_snapshot = adapter.discover(candidate_project)
-                            discovery_errors = validate_manifest_discovery(
-                                prerequisite_manifest,
-                                before_snapshot,
-                                after_snapshot,
-                                inspected_files,
-                                base_revision=bound.baseline_sha,
-                                candidate_revision=candidate_sha,
-                            )
-                        except Exception as exc:
-                            findings.append({
-                                "severity": "error",
-                                "code": "spec_adapter_validation_failed",
-                                "message": f"pinned adapter validation failed: {exc}",
-                            })
+                    adapter_info = (
+                        prerequisite_manifest.get("adapter", {})
+                        if isinstance(prerequisite_manifest, dict)
+                        else {}
+                    )
+                    if isinstance(adapter_info, dict) and isinstance(prerequisite_manifest, dict):
+                        name = adapter_info.get("name")
+                        version = adapter_info.get("version")
+                        if isinstance(name, str) and isinstance(version, str):
+                            try:
+                                adapter = resolve_pinned_adapter(
+                                    name,
+                                    version,
+                                    contract_path=adapter_info.get("contract_path")
+                                    or prerequisite_manifest.get("contract_path")
+                                    or "adapter.json",
+                                )
+                                with candidate_workspace(project, bound.baseline_sha) as baseline_project:
+                                    before_snapshot = adapter.discover(baseline_project)
+                                with candidate_workspace(project, candidate_sha) as candidate_project:
+                                    after_snapshot = adapter.discover(candidate_project)
+                                discovery_errors = validate_manifest_discovery(
+                                    prerequisite_manifest,
+                                    before_snapshot,
+                                    after_snapshot,
+                                    inspected_files,
+                                    base_revision=bound.baseline_sha,
+                                    candidate_revision=candidate_sha,
+                                )
+                            except Exception as exc:
+                                findings.append({
+                                    "severity": "error",
+                                    "code": "spec_adapter_validation_failed",
+                                    "message": f"pinned adapter validation failed: {exc}",
+                                })
 
                 spec_verdict = validate_prerequisite_manifest(
                     prerequisite_manifest,

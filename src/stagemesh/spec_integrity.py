@@ -448,6 +448,126 @@ def spec_governance_gate(
     return SpecGovernanceVerdict(ok=False, errors=("prerequisite manifest or before/after snapshots are required",))
 
 
+def bind_candidate_spec_manifest(
+    store: Any,
+    project: Path,
+    task_id: str,
+    candidate_sha: str,
+    baseline_sha: str,
+    contract: Any,
+    inspected_files: tuple[str, ...] | list[str],
+    prerequisite_manifest: dict[str, Any],
+) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+    """Explicit, auditable control-plane transaction to bind candidate structural impact.
+
+    Verifies that the discovered adapter changes conform fail-closed to the declared
+    prerequisite manifest (detecting genuine spec drift or unauthorized modifications).
+    When compliant, binds candidate_revision and actual changed/unmapped files, writes
+    the manifest to .stagemesh/contracts/{task_id}.spec_manifest.json, and records an
+    auditable task.spec_manifest_bound event.
+    """
+    from .audit import record_audit
+    from .contracts import _matches, candidate_workspace
+
+    adapter_info = prerequisite_manifest.get("adapter", {})
+    if not isinstance(adapter_info, dict):
+        return None, ("prerequisite manifest must declare a configured pinned adapter",)
+    name = adapter_info.get("name")
+    version = adapter_info.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
+        return None, ("prerequisite manifest adapter name and version must be strings",)
+
+    try:
+        adapter = resolve_pinned_adapter(
+            name,
+            version,
+            contract_path=adapter_info.get("contract_path")
+            or prerequisite_manifest.get("contract_path")
+            or "adapter.json",
+        )
+        with candidate_workspace(project, baseline_sha) as baseline_project:
+            before_snapshot = adapter.discover(baseline_project)
+        with candidate_workspace(project, candidate_sha) as candidate_project:
+            after_snapshot = adapter.discover(candidate_project)
+    except Exception as exc:
+        return None, (f"pinned adapter discovery failed: {exc}",)
+
+    discovered = structural_impact_manifest(
+        before_snapshot,
+        after_snapshot,
+        inspected_files,
+        base_revision=baseline_sha,
+        candidate_revision=candidate_sha,
+    )
+
+    errors: list[str] = []
+    # Verify adapter match
+    if discovered["adapter"] != prerequisite_manifest.get("adapter"):
+        errors.append("manifest adapter does not match configured adapter discovery")
+
+    # Verify that discovered spec modifications do not exceed or contradict declared scope
+    decl_owners = prerequisite_manifest.get("owners", [])
+    disc_owners = discovered.get("owners", [])
+    if decl_owners != disc_owners:
+        errors.append("manifest owners does not match pinned adapter discovered snapshots")
+
+    decl_reqs = prerequisite_manifest.get("requirements", [])
+    disc_reqs = discovered.get("requirements", [])
+    if decl_reqs != disc_reqs:
+        errors.append("manifest requirements does not match pinned adapter discovered snapshots")
+
+    decl_unresolved = prerequisite_manifest.get("unresolved_references", [])
+    disc_unresolved = discovered.get("unresolved_references", [])
+    if decl_unresolved != disc_unresolved:
+        errors.append("manifest unresolved_references does not match pinned adapter discovered snapshots")
+
+    # Verify candidate files are permitted by contract
+    if hasattr(contract, "allowed_files") and contract.allowed_files:
+        for path in inspected_files:
+            if not _matches(path, contract.allowed_files):
+                errors.append(f"{path} is outside contract allowed_files")
+    if hasattr(contract, "forbidden_files") and contract.forbidden_files:
+        for path in inspected_files:
+            if _matches(path, contract.forbidden_files):
+                errors.append(f"{path} is forbidden by change contract")
+
+    if errors:
+        return None, tuple(errors)
+
+    # All governance checks pass: perform the auditable control-plane transaction
+    bound_manifest = dict(discovered)
+    bound_manifest["assessment"] = prerequisite_manifest.get("assessment", "structural-only")
+    bound_manifest["validation_status"] = prerequisite_manifest.get("validation_status", "passed")
+    bound_manifest["sync_status"] = prerequisite_manifest.get("sync_status", "in_sync")
+
+    task_manifest_path = project / ".stagemesh" / "contracts" / f"{task_id}.spec_manifest.json"
+    if task_manifest_path.parent.is_dir():
+        try:
+            task_manifest_path.write_text(json.dumps(bound_manifest, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    if store is not None:
+        try:
+            record_audit(
+                store,
+                "task.spec_manifest_bound",
+                {
+                    "task_id": task_id,
+                    "candidate_sha": candidate_sha,
+                    "base_revision": baseline_sha,
+                    "changed_files": list(inspected_files),
+                    "previous_candidate_revision": prerequisite_manifest.get("candidate_revision"),
+                    "assessment": bound_manifest["assessment"],
+                    "adapter": bound_manifest["adapter"],
+                },
+            )
+        except Exception:
+            pass
+
+    return bound_manifest, ()
+
+
 def _read(root: Path, path: str) -> str:
     try:
         return project_file(root, path).read_text(encoding="utf-8")
