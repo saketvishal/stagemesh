@@ -114,8 +114,8 @@ class ScopedReviewPool:
         self.pool = pool
         self.supervisor = supervisor
 
-    def review_adapter(self, store: Store, task_id: str, candidate_sha: str, implementer: str | None):
-        adapter, verdicts = self.pool.review_adapter(store, task_id, candidate_sha, implementer)
+    def review_adapter(self, store: Store, task_id: str, candidate_sha: str, implementer: str | None, **kwargs: Any):
+        adapter, verdicts = self.pool.review_adapter(store, task_id, candidate_sha, implementer, **kwargs)
         return (ScopedReviewAdapter(adapter, self.supervisor) if adapter is not None else adapter), verdicts
 
     def __getattr__(self, item: str) -> Any:

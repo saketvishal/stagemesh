@@ -195,3 +195,24 @@ def test_bind_candidate_spec_manifest_fail_closed_on_scope_drift(tmp_path: Path)
         )
         assert bound is None
         assert any("owners" in e for e in errors)
+
+
+def test_scoped_review_pool_forwards_kwargs_to_underlying_pool() -> None:
+    from stagemesh.autonomy.review_adapter import ScopedReviewPool
+
+    mock_pool = MagicMock()
+    mock_pool.review_adapter.return_value = (None, [])
+    scoped = ScopedReviewPool(mock_pool, None)
+
+    store = MagicMock()
+    scoped.review_adapter(
+        store, "424", "cand123", "claude",
+        excluded_providers=("agy",),
+        excluded_command_digests=("digest1",),
+    )
+
+    mock_pool.review_adapter.assert_called_once_with(
+        store, "424", "cand123", "claude",
+        excluded_providers=("agy",),
+        excluded_command_digests=("digest1",),
+    )
