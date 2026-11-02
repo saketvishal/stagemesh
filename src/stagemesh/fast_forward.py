@@ -11,7 +11,7 @@ from urllib.parse import quote, urlparse
 from .autonomy.ci_diagnosis import Conclusion
 from .autonomy.decisions import Action
 from .autonomy.dependencies import MergeOutcome, PRState
-from .autonomy.github_adapter import GitHubHostedCI, GitHubPullRequests
+from .autonomy.github_adapter import GitHubAuthorizationError, GitHubHostedCI, GitHubPullRequests
 from .autonomy.merge_policy import IntegrationPolicy
 from .autonomy.review_policy import severity_blocks
 from .autonomy.supervisor import Supervisor
@@ -163,7 +163,13 @@ class FastForwardPullRequests(GitHubPullRequests):
         for ref, required in refs:
             rules = []
             for page in range(1, 21):
-                status, payload = self._request("GET", f"/rules/branches/{quote(ref, safe='')}?per_page=100&page={page}")
+                try:
+                    status, payload = self._request("GET", f"/rules/branches/{quote(ref, safe='')}?per_page=100&page={page}")
+                except GitHubAuthorizationError as exc:
+                    if "upgrade to github pro" in str(exc).casefold() or "make this repository public" in str(exc).casefold():
+                        return ("hosted_branch_policy_unavailable: GitHub requires GitHub Pro for branch protection on private repositories. "
+                                "Use StageMesh-controlled automatic landing instead (--merge-policy stagemesh or configure merging.mode to 'stagemesh').")
+                    return f"hosted_branch_policy_unauthorized: {exc}"
                 if status != 200 or not isinstance(payload, list):
                     return "hosted_branch_policy_unavailable"
                 rules.extend(payload)
@@ -199,7 +205,13 @@ class FastForwardPullRequests(GitHubPullRequests):
                         requirements.add((check["context"], check.get("integration_id")))
             if not required <= protected:
                 return "host_requires_no_rewrite_and_immutable_PR_heads"
-        status, classic = self._request("GET", f"/branches/{quote(self.branch, safe='')}/protection", missing_ok=True)
+        try:
+            status, classic = self._request("GET", f"/branches/{quote(self.branch, safe='')}/protection", missing_ok=True)
+        except GitHubAuthorizationError as exc:
+            if "upgrade to github pro" in str(exc).casefold() or "make this repository public" in str(exc).casefold():
+                return ("hosted_branch_policy_unavailable: GitHub requires GitHub Pro for branch protection on private repositories. "
+                        "Use StageMesh-controlled automatic landing instead (--merge-policy stagemesh or configure merging.mode to 'stagemesh').")
+            return f"hosted_branch_policy_unauthorized: {exc}"
         if status != 404:
             if status != 200 or not isinstance(classic, dict) or not (classic.get("enforce_admins") or {}).get("enabled"):
                 return "classic_branch_policy_unknown_or_bypassable"

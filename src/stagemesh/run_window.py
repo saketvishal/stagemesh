@@ -139,7 +139,10 @@ def resolve_merge_defaults(config: StageMeshConfig, args: Any) -> dict[str, Any]
     if manual and policy is not None:
         raise ValueError("--pr-only cannot be combined with --merge-policy")
     mode = ("pr_only" if manual else policy or
-            ("hosted" if getattr(args, "auto_merge_ff", False) else config.merging.mode))
+            (config.merging.mode if config.merging.mode != "pr_only"
+             else ("stagemesh" if (type(config.merging.check_app_id) is int and config.merging.check_app_id > 0)
+                   else "hosted") if getattr(args, "auto_merge_ff", False)
+             else "pr_only"))
     automatic = mode != "pr_only"
     checks = tuple(dict.fromkeys((*config.merging.required_checks,
         *(c.strip() for c in (getattr(args, "required_checks", "") or "").split(",") if c.strip()))))
@@ -776,11 +779,14 @@ def run_window(
     pending_records: list[TaskRecord] = []
     active_landing_recovery = None
     if options.auto_merge_ff and list_prs is not None:
-        pending = []
-        try:
-            if callable(getattr(merge_pr, "preflight", None)):
+        if callable(getattr(merge_pr, "preflight", None)):
+            try:
                 policy_error = merge_pr.preflight()
                 report.preflight.append(Check("hosted_landing_policy", policy_error is None, policy_error or f"{options.merge_policy} guarded exact-candidate landing policy"))
+            except Exception as exc:  # noqa: BLE001
+                report.preflight.append(Check("hosted_landing_policy", False, f"{type(exc).__name__}: {exc}"))
+        pending = []
+        try:
             pending = list_prs(project)
             active_probe = getattr(merge_pr, "active_recovery", None)
             active_landing_recovery = active_probe() if callable(active_probe) else None
@@ -1357,13 +1363,14 @@ def format_window_report(report: WindowReport) -> str:
         lines.append(f"  resumed {entry['task_id']} after the step cap (run {entry['attempt'] + 1}): stage {entry['stage']}, candidate {str(entry['candidate_sha'])[:7]}")
     if report.not_selected:
         ordered = sorted(report.not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))
-        lines.append(
-            "left alone: "  # one cause on several tasks is one entry, not a repeated request
-            + "; ".join(
-                f"{', '.join(entry['tasks'])} ({entry['reason']})"
-                for entry in consolidate_blockers(((task_id, str(reason)) for task_id, reason in ordered), exact=True)
-            )
-        )
+        consolidated = []
+        for entry in consolidate_blockers(((task_id, str(reason)) for task_id, reason in ordered), exact=True):
+            tasks = entry["tasks"]
+            if len(tasks) > 5 and ("outside label selector" in entry["reason"] or "outside" in entry["reason"]):
+                consolidated.append(f"{len(tasks)} tasks ({entry['reason']})")
+            else:
+                consolidated.append(f"{', '.join(tasks)} ({entry['reason']})")
+        lines.append("left alone: " + "; ".join(consolidated))
     for entry in report.follow_ups:
         if entry.get("state") in ("registered", "existing"):
             where = "scheduled" if entry.get("scheduled") else "NOT scheduled (" + str(entry.get("reason", "")) + ")"

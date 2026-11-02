@@ -1104,7 +1104,12 @@ def command_run_window(args: argparse.Namespace) -> int:
                 for c in checks:
                     print(f"[{'ok' if c.ok else 'FAIL' if c.fatal else 'warn'}] {c.name}: {c.detail}")
                 print("would run: " + (", ".join(picked) or "nothing (no eligible work)"))
-                for task_id, reason in sorted(skipped.items()):
+                outside_label = [t for t, r in skipped.items() if "outside label selector" in r]
+                other_skipped = {t: r for t, r in skipped.items() if "outside label selector" not in r}
+                if outside_label:
+                    label_desc = f" '{options.required_label}'" if options.required_label else ""
+                    print(f"left alone ({len(outside_label)} tasks): outside label selector{label_desc}")
+                for task_id, reason in sorted(other_skipped.items()):
                     print(f"left alone {task_id}: {reason}")
             return 0 if payload["ok"] else 2
         if not args.no_progress:  # progress goes to stderr, so the report (and --json) on stdout is unchanged
@@ -1816,7 +1821,14 @@ def _prepare_selection_scope(store, project, config, args, *, task_id=None):
             refresh(store)
             args.scope_report = preview(store, project, _selection_policy(config, args))
             if not getattr(args, "json", False):
-                print("active scope: " + json.dumps(args.scope_report, sort_keys=True), file=sys.stderr)
+                compact_scope = {
+                    "label": scope.label,
+                    "matching": args.scope_report.get("matching", 0),
+                    "eligible": args.scope_report.get("eligible", 0),
+                    "blocked": args.scope_report.get("blocked", 0),
+                    "excluded": args.scope_report.get("excluded", 0),
+                }
+                print("active scope: " + json.dumps(compact_scope, sort_keys=True), file=sys.stderr)
         return scope
     except ScopeError as exc:
         if getattr(args, "json", False):
