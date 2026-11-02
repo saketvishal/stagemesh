@@ -542,6 +542,8 @@ def _retirement_reason(task: DiscoveredTask, state: str) -> str | None:
     if state != "OPEN":
         return "source closed"
     if not task.eligible:
+        if task.eligibility_reason:
+            return f"source no longer eligible ({task.eligibility_reason})"
         return "source no longer eligible"
     return None
 
