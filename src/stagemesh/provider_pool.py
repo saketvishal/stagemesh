@@ -991,6 +991,8 @@ class PooledExecutor(Executor):
                     return ExecutionResult(
                         ExecutionStatus.SUCCEEDED,
                         failure_reason=TASK_ALREADY_SATISFIED,
+                        candidate_sha=proof["baseline_sha"],
+                        durable_handoff=True,
                         already_satisfied=True,
                         satisfaction={**proof, "provider": adapter.name, "task_id": task_id},
                     )

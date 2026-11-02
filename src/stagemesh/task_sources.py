@@ -6,6 +6,9 @@ import re
 import sys
 import time
 import urllib.error
+import http.client
+import random
+import socket
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +27,19 @@ from .objective_roots import (
 from .persistence import Store
 from .retry import RetryRegistry
 
+
+
+TRANSIENT_NETWORK_ERRORS = (
+    urllib.error.URLError,
+    http.client.RemoteDisconnected,
+    http.client.HTTPException,
+    ConnectionResetError,
+    ConnectionRefusedError,
+    ConnectionAbortedError,
+    TimeoutError,
+    socket.timeout,
+    OSError,
+)
 
 class TaskSourceValidationError(ValueError):
     pass
@@ -167,8 +183,10 @@ class GitHubApiIssueSource:
         self.repo = repo
         self.token = token
         self.now = time.time() if now is None else now
+        self.last_successful_sync: float | None = None
+        self.last_sync_error: str | None = None
 
-    def discover(self) -> tuple[list[DiscoveredTask], str, float | None]:
+    def discover(self, max_retries: int = 3) -> tuple[list[DiscoveredTask], str, float | None]:
         discovered = []
         page = 1
         while True:
@@ -179,18 +197,64 @@ class GitHubApiIssueSource:
                     **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
                 },
             )
-            try:
-                with urllib.request.urlopen(request, timeout=20) as response:
-                    issues = json.loads(response.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                if exc.code in {403, 429}:
-                    retry_after = exc.headers.get("Retry-After")
-                    return [], "UNKNOWN", self.now + parse_retry_after(retry_after)
-                if exc.code in {401, 404}:
-                    return [], "STALE", None
-                raise
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return [], "UNKNOWN", None
+            issues = None
+            for attempt in range(max_retries):
+                try:
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        issues = json.loads(response.read().decode("utf-8"))
+                        self.last_successful_sync = time.time()
+                        self.last_sync_error = None
+                        break
+                except urllib.error.HTTPError as exc:
+                    if exc.code in {403, 429}:
+                        retry_after_hdr = exc.headers.get("Retry-After") or exc.headers.get("retry-after")
+                        rate_limit_reset = exc.headers.get("x-ratelimit-reset")
+                        remaining = exc.headers.get("x-ratelimit-remaining")
+                        
+                        delay = parse_retry_after(retry_after_hdr, default=0.0)
+                        if delay <= 0 and rate_limit_reset:
+                            try:
+                                delay = max(0.0, float(rate_limit_reset) - time.time())
+                            except (ValueError, TypeError):
+                                delay = 60.0
+                        if delay <= 0 and (remaining == "0" or exc.code == 429):
+                            delay = 60.0
+
+                        if delay > 0 or remaining == "0" or exc.code == 429:
+                            self.last_sync_error = f"rate limited (retry in {int(delay)}s)"
+                            return [], "UNKNOWN", self.now + max(delay, 5.0)
+
+                        self.last_sync_error = "forbidden (403)"
+                        return [], "STALE", None
+
+                    if exc.code in {401, 404}:
+                        self.last_sync_error = f"http {exc.code}"
+                        return [], "STALE", None
+
+                    if exc.code in {500, 502, 503, 504}:
+                        if attempt < max_retries - 1:
+                            backoff = (0.5 * (2 ** attempt)) + random.uniform(0.1, 0.4)
+                            time.sleep(backoff)
+                            continue
+                        self.last_sync_error = f"server error {exc.code}"
+                        return [], "UNKNOWN", self.now + 15.0
+
+                    self.last_sync_error = f"http error {exc.code}"
+                    raise
+                except TRANSIENT_NETWORK_ERRORS as exc:
+                    if attempt < max_retries - 1:
+                        backoff = (0.5 * (2 ** attempt)) + random.uniform(0.1, 0.4)
+                        time.sleep(backoff)
+                        continue
+                    self.last_sync_error = f"transport error: {type(exc).__name__}: {exc}"
+                    return [], "UNKNOWN", self.now + 10.0
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    self.last_sync_error = f"decode error: {exc}"
+                    return [], "UNKNOWN", None
+
+            if issues is None:
+                return [], "UNKNOWN", self.now + 10.0
+
             if not isinstance(issues, list):
                 raise TaskSourceValidationError("github issues response must be a list")
             for issue in issues:
@@ -221,6 +285,8 @@ class ConfiguredGitHubTaskSource:
         self.source = GitHubApiIssueSource(owner, repo, token)
         self.last_status: str | None = None
         self.last_error: str | None = None
+        self.last_retry_after: float | None = None
+        self.last_successful_sync: float | None = None
 
     def check_source(self) -> tuple[bool, str]:
         if self.last_status is None:
@@ -230,17 +296,20 @@ class ConfiguredGitHubTaskSource:
         return False, self.last_error or f"source {self.name} unavailable ({self.last_status})"
 
     def discover(self) -> list[DiscoveredTask]:
-        tasks, status, _retry_after = self.source.discover()
+        tasks, status, retry_after = self.source.discover()
         self.last_status = status
-        if status != "OK":
-            self.last_error = f"github task source {self.name} unavailable ({status})"
+        self.last_retry_after = retry_after
+        if status == "OK":
+            self.last_successful_sync = getattr(self.source, "last_successful_sync", time.time())
+            self.last_error = None
+        else:
+            self.last_error = getattr(self.source, "last_sync_error", None) or f"github task source {self.name} unavailable ({status})"
             print(
                 f"warning: github task source {self.name} unavailable ({status}); "
                 "set STAGEMESH_GITHUB_TOKEN for private repositories",
                 file=sys.stderr,
             )
             return []
-        self.last_error = None
         if not self.labels and not self.excluded_labels:
             return tasks
         required = {label.casefold() for label in self.labels}

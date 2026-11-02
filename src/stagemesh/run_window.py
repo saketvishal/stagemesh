@@ -1013,9 +1013,27 @@ def run_window(
             report.merged_prs[-1]["resumed"] = True
             attempted.add(pending_record.task_id)
         while report.stop_reason is None:
-            from .selection_scope import ScopeError, refresh
+            from .selection_scope import ScopeError, TransientScopeError, refresh
             try:
                 refresh(store)
+            except TransientScopeError as exc:
+                if clock() >= deadline:
+                    report.time_limit_reached = True
+                    break
+                wait_time = min(
+                    max(1.0, (exc.retry_after - clock()) if exc.retry_after else 5.0),
+                    max(0.0, deadline - clock()),
+                )
+                if wait_time <= 0:
+                    report.time_limit_reached = True
+                    break
+                store.add_audit_event("selection.transient_sync_pause", {
+                    "reason": str(exc),
+                    "wait_seconds": wait_time,
+                    "deadline_remaining": max(0.0, deadline - clock()),
+                })
+                time.sleep(min(wait_time, 15.0))
+                continue
             except ScopeError as exc:
                 report.stop_reason = str(exc)
                 break

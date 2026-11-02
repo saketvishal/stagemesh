@@ -21,6 +21,12 @@ class ScopeError(ValueError):
     pass
 
 
+class TransientScopeError(ScopeError):
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def _events(store, kind):
     for row in store.conn.execute(
         "SELECT id, payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC", (kind,)
@@ -165,8 +171,15 @@ def attach(store, project: Path, config, scope):
             sources = [LocalBacklogSource(project / ".stagemesh/backlog.json"), *task_sources_from_config(config)]
             for source in sources:
                 tasks = source.discover()
-                if getattr(source, "last_status", "OK") != "OK":
-                    raise ScopeError(f"source sync failed: {source.name} ({source.last_status}); cached labels cannot authorize work")
+                status = getattr(source, "last_status", "OK")
+                if status != "OK":
+                    retry_after = getattr(source, "last_retry_after", None)
+                    if status == "UNKNOWN":
+                        raise TransientScopeError(
+                            f"source sync temporarily unavailable: {source.name} ({status})",
+                            retry_after=retry_after,
+                        )
+                    raise ScopeError(f"source sync failed: {source.name} ({status}); cached labels cannot authorize work")
                 if hasattr(source, "source") and scope.label:
                     store.selection_catalog = label_catalog(source.source)
                 discovered.extend(tasks)
@@ -175,6 +188,9 @@ def attach(store, project: Path, config, scope):
             store.selection_seen = {(task.source, task.source_id) for task in discovered}
             store.selection_discovered = discovered
             store.selection_fresh = True
+            store.selection_last_successful_sync = time.time()
+        except TransientScopeError:
+            raise
         except Exception as exc:
             raise ScopeError(f"scoped source refresh refused: {exc}") from exc
 

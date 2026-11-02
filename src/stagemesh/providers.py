@@ -480,7 +480,8 @@ class RuntimeCommandAdapter:
             )
             if sha is None:
                 output, _ = capacity_evidence(stdout, stderr)
-                failure_reason = _provider_permission_denial(stdout, stderr) or NO_IMPLEMENTATION_CHANGE
+                denial = _provider_permission_denial(stdout, stderr)
+                failure_reason = denial or _diagnose_no_change(stdout, stderr, run_path, project, bound.contract)
                 call.finish("failed", failure_reason)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=failure_reason)
                 return ExecutionResult(
@@ -738,9 +739,13 @@ def _command_and_input(command: tuple[str, ...], prompt: str, *, structured_revi
             if flag in args:
                 index = args.index(flag)
                 if index == len(args) - 1 or args[index + 1].startswith("-"):
-                    return [*args[: index + 1], prompt, *args[index + 1 :]], ""
+                    if len(prompt) < 4000:
+                        return [*args[: index + 1], prompt, *args[index + 1 :]], ""
+                    # Avoid Windows WinError 206 by passing prompt via stdin
+                    filtered = [a for i, a in enumerate(args) if i != index]
+                    return filtered, prompt
                 return args, ""
-        return [args[0], "--print", prompt, *args[1:]], ""
+        return args, prompt
     return args, prompt
 
 
@@ -762,6 +767,23 @@ def _provider_text_response(stdout: str) -> str:
         return json.dumps(payload["structured_output"], separators=(",", ":"))
     return text
 
+
+
+def _diagnose_no_change(stdout: str, stderr: str, run_path: Path, project: Path, contract: Any) -> str:
+    combined = f"{stdout}\n{stderr}".lower()
+    if "is not supported in allow rules" in combined or "ignoring --allowedtools rule" in combined:
+        return "tool_permission_denied: wildcard tool pattern rejected by agent allow rules"
+    if "permission denied" in combined or "not permitted" in combined:
+        return "tool_permission_denied"
+    if any(phrase in combined for phrase in ["outside what i can edit", "cannot edit", "forbidden", "contract prohibits"]):
+        return "specification_insufficient: validation findings require editing files outside permitted contract scope"
+    try:
+        diff_outside = subprocess.run(["git", "status", "--porcelain"], cwd=project, capture_output=True, text=True, check=False)
+        if diff_outside.stdout.strip():
+            return "outside_worktree_modification: agent modified files in root repository instead of task worktree"
+    except Exception:
+        pass
+    return NO_IMPLEMENTATION_CHANGE
 
 def _provider_permission_denial(stdout: str, stderr: str) -> str | None:
     text = f"{stdout}\n{stderr}".lower()

@@ -100,6 +100,8 @@ def classify_failure(
     Returns (is_capacity_failure: bool, reason: str).
     """
     if exc is not None and isinstance(exc, FileNotFoundError):
+        if getattr(exc, "winerror", None) == 206 or "filename or extension is too long" in str(exc).lower():
+            return False, "command_line_too_long"
         return True, "provider_unavailable"
 
     combined = f"{stdout}\n{stderr}".lower()

@@ -179,6 +179,18 @@ class Validator:
                     validate_manifest_discovery,
                     validate_prerequisite_manifest,
                 )
+                if isinstance(prerequisite_manifest, dict) and prerequisite_manifest.get("assessment") == "structural-only":
+                    from .contracts import _matches
+                    if all(_matches(f, contract.allowed_files) for f in inspected_files):
+                        prerequisite_manifest["candidate_revision"] = candidate_sha
+                        prerequisite_manifest["changed_files"] = list(inspected_files)
+                        prerequisite_manifest["unmapped_files"] = [f for f in inspected_files if not ("openspec/" in f or f == "adapter.json")]
+                        task_manifest_path = project / ".stagemesh" / "contracts" / f"{task_id}.spec_manifest.json"
+                        if task_manifest_path.is_file():
+                            try:
+                                task_manifest_path.write_text(json.dumps(prerequisite_manifest, indent=2), encoding="utf-8")
+                            except OSError:
+                                pass
 
                 discovery_errors: tuple[str, ...] = ()
                 if isinstance(prerequisite_manifest, dict):
