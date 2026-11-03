@@ -44,6 +44,7 @@ from .capabilities import (
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
 from .capabilities import inventory as capability_inventory
 from .capabilities import task_usage as capability_task_usage
+from .capability_discovery import discover_capabilities, plan_discovered_registration
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
@@ -3643,6 +3644,48 @@ def command_capabilities(args: argparse.Namespace) -> int:
             else:
                 print(f"registry: {payload['registry']}; written={str(payload['written']).lower()}")
         return 0
+    if action == "discover":
+        discovery = discover_capabilities(project, args.root)
+        if args.registration_plan:
+            if not args.provider or not args.stage:
+                raise CapabilityRegistryError(
+                    "--registration-plan requires at least one --provider and --stage"
+                )
+            payload = plan_discovered_registration(
+                project,
+                discovery,
+                args.registration_plan,
+                providers=args.provider,
+                stages=args.stage,
+            )
+            return _print_capability_change(payload, args.json, plan=True)
+        if args.provider or args.stage:
+            raise CapabilityRegistryError(
+                "--provider and --stage require --registration-plan"
+            )
+        if args.json:
+            print(json.dumps(discovery, indent=2, sort_keys=True))
+            return 0
+        print(
+            f"capability discovery (read-only): root={discovery['root']} "
+            f"candidates={discovery['candidate_count']}"
+        )
+        for row in discovery["candidates"]:
+            assert isinstance(row, dict)
+            state = "valid" if row["valid"] else f"invalid ({row['reason']})"
+            print(
+                f"{row['id']} kind={row['kind']} source={row['source']} {state}; "
+                f"registered={str(row['registered']).lower()} "
+                f"runtime_installed={str(row['runtime_installed']).lower()} "
+                f"available={str(row['available']).lower()} "
+                f"usable={str(row['usable']).lower()} "
+                "invocation=not-observed"
+            )
+        print(
+            "writes: none; provider calls: 0; network calls: 0; package installs: 0; "
+            "database writes: 0; subprocess calls: 0"
+        )
+        return 0
     rows = capability_inventory(project)
     history_available = None
     task_exists = None
@@ -5066,6 +5109,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capability_policy.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     capability_policy.set_defaults(func=command_capabilities)
+    capability_discover = capability_sub.add_parser(
+        "discover",
+        help="Inspect one explicit project-local subtree for capability candidates without writing",
+    )
+    capability_discover.add_argument(
+        "--root", required=True, help="Project-relative directory to inspect without following links"
+    )
+    capability_discover.add_argument(
+        "--registration-plan",
+        metavar="CANDIDATE_ID",
+        help="Preview registration of exactly one discovered candidate without writing",
+    )
+    capability_discover.add_argument("--provider", action="append")
+    capability_discover.add_argument(
+        "--stage", action="append", choices=("IMPLEMENT", "REVIEW")
+    )
+    capability_discover.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_discover.set_defaults(func=command_capabilities)
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")

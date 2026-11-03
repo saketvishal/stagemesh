@@ -20,6 +20,7 @@ from stagemesh.capabilities import (
     resolve_attachments,
     skill_evidence_mode,
 )
+from stagemesh.capability_discovery import discover_capabilities
 from stagemesh.capacity import CapacityKind
 from stagemesh.cli import main
 from stagemesh.contracts import ChangeContract, canonical_contract_json, parse_contract
@@ -1438,3 +1439,182 @@ def test_skill_evidence_policy_refuses_registry_symlink_without_reading_or_writi
     ) == 2
     assert "read refuses a symlink" in capsys.readouterr().err
     assert outside.read_bytes() == before and registry.is_symlink()
+
+
+def test_discovery_lists_multiple_vendored_skills_and_previews_registration_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name in ("brainstorming", "writing-plans", "executing-plans"):
+        _skill(tmp_path, name)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "brainstorming",
+                source="agent-skills/brainstorming/SKILL.md",
+                providers=["codex"],
+            )
+        ],
+    )
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    before = registry.read_bytes()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "discover",
+            "--root",
+            "agent-skills",
+            "--json",
+        ]
+    ) == 0
+    discovered = json.loads(capsys.readouterr().out)
+
+    rows = {row["id"]: row for row in discovered["candidates"]}
+    assert list(sorted(rows)) == ["brainstorming", "executing-plans", "writing-plans"]
+    assert rows["brainstorming"]["registered"] is True
+    assert rows["brainstorming"]["enabled"] is True
+    assert rows["brainstorming"]["usable"] is True
+    assert rows["writing-plans"]["registered"] is False
+    assert discovered["read_only"] is True
+    assert discovered["writes"] == [] and discovered["subprocess_calls"] == 0
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "discover",
+            "--root",
+            "agent-skills",
+            "--registration-plan",
+            "writing-plans",
+            "--provider",
+            "codex",
+            "--provider",
+            "grok",
+            "--stage",
+            "IMPLEMENT",
+            "--stage",
+            "REVIEW",
+            "--json",
+        ]
+    ) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["entry"] == {
+        "enabled": False,
+        "id": "writing-plans",
+        "kind": "skill",
+        "permissions": ["workspace-read"],
+        "providers": ["codex", "grok"],
+        "source": "agent-skills/writing-plans/SKILL.md",
+        "stages": ["IMPLEMENT", "REVIEW"],
+    }
+    assert plan["planned"] is True and plan["writes"] == []
+    assert registry.read_bytes() == before
+    assert not (tmp_path / ".stagemesh" / "runtime.sqlite3").exists()
+
+
+def test_discovery_reuses_plugin_and_mcp_validators_without_activating_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _claude_plugin(tmp_path)
+    no_manifest_skill = (
+        tmp_path / ".claude" / "plugins" / "no-manifest" / "skills" / "review" / "SKILL.md"
+    )
+    no_manifest_skill.parent.mkdir(parents=True)
+    no_manifest_skill.write_text("# Review\n", encoding="utf-8")
+    unsafe = _claude_plugin(tmp_path, "unsafe-kit")
+    (unsafe / "commands").mkdir()
+    _mcp_manifest(tmp_path)
+    bad_mcp = tmp_path / ".stagemesh" / "mcp" / "bad.json"
+    bad_mcp.write_text("{}", encoding="utf-8")
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "discover",
+            "--root",
+            ".",
+            "--json",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["id"]: row for row in payload["candidates"]}
+
+    assert rows["review-kit"]["kind"] == "claude-plugin"
+    assert rows["review-kit"]["valid"] is True
+    assert rows["no-manifest"]["kind"] == "claude-plugin"
+    assert rows["no-manifest"]["valid"] is True
+    assert rows["unsafe-kit"]["valid"] is False
+    assert "runtime component is unsupported" in rows["unsafe-kit"]["reason"]
+    assert rows["serena"]["kind"] == "mcp" and rows["serena"]["valid"] is True
+    assert rows["bad"]["valid"] is False
+    assert payload["provider_calls"] == 0 and payload["subprocess_calls"] == 0
+    assert not (tmp_path / ".stagemesh" / "runtime.sqlite3").exists()
+
+    for candidate_id, provider, stage, kind in (
+        ("review-kit", "claude", "REVIEW", "claude-plugin"),
+        ("serena", "codex", "IMPLEMENT", "mcp"),
+    ):
+        assert main(
+            [
+                "--project",
+                str(tmp_path),
+                "capabilities",
+                "discover",
+                "--root",
+                ".",
+                "--registration-plan",
+                candidate_id,
+                "--provider",
+                provider,
+                "--stage",
+                stage,
+                "--json",
+            ]
+        ) == 0
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["entry"]["kind"] == kind
+        assert plan["entry"]["enabled"] is False and plan["writes"] == []
+
+
+def test_discovery_fails_closed_on_candidate_collisions_and_bounds(tmp_path: Path) -> None:
+    for prefix in ("one", "two"):
+        skill = tmp_path / "packages" / prefix / "same" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Same\n", encoding="utf-8")
+
+    with pytest.raises(CapabilityRegistryError, match="candidate id collision"):
+        discover_capabilities(tmp_path, "packages")
+    with pytest.raises(CapabilityRegistryError, match="more than 1 candidates"):
+        discover_capabilities(tmp_path, "packages", max_candidates=1)
+    with pytest.raises(CapabilityRegistryError, match="entry limit"):
+        discover_capabilities(tmp_path, "packages", max_entries=1)
+
+    oversized = tmp_path / "oversized" / "too-large" / "SKILL.md"
+    oversized.parent.mkdir(parents=True)
+    oversized.write_bytes(b"x" * (256 * 1024 + 1))
+    payload = discover_capabilities(tmp_path, "oversized")
+    assert payload["candidates"][0]["valid"] is False
+    assert "byte discovery limit" in payload["candidates"][0]["reason"]
+
+
+def test_discovery_refuses_symlinks_without_following_them(tmp_path: Path) -> None:
+    root = tmp_path / "agent-skills"
+    root.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-skill.md"
+    outside.write_text("# Outside\n", encoding="utf-8")
+    link = root / "SKILL.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(CapabilityRegistryError, match="discovery refuses symlink"):
+        discover_capabilities(tmp_path, "agent-skills")
+    assert outside.read_text(encoding="utf-8") == "# Outside\n"

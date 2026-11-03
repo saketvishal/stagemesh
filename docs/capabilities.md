@@ -75,6 +75,23 @@ The registry can be managed without hand-editing JSON. Registration accepts only
 to disabled. It never downloads a package, activates a plugin, starts an MCP server, invokes a provider, or reads ambient user-home
 configuration. Preview the normalized entry and projected availability first:
 
+For a directory containing several vendored skills, such as a reviewed copy of additional Superpowers skills, discovery shows candidates
+without registering or trusting them:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities discover --root agent-skills --json
+stagemesh --project C:\path\to\project capabilities discover --root agent-skills `
+  --registration-plan writing-plans --provider codex --provider claude `
+  --stage IMPLEMENT --stage REVIEW --json
+```
+
+Discovery scans only the explicit project-relative root, never follows symlinks, and is bounded by depth, entry, candidate, and skill-size
+limits. It recognizes standalone `SKILL.md` files, skills-only Claude plugin packages, and StageMesh MCP manifests using the production
+validators. Invalid candidates remain invalid; discovery and registration plans perform no writes, provider/network calls, subprocess
+launches, package installs, database creation, or user-home lookup. The plan requires explicit providers and lifecycle stages and still
+defaults the candidate to disabled. Discovery never applies its plan; actual registration remains the separate `capabilities register`
+operation below.
+
 ```powershell
 stagemesh --project C:\path\to\project capabilities register domain-review `
   --kind skill `

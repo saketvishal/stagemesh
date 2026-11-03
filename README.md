@@ -118,6 +118,8 @@ hooks, agents, commands, MCP, LSP, or other executable plugin components. Codex 
 already-installed server to declared read-only tools, and requires redacted invocation evidence. MCP for other providers and executable
 plugin requests fail closed. See
 [docs/capabilities.md](docs/capabilities.md) for the schema and audit semantics.
+`stagemesh capabilities discover --root <project-directory>` safely inventories additional vendored skills, skills-only Claude plugins,
+and bounded MCP manifests; it does not install, register, enable, attach, load, or invoke them.
 Projects may opt into `observed-load-required` skill evidence. Supported provider JSON streams then produce redacted
 `capability.loaded` receipts for implementation and review, and a provider that does not show every selected skill being read before
 its first recorded mutation is rejected without a quota cooldown. Review streams must also contain a recognized final-answer event;
