@@ -29,15 +29,19 @@ from .autonomy.review_adapter import supervise_reviewer
 from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .blocked_recovery import can_auto_retry
-from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
 from .capabilities import (
+    ATTACHMENT_REQUIRED,
+    OBSERVED_LOAD_REQUIRED,
     CapabilityRegistryError,
     plan_capability_enabled,
     plan_capability_registration,
+    plan_skill_evidence_mode,
     register_capability,
     set_capability_enabled,
+    set_skill_evidence_mode,
     skill_evidence_mode,
 )
+from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
 from .capabilities import inventory as capability_inventory
 from .capabilities import task_usage as capability_task_usage
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
@@ -3620,6 +3624,25 @@ def command_capabilities(args: argparse.Namespace) -> int:
         operation = plan_capability_enabled if args.plan else set_capability_enabled
         payload = operation(project, args.capability_id, enabled)
         return _print_capability_change(payload, args.json, plan=args.plan)
+    if action == "policy":
+        operation = plan_skill_evidence_mode if args.plan else set_skill_evidence_mode
+        payload = operation(project, args.skill_evidence_mode)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            state = "plan (read-only)" if args.plan else "applied"
+            print(
+                f"skill evidence policy {state}: {payload['current_mode']} -> "
+                f"{payload['skill_evidence_mode']}; changed={str(payload['changed']).lower()}"
+            )
+            if args.plan:
+                print(
+                    "writes: none; provider calls: 0; network calls: 0; "
+                    "package installs: 0; database writes: 0"
+                )
+            else:
+                print(f"registry: {payload['registry']}; written={str(payload['written']).lower()}")
+        return 0
     rows = capability_inventory(project)
     history_available = None
     task_exists = None
@@ -5030,6 +5053,19 @@ def build_parser() -> argparse.ArgumentParser:
         capability_state.add_argument("--plan", action="store_true", help="Validate and preview without writing")
         capability_state.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
         capability_state.set_defaults(func=command_capabilities)
+    capability_policy = capability_sub.add_parser(
+        "policy",
+        help="Preview or set the project skill-load evidence policy without invoking providers",
+    )
+    capability_policy.add_argument(
+        "skill_evidence_mode",
+        choices=(ATTACHMENT_REQUIRED, OBSERVED_LOAD_REQUIRED),
+    )
+    capability_policy.add_argument(
+        "--plan", action="store_true", help="Validate and preview without writing"
+    )
+    capability_policy.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_policy.set_defaults(func=command_capabilities)
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")

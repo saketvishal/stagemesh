@@ -104,6 +104,18 @@ works if a formerly registered source or executable has disappeared. Neither com
 creates the runtime database, or records an invocation; task-level use still requires `capability_refs` and observable execution
 evidence below.
 
+The skill-load evidence policy is also an explicit project operation. Preview it before opting in:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities policy observed-load-required --plan --json
+stagemesh --project C:\path\to\project capabilities policy observed-load-required
+```
+
+The plan performs no writes, provider calls, network calls, package installs, or database writes. Applying a changed policy atomically
+updates only `.stagemesh/capabilities.json`, preserving declarations; applying the current policy is a true no-op. The default effective
+policy is `attachment-required`, including when no registry exists. Task-doctor and run-window reports include the effective policy next
+to requested and observed capability counts, while an invalid or unsafe registry is reported as unavailable rather than trusted.
+
 At each lifecycle stage StageMesh selects only requested capabilities whose registry entry includes that stage. An
 implementation-only capability therefore does not break review, and a review-only capability does not grant implementation authority.
 Dispatch requires all of the following for the active stage: the id is registered, enabled, installed, compatible with the selected
