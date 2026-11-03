@@ -20,6 +20,10 @@ from .capabilities import (
     skill_evidence_mode,
 )
 from .capacity import CapacityKind
+from .claude_plugin_capabilities import (
+    ClaudePluginCapabilityError,
+    configure_claude_plugin_command,
+)
 from .config import StageMeshConfig
 from .contracts import ChangeContract, ContractError, parse_contract
 from .mcp_capabilities import McpCapabilityError, configure_mcp_command
@@ -316,13 +320,22 @@ def capability_preflight(
                         item.kind in {"skill", "claude-plugin"} for item in attachments
                     )
                     command = adapter.command_for(stage_capability[stage])
+                    if any(item.kind == "claude-plugin" for item in attachments):
+                        command = configure_claude_plugin_command(
+                            command, [item.audit_payload() for item in attachments]
+                        )
                     if mcp_requested:
                         command, _permitted = configure_mcp_command(
                             command, [item.audit_payload() for item in attachments]
                         )
                     if mcp_requested or observed_skill_requested:
                         event_stream_command(command)
-                except (CapabilityRegistryError, McpCapabilityError, ProviderEventError) as exc:
+                except (
+                    CapabilityRegistryError,
+                    ClaudePluginCapabilityError,
+                    McpCapabilityError,
+                    ProviderEventError,
+                ) as exc:
                     reason = str(exc)
             if reason is None:
                 eligible.add(provider)

@@ -27,6 +27,10 @@ from .capabilities import (
     skill_evidence_mode,
 )
 from .capacity import CapacityKind, CapacityRegistry
+from .claude_plugin_capabilities import (
+    ClaudePluginCapabilityError,
+    configure_claude_plugin_command,
+)
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .contracts import ContractError, bound_contract_from_record
@@ -356,6 +360,19 @@ class RuntimeCommandAdapter:
         configured_command = self.command_for("code")
         evidence_mode = skill_evidence_mode(run_path)
         mcp_requested = any(item.get("kind") == "mcp" for item in capability_audit)
+        plugin_requested = any(
+            item.get("kind") == "claude-plugin" for item in capability_audit
+        )
+        if plugin_requested:
+            try:
+                configured_command = tuple(
+                    configure_claude_plugin_command(configured_command, capability_audit)
+                )
+            except ClaudePluginCapabilityError as exc:
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason=f"capability_unavailable: {exc}",
+                )
         permitted_codex_config: frozenset[str] = frozenset()
         if mcp_requested:
             try:
@@ -861,6 +878,20 @@ class RuntimeCommandAdapter:
             configured_command = self.command_for("review")
             evidence_mode = skill_evidence_mode(review_path)
             mcp_requested = any(item.get("kind") == "mcp" for item in capability_audit)
+            plugin_requested = any(
+                item.get("kind") == "claude-plugin" for item in capability_audit
+            )
+            if plugin_requested:
+                try:
+                    configured_command = tuple(
+                        configure_claude_plugin_command(
+                            configured_command, capability_audit
+                        )
+                    )
+                except ClaudePluginCapabilityError as exc:
+                    return _review_infrastructure_failure(
+                        f"capability_unavailable: {exc}"
+                    )
             permitted_codex_config: frozenset[str] = frozenset()
             if mcp_requested:
                 try:
