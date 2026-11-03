@@ -373,9 +373,9 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
 
 * `stagemesh task-doctor --task <id> [--json]` (read-only): stage/status, claims and executions, latest candidate, baseline (and
   whether it is stale), contract digest/version, latest validation failures and review findings, typed tool failures, contextual
-  research receipts, planning-spec status, exact-candidate adverse-review status, candidate-bound browser/API evaluation status and
-  artifact references, diagnosis, and the next command. Research output is projected as provider/identity/count metadata; planning
-  output never exposes spec contents, and E2E artifact contents are never read by the doctor.
+  research receipts, planning-spec/challenge status, exact-candidate adverse-review status, candidate-bound browser/API evaluation
+  status and artifact references, diagnosis, and the next command. Research output is projected as provider/identity/count metadata;
+  planning output never exposes spec or challenge contents, and E2E artifact contents are never read by the doctor.
 * `stagemesh rebind-contract --task <id> [--validate] [--force] [--reason TEXT] [--json]` re-reads
   `.stagemesh/contracts/<id>.json`, canonicalizes it and replaces the frozen contract. The stored version is always this build's
   supported version, never copied from the old row (this repairs `unsupported bound contract version: 2`). It refuses when passed

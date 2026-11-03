@@ -37,6 +37,12 @@ from stagemesh.review import (
     classify_review_response,
 )
 from stagemesh.serialized_integration import SerializedIntegrator
+from stagemesh.spec_planning import (
+    freeze_planning_challenge,
+    freeze_planning_spec,
+    planning_artifact_paths,
+    planning_challenge_path,
+)
 
 FINDING = {"severity": "error", "message": "README.md drops the install section the contract requires", "path": "README.md"}
 
@@ -91,6 +97,76 @@ def test_reviewer_prompt_is_adverse_and_evidence_records_the_gate(tmp_path: Path
     assert "unnecessary complexity" in adapter.prompts[0]
     payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.PASSED)[0]
     assert payload["adverse_review_gate"] is True
+
+
+def test_reviewer_receives_exact_accepted_planning_context_and_records_only_digest(
+    tmp_path: Path,
+) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    bound = contract_for_candidate(store, UNIT_TASK, candidate, project)
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "planning_gate": {
+                    "require_approved_spec": True,
+                    "require_plan_challenge": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = {
+        "behavior": ["Keep the install section while changing the readme"],
+        "affected_paths": ["README.md"],
+        "acceptance_checks": ["inspect the exact candidate"],
+        "contract_hash": bound.digest,
+        "baseline_sha": bound.baseline_sha,
+    }
+    spec_hash = freeze_planning_spec(spec).digest
+    challenge = {
+        "version": 1,
+        "planning_spec_hash": spec_hash,
+        "planner_provider": "codex",
+        "challenger_provider": "claude",
+        "verdict": "accept",
+        "findings": [
+            {
+                "kind": "missing-test",
+                "summary": "Inspect the install section explicitly",
+            }
+        ],
+        "required_decisions": [],
+    }
+    spec_path, approval_path = planning_artifact_paths(project, UNIT_TASK)
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    planning_challenge_path(project, UNIT_TASK).write_text(
+        json.dumps(challenge), encoding="utf-8"
+    )
+    approval_path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "planning_spec_hash": spec_hash,
+                "planning_challenge_hash": freeze_planning_challenge(challenge).digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = ScriptedReviewAdapter('{"decision":"PASS"}')
+
+    status = Reviewer(adapter=adapter, require_independent=True).review(
+        store, UNIT_TASK, candidate, project
+    )
+
+    assert status == EvidenceStatus.PASSED
+    assert "Accepted planning context for this exact contract and baseline" in adapter.prompts[0]
+    assert "Keep the install section while changing the readme" in adapter.prompts[0]
+    assert "Inspect the install section explicitly" in adapter.prompts[0]
+    payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.PASSED)[0]
+    assert payload["planning_context_status"] == "bound"
+    assert len(payload["planning_context_digest"]) == 64
+    assert "Keep the install section" not in json.dumps(payload)
 
 
 @pytest.mark.parametrize("decision", [VERDICT_FAIL_WITH_FINDINGS, "FAIL"])

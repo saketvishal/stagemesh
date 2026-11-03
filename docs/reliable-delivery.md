@@ -83,6 +83,40 @@ existing no-op re-check (the implementer declined to change anything): the revie
 the unchanged candidate on that single re-check, which is recorded as a `withdrawn_by_reviewer` disposition citing the PASS
 evidence. A different reviewer's PASS never counts.
 
+## Opt-in planning challenge before implementation
+
+Projects may enable both `planning_gate.require_approved_spec` and
+`planning_gate.require_plan_challenge`. The second option is invalid unless the
+approved-spec gate is also enabled. With both enabled, implementation admission
+requires three identity-bound local artifacts under `.stagemesh/planning/`:
+
+1. `<task>.spec.json`, frozen against the exact contract digest and baseline SHA;
+2. `<task>.challenge.json`, frozen against the spec digest and naming distinct
+   planner and challenger providers; and
+3. `<task>.approval.json`, whose approval binds both the spec and accepted
+   challenge digests.
+
+The bounded challenge verdict is `accept`, `revise`, or
+`needs-human-decision`. A missing, malformed or stale challenge, a revision
+request, an unresolved human decision, or an approval that does not bind the
+accepted challenge fails closed with a typed next action. The challenger role
+may write only its task challenge artifact; it cannot modify the spec, approval,
+or production source. `task-doctor` reports paths, presence, policy and status
+without exposing challenge or spec contents.
+
+After admission, the exact-contract/exact-baseline accepted spec and accepted
+challenge are delivered as bounded JSON data to the initial implementation and
+independent review prompts. Review compares the delivered capability with the
+accepted behavior, scope, checks, decisions, and challenge record. Durable
+review evidence records only the delivered context digest and bound status, not
+the planning contents. Stale, malformed, unapproved, or identity-mismatched
+planning artifacts are not delivered.
+
+This artifact and its provider-name separation are a provider-neutral policy
+foundation. They are not proof that a separate agent process actually ran. An
+execution adapter must later produce independently attributable execution
+evidence before StageMesh can claim an automated independent plan challenge.
+
 ## Retries and step caps
 
 `MAX_STEPS` is resumable only after meaningful progress: a later lifecycle stage, completion, or a new candidate whose failure
