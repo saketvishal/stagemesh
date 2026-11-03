@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -8,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import stagemesh.providers as providers_module
+from stagemesh.agent_skills import skill_prompt
 from stagemesh.capabilities import (
     ATTACHMENT_REQUIRED,
     OBSERVED_LOAD_REQUIRED,
@@ -19,6 +23,7 @@ from stagemesh.capabilities import (
 from stagemesh.capacity import CapacityKind
 from stagemesh.cli import main
 from stagemesh.contracts import ChangeContract, canonical_contract_json, parse_contract
+from stagemesh.git import GitWorkspace
 from stagemesh.mcp_capabilities import configure_codex_mcp_command
 from stagemesh.persistence import Store
 from stagemesh.provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderPool
@@ -318,12 +323,165 @@ def test_requested_capabilities_fail_closed_before_dispatch(
         resolve_attachments(tmp_path, (str(entry["id"]),), provider=provider, stage="IMPLEMENT")
 
 
-def test_registry_skill_rejects_unimplemented_review_stage(tmp_path: Path) -> None:
-    _skill(tmp_path)
+def test_registry_skill_routes_only_to_its_declared_lifecycle_stage(tmp_path: Path) -> None:
+    skill = _skill(tmp_path)
     _registry(tmp_path, [_entry("domain-review", stages=["REVIEW"])])
+    contract = ChangeContract(objective="Review domain mapping", capability_refs=("domain-review",))
+    implementation_audit: list[dict[str, object]] = []
+    review_audit: list[dict[str, object]] = []
+
+    implementation = _build_task_prompt(
+        "task-1",
+        _task("Review domain mapping"),
+        project=tmp_path,
+        contract=contract,
+        provider_name="codex",
+        capability_audit=implementation_audit,
+    )
+    review = skill_prompt(
+        "Review domain mapping",
+        contract,
+        stage="review",
+        project=tmp_path,
+        provider_name="codex",
+        capability_audit=review_audit,
+    )
+
+    assert "Registered skill domain-review" not in implementation
+    assert not any(item.get("capability_id") == "domain-review" for item in implementation_audit)
+    assert f"- Registered skill domain-review: {json.dumps(str(skill.resolve()))}" in review
+    assert next(item for item in review_audit if item["capability_id"] == "domain-review")[
+        "origin"
+    ] == "project-registry"
+
+
+def test_implementation_only_capability_does_not_break_review_prompt(tmp_path: Path) -> None:
+    _skill(tmp_path)
+    _registry(tmp_path, [_entry("domain-review", stages=["IMPLEMENT"])])
+    contract = ChangeContract(objective="Implement only", capability_refs=("domain-review",))
+
+    prompt = skill_prompt(
+        "Review the candidate",
+        contract,
+        stage="review",
+        project=tmp_path,
+        provider_name="codex",
+    )
+
+    assert "Registered skill domain-review" not in prompt
+
+
+def test_claude_plugin_skills_may_be_scoped_to_review(tmp_path: Path) -> None:
+    _claude_plugin(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+                stages=["REVIEW"],
+                permissions=["workspace-read"],
+            )
+        ],
+    )
+    contract = ChangeContract(objective="Review safely", capability_refs=("review-kit",))
+
+    prompt = skill_prompt(
+        "Review safely",
+        contract,
+        stage="review",
+        project=tmp_path,
+        provider_name="claude",
+    )
+
+    assert "Registered Claude plugin skill review-kit/review" in prompt
+    assert "Registered Claude plugin skill review-kit/verify" in prompt
+
+
+def test_mcp_capability_remains_implementation_only(tmp_path: Path) -> None:
+    _mcp_manifest(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "serena",
+                kind="mcp",
+                source=".stagemesh/mcp/serena.json",
+                providers=["codex"],
+                stages=["REVIEW"],
+                permissions=["workspace-read", "subprocess"],
+            )
+        ],
+    )
 
     with pytest.raises(CapabilityRegistryError, match="only the IMPLEMENT stage"):
         inventory(tmp_path)
+
+
+def test_runtime_review_receives_bound_review_capability_and_records_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "StageMesh Test")
+    _skill(project)
+    _registry(project, [_entry("domain-review", providers=["test"], stages=["REVIEW"])])
+    (project / "README.md").write_text("candidate\n", encoding="utf-8")
+    git.commit_all("candidate")
+    candidate = git.head()
+    contract = ChangeContract(
+        objective="Review the candidate",
+        allowed_files=("README.md",),
+        capability_refs=("domain-review",),
+    )
+    canonical = canonical_contract_json(contract)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    command = (
+        sys.executable,
+        "-c",
+        (
+            "import sys; p=sys.stdin.read(); "
+            "print('{\"decision\":\"PASS\"}' if 'Registered skill domain-review' in p "
+            "else '{\"decision\":\"FAIL\",\"findings\":[{\"message\":\"skill missing\"}]}')"
+        ),
+    )
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Review the candidate", source_id="task-1")
+    store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
+    store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
+
+    def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
+        shutil.copytree(project, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+
+    monkeypatch.setattr(providers_module, "_prepare_review_checkout", prepare_review)
+    monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
+    monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
+    try:
+        response = RuntimeCommandAdapter("test", command).review_candidate(
+            "Review exactly this candidate.",
+            project,
+            candidate,
+            store=store,
+            task_id=task_id,
+        )
+
+        assert json.loads(response)["decision"] == "PASS", response
+        row = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='capability.attached' "
+            "AND json_extract(payload, '$.capability_id')='domain-review'"
+        ).fetchone()
+        payload = json.loads(row["payload"])
+        assert payload["stage"] == "REVIEW"
+        assert payload["provider"] == "test"
+        assert payload["invocation"] == "unverified"
+    finally:
+        store.close()
 
 
 def test_codex_mcp_is_configured_per_invocation_with_no_ambient_servers(tmp_path: Path) -> None:
@@ -581,6 +739,127 @@ def test_capabilities_cli_is_read_only_inventory(
     assert payload["capabilities"][0]["usable"] is True
     assert payload["capabilities"][0]["invocation"] == "not-observed"
     assert payload["skill_evidence_mode"] == ATTACHMENT_REQUIRED
+
+
+def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _mcp_manifest(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry("domain-review", stages=["IMPLEMENT", "REVIEW"]),
+            _entry(
+                "serena",
+                kind="mcp",
+                source=".stagemesh/mcp/serena.json",
+                providers=["codex"],
+                permissions=["workspace-read", "subprocess"],
+            ),
+        ],
+    )
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    store = Store(database)
+    store.migrate()
+    task_id = store.upsert_task("Use guidance", source_id="task-1")
+    _record_capability_attachments(
+        store,
+        task_id,
+        "codex",
+        "IMPLEMENT",
+        [
+            {
+                "capability_id": "domain-review",
+                "kind": "skill",
+                "origin": "project-registry",
+                "source": "agent-skills/domain-review/SKILL.md",
+                "content_sha256": "a" * 64,
+                "permissions": ["workspace-read"],
+                "selection": "contract",
+                "status": "attached",
+                "invocation": "unverified",
+            }
+        ],
+    )
+    store.add_audit_event(
+        "capability.loaded",
+        {
+            "task_id": task_id,
+            "provider": "codex",
+            "stage": "IMPLEMENT",
+            "capability_id": "domain-review",
+        },
+    )
+    _record_capability_attachments(
+        store,
+        task_id,
+        "codex",
+        "IMPLEMENT",
+        [
+            {
+                "capability_id": "serena",
+                "kind": "mcp",
+                "origin": "project-registry",
+                "source": ".stagemesh/mcp/serena.json",
+                "content_sha256": "b" * 64,
+                "permissions": ["workspace-read", "subprocess"],
+                "selection": "contract",
+                "status": "configured",
+                "invocation": "unverified",
+            }
+        ],
+    )
+    store.add_audit_event(
+        "capability.invoked",
+        {
+            "task_id": task_id,
+            "provider": "codex",
+            "stage": "IMPLEMENT",
+            "capability_id": "serena",
+        },
+    )
+    store.close()
+    before = database.stat().st_mtime_ns
+
+    assert main(["--project", str(tmp_path), "capabilities", "--task", task_id, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["history_available"] is True
+    assert payload["task_exists"] is True
+    rows = {row["id"]: row for row in payload["capabilities"]}
+    assert rows["domain-review"]["invocation"] == "loaded"
+    assert rows["domain-review"]["usage"] == {
+        "attached": 1,
+        "evidence_missing": 0,
+        "invoked": 0,
+        "last_observed_at": rows["domain-review"]["usage"]["last_observed_at"],
+        "loaded": 1,
+        "providers": ["codex"],
+        "stages": ["IMPLEMENT"],
+        "status": "loaded",
+    }
+    assert rows["serena"]["invocation"] == "invoked"
+    assert rows["serena"]["usage"]["attached"] == 1
+    assert rows["serena"]["usage"]["loaded"] == 0
+    assert rows["serena"]["usage"]["invoked"] == 1
+    assert database.stat().st_mtime_ns == before
+
+
+def test_capabilities_task_query_does_not_create_missing_runtime_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _registry(tmp_path, [_entry("domain-review")])
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+
+    assert main(["--project", str(tmp_path), "capabilities", "--task", "missing", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["history_available"] is False
+    assert payload["task_exists"] is False
+    assert payload["capabilities"][0]["invocation"] == "not-observed"
+    assert not database.exists()
 
 
 def test_registry_skill_evidence_mode_is_explicit_and_validated(tmp_path: Path) -> None:

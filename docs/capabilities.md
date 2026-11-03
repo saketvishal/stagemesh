@@ -11,14 +11,17 @@ StageMesh separates seven states that are easy to conflate:
 7. **Applied**: independent behavioral evidence supports that the skill's required discipline was followed. StageMesh does not currently report this state.
 
 `stagemesh capabilities --json` reports declared, resource-installed, runtime-installed, configuration-valid, available, enabled,
-usable, and invocation-observation states. It never downloads or installs a capability. StageMesh has three registry adapters:
+and usable states. Add `--task TASK_ID` to project that task's durable attachment/load/invocation receipts without creating or
+mutating the runtime database. It never downloads or installs a capability. StageMesh has three registry adapters:
 read-only project `SKILL.md` attachment, skills-only import from a project-local Claude Code plugin, and an explicitly requested,
 read-only Codex stdio MCP adapter. Executable Claude plugin components and MCP requests for Claude, Grok, Agy, or custom providers
 remain inventory-only and fail closed.
 
 The registry may set `"skill_evidence_mode": "observed-load-required"`. In that opt-in mode, StageMesh enables the selected provider's
-JSON event stream and accepts an implementation result only when every selected skill was observed being read before the first recorded
-mutation. The default is `attachment-required`, which proves verified prompt attachment but not provider loading.
+JSON event stream and accepts an implementation result only when every selected implementation skill was observed being read before
+the first recorded mutation. The default is `attachment-required`, which proves verified prompt attachment but not provider loading.
+Review-stage skill attachment is supported, but review load enforcement is not yet implemented and is reported as
+`attached-unverified`, never `loaded`.
 
 ## Registry and opt-in
 
@@ -33,7 +36,7 @@ mutation. The default is `attachment-required`, which proves verified prompt att
       "source": "agent-skills/domain-review/SKILL.md",
       "enabled": true,
       "providers": ["codex", "claude", "grok", "agy"],
-      "stages": ["IMPLEMENT"],
+      "stages": ["IMPLEMENT", "REVIEW"],
       "permissions": ["workspace-read"]
     },
     {
@@ -51,7 +54,7 @@ mutation. The default is `attachment-required`, which proves verified prompt att
       "source": ".claude/plugins/review-kit",
       "enabled": false,
       "providers": ["claude"],
-      "stages": ["IMPLEMENT"],
+      "stages": ["REVIEW"],
       "permissions": ["workspace-read"]
     }
   ]
@@ -68,18 +71,25 @@ Registration is not task authorization. A change contract must opt in by capabil
 }
 ```
 
-Dispatch requires all of the following: the id is registered, enabled, installed, compatible with the selected provider, enabled for
-the stage, and supported by a StageMesh adapter. Sources must resolve inside the task checkout; symlink and `..` escapes are rejected.
+At each lifecycle stage StageMesh selects only requested capabilities whose registry entry includes that stage. An
+implementation-only capability therefore does not break review, and a review-only capability does not grant implementation authority.
+Dispatch requires all of the following for the active stage: the id is registered, enabled, installed, compatible with the selected
+provider, enabled for the stage, and supported by a StageMesh adapter. Sources must resolve inside the task checkout; symlink and `..`
+escapes are rejected.
 A skill may request only `workspace-read`. The first MCP adapter requires exactly `workspace-read` and `subprocess`, and accepts only a
 validated stdio manifest with no environment values, credentials, HTTP transport, setup command, or ambient user MCP configuration.
 Capability attachment never expands `allowed_files`, provider authorization, or the worker's sandbox.
+
+This is also how a project opts into additional Superpowers skills without expanding StageMesh's small pinned built-in pack: vendor the
+reviewed `SKILL.md` inside the project, register it as `kind: skill`, declare compatible providers and stages, then reference its id
+from the change contract. Registration alone does not enable or attach it.
 
 ## Skills-only Claude plugin import
 
 A `claude-plugin` source names a project-local plugin directory. StageMesh accepts the standard
 `.claude-plugin/plugin.json` metadata file and one or more `skills/<name>/SKILL.md` components. It validates path containment and bounded
-skill counts and sizes, then lists the skill files in the Claude implementation prompt through the same read-only adapter used for
-standalone skills.
+skill counts and sizes, then lists the skill files in the applicable Claude implementation or review prompt through the same read-only
+adapter used for standalone skills.
 
 StageMesh does **not** pass `--plugin-dir` and does not install, enable, or execute the plugin as a Claude Code plugin. Manifests that
 declare commands, agents, hooks, MCP servers, LSP servers, dependencies, settings, user configuration, experimental components, or
@@ -129,7 +139,8 @@ authority. Do not enable an unreviewed server. Process-level filesystem/network 
 
 ## Audit meaning
 
-The current registry-backed skill, skills-only Claude plugin, and MCP adapters are implementation-stage only.
+Registry-backed standalone skills and skills-only Claude plugin imports may be scoped to `IMPLEMENT`, `REVIEW`, or both. The Codex MCP
+adapter remains implementation-stage only.
 
 Before a provider starts, StageMesh writes one `capability.attached` event per bundled, project-referenced, automatically selected, or
 registry-selected skill. The event includes provider, stage, origin, project-relative source, content SHA-256, declared permission,
@@ -149,6 +160,11 @@ capability id, content hash, and ordering. Raw event streams, prompts, file cont
 evidence rejects the result and moves to the next provider without a provider cooldown. This proves an observable load, not that the
 model followed the skill correctly; contract gates and independent review remain authoritative.
 
+`stagemesh capabilities --task TASK_ID --json` reads those bounded receipts through SQLite read-only mode and reports counts and the
+latest status separately: `attached-unverified`, `loaded`, or `invoked`. A missing runtime database remains `history_available: false`;
+the inspection command does not create one. `loaded` means an exact skill read was observed. `invoked` is reserved for an allowlisted
+MCP tool call. Neither means that the capability was correctly applied.
+
 A requested Codex MCP capability always requires at least one observed allowlisted tool call. StageMesh records
 `capability.invoked` with the capability id, manifest hash, and tool names only. Raw arguments, results, prompts, paths, and event
 streams are not persisted. Missing invocation evidence rejects the attempt without provider cooldown; an observed unallowlisted call
@@ -159,6 +175,7 @@ is a capability policy violation and the candidate is rejected.
 - No network or global installer, marketplace client, plugin hook runner, or arbitrary setup command.
 - No provider-neutral MCP process sandbox, credential broker, HTTP/network transport, or MCP adapter outside Codex.
 - No executable Claude plugin activation, marketplace installation, or translation to Codex/Grok.
+- No review-stage structured load receipt enforcement yet; review skill delivery remains `attached-unverified`.
 - No ambient user-home discovery. Project registry state is read from the isolated checkout only.
 
 Those boundaries keep an available plugin or server from silently becoming an authorized executable. Provider-specific adapters can

@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -274,6 +275,155 @@ def resolve_attachments(
     return tuple(attachments)
 
 
+def requested_for_stage(
+    project: Path,
+    requested: tuple[str, ...] | list[str],
+    *,
+    stage: str,
+) -> tuple[str, ...]:
+    """Return contract-requested ids that apply to this stage.
+
+    A contract owns one capability list for its whole lifecycle.  Stage policy
+    belongs to each registry entry, so an implementation-only capability must
+    not make review fail (and a review-only capability must not block
+    implementation).  Unknown ids remain a contract error at every stage.
+    """
+    if not requested:
+        return ()
+    normalized_stage = str(stage).upper()
+    if normalized_stage not in CAPABILITY_STAGES:
+        raise CapabilityRegistryError(f"unsupported capability stage: {stage}")
+    definitions = {item.id: item for item in load_registry(Path(project).resolve())}
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw in requested:
+        capability_id = str(raw).strip()
+        if capability_id in seen:
+            continue
+        seen.add(capability_id)
+        item = definitions.get(capability_id)
+        if item is None:
+            raise CapabilityRegistryError(
+                f"requested capability is not registered: {capability_id}"
+            )
+        if normalized_stage in item.stages:
+            selected.append(capability_id)
+    return tuple(selected)
+
+
+def task_usage(
+    database: Path,
+    task_id: str,
+) -> tuple[bool, bool, dict[str, dict[str, object]]]:
+    """Read durable capability observations for one task without creating state.
+
+    The booleans report database availability and task existence.  Only
+    privacy-bounded audit payload fields are projected; raw provider events,
+    prompts, paths, arguments and results are never read into the report.
+    """
+    task = str(task_id).strip()
+    if not task:
+        raise CapabilityRegistryError("capability usage task id must be non-empty")
+    path = Path(database)
+    if not path.is_file():
+        return False, False, {}
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        tables = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tasks','audit_events')"
+            )
+        }
+        if "audit_events" not in tables:
+            return True, False, {}
+        task_exists = bool(
+            "tasks" in tables
+            and connection.execute("SELECT 1 FROM tasks WHERE id=?", (task,)).fetchone()
+        )
+        rows = connection.execute(
+            "SELECT event_type, payload, created_at FROM audit_events "
+            "WHERE event_type IN ('capability.attached','capability.loaded','capability.invoked',"
+            "'capability.evidence_missing') "
+            "AND json_valid(payload) "
+            "AND json_extract(payload, '$.task_id')=? "
+            "ORDER BY created_at, rowid",
+            (task,),
+        )
+        usage: dict[str, dict[str, object]] = {}
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload"]))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(row["event_type"])
+            ids: list[str] = []
+            if event_type == "capability.evidence_missing":
+                missing = payload.get("missing_capabilities")
+                if isinstance(missing, list):
+                    ids = [str(item) for item in missing if isinstance(item, str) and item]
+                field = "evidence_missing"
+            else:
+                capability_id = payload.get("capability_id")
+                if isinstance(capability_id, str) and capability_id:
+                    ids = [capability_id]
+                field = event_type.rsplit(".", 1)[-1]
+            for capability_id in ids:
+                item = usage.setdefault(
+                    capability_id,
+                    {
+                        "attached": 0,
+                        "loaded": 0,
+                        "invoked": 0,
+                        "evidence_missing": 0,
+                        "providers": set(),
+                        "stages": set(),
+                        "last_observed_at": None,
+                    },
+                )
+                item[field] = int(item[field]) + 1
+                provider = payload.get("provider")
+                stage = payload.get("stage")
+                if isinstance(provider, str) and provider:
+                    item["providers"].add(provider)  # type: ignore[union-attr]
+                if isinstance(stage, str) and stage:
+                    item["stages"].add(stage)  # type: ignore[union-attr]
+                item["last_observed_at"] = float(row["created_at"])
+        projected: dict[str, dict[str, object]] = {}
+        for capability_id, item in usage.items():
+            invoked = int(item["invoked"])
+            loaded = int(item["loaded"])
+            attached = int(item["attached"])
+            status = (
+                "invoked"
+                if invoked
+                else "loaded"
+                if loaded
+                else "attached-unverified"
+                if attached
+                else "not-observed"
+            )
+            projected[capability_id] = {
+                "status": status,
+                "attached": attached,
+                "loaded": loaded,
+                "invoked": invoked,
+                "evidence_missing": int(item["evidence_missing"]),
+                "providers": sorted(item["providers"]),  # type: ignore[arg-type]
+                "stages": sorted(item["stages"]),  # type: ignore[arg-type]
+                "last_observed_at": item["last_observed_at"],
+            }
+        return True, task_exists, projected
+    except sqlite3.DatabaseError as exc:
+        raise CapabilityRegistryError(f"cannot read capability usage evidence: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def _definition(root: Path, raw: object) -> CapabilityDefinition:
     if not isinstance(raw, dict):
         raise CapabilityRegistryError("each capability must be an object")
@@ -303,10 +453,6 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
         raise CapabilityRegistryError(
             f"capability {capability_id} has unsupported stages: {', '.join(sorted(invalid_stages))}"
         )
-    if kind == "skill" and set(stages) != {"IMPLEMENT"}:
-        raise CapabilityRegistryError(
-            f"skill capability {capability_id} currently supports only the IMPLEMENT stage"
-        )
     permissions = _names(
         raw.get("permissions", ["workspace-read"] if kind == "skill" else []),
         f"capability {capability_id} permissions",
@@ -325,13 +471,13 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
         raise CapabilityRegistryError(
             f"MCP capability {capability_id} currently requires exactly workspace-read and subprocess"
         )
+    if kind == "mcp" and set(stages) != {"IMPLEMENT"}:
+        raise CapabilityRegistryError(
+            f"MCP capability {capability_id} currently supports only the IMPLEMENT stage"
+        )
     if kind == "claude-plugin" and set(providers) != {"claude"}:
         raise CapabilityRegistryError(
             f"claude-plugin capability {capability_id} must declare only the claude provider"
-        )
-    if kind == "claude-plugin" and set(stages) != {"IMPLEMENT"}:
-        raise CapabilityRegistryError(
-            f"claude-plugin capability {capability_id} currently supports only the IMPLEMENT stage"
         )
     if kind == "claude-plugin" and set(permissions) != {"workspace-read"}:
         raise CapabilityRegistryError(

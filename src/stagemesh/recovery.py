@@ -30,7 +30,13 @@ from .contracts import (
     parse_contract,
     task_contract_path,
 )
-from .diagnosis import STALE_BASELINE, VALIDATION_GATE, diagnose, format_findings
+from .diagnosis import (
+    STALE_BASELINE,
+    TOOL_FAILURE_EVENT,
+    VALIDATION_GATE,
+    diagnose,
+    format_findings,
+)
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
@@ -853,6 +859,7 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
         "contract": contract,
         "validation_failures": validation_failures,
         "review_findings": review_findings,
+        "tool_failure": _latest_tool_failure(store, task_id),
         "diagnosis": (
             {
                 "category": diagnosis.category,
@@ -919,6 +926,42 @@ def _recent_repairs(store: Store, task_id: str, limit: int = 5) -> list[dict[str
     return out[:limit]
 
 
+def _latest_tool_failure(store: Store, task_id: str) -> dict[str, Any] | None:
+    """Return a bounded, redacted projection of the latest durable tool failure."""
+    rows = store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (TOOL_FAILURE_EVENT, task_id),
+    ).fetchall()
+    if not rows:
+        return None
+    payload = _loads(rows[0]["payload"])
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    command = evidence.get("command") if isinstance(evidence.get("command"), dict) else {}
+    recovery = evidence.get("recovery") if isinstance(evidence.get("recovery"), dict) else {}
+    return {
+        "at": rows[0]["created_at"],
+        "execution_id": str(payload.get("execution_id") or "") or None,
+        "kind": str(evidence.get("kind") or "unknown"),
+        "command": {
+            "executable": str(command.get("executable") or ""),
+            "text": str(command.get("text") or "")[:200],
+        },
+        "cwd": str(evidence.get("cwd"))[:500] if evidence.get("cwd") is not None else None,
+        "status": str(evidence.get("status") or "unknown")[:100],
+        "excerpt": str(evidence.get("excerpt") or "")[:600],
+        "next_action": str(evidence.get("next_action") or "Inspect the tool failure evidence.")[:500],
+        "recovery": {
+            key: recovery.get(key)
+            for key in ("action", "execution_status", "operator_action")
+            if recovery.get(key) is not None
+        },
+    }
+
+
 def _recommend(report: dict[str, Any], task_id: str, ref: str | None) -> tuple[str, str]:
     contract, diagnosis = report["contract"], report["diagnosis"]
     if report["active_claim"] or report["active_executions"]:
@@ -933,6 +976,11 @@ def _recommend(report: dict[str, Any], task_id: str, ref: str | None) -> tuple[s
         return f"stagemesh rebind-contract --task {task_id} --validate", "the contract file differs from the frozen contract"
     if report["baseline"].get("stale"):
         return f"stagemesh rebaseline-task --task {task_id} --to {ref}", "the baseline is stale: other work's files appear in this task's diff"
+    tool_failure = report.get("tool_failure")
+    if tool_failure and (tool_failure.get("recovery") or {}).get("action") == "stop":
+        action = str((tool_failure.get("recovery") or {}).get("operator_action") or tool_failure["next_action"])
+        command = f"stagemesh retry-task --task {task_id}" if report["status"] == "BLOCKED" else ""
+        return command, f"tool recovery stopped: {action} Resolve this condition before continuing."
     if report["status"] == "BLOCKED":
         block = report.get("block")
         if block and block["kind"] == "BLOCKED_EXTERNAL_DEPENDENCY":
@@ -979,6 +1027,20 @@ def format_doctor(report: dict[str, Any]) -> str:
         lines.extend(f"    - [{f.get('code', '?')}] {f.get('message', '')}" for f in report["validation_failures"])
     if report["review_findings"]:
         lines.extend(format_findings(report["review_findings"]))
+    tool_failure = report.get("tool_failure")
+    if tool_failure:
+        command = tool_failure["command"]
+        shown = command["text"] or command["executable"] or "unknown command"
+        lines.append(f"  latest tool failure: {tool_failure['kind']} ({tool_failure['status']})")
+        lines.append(f"    command: {shown}")
+        if tool_failure["cwd"]:
+            lines.append(f"    cwd: {tool_failure['cwd']}")
+        if tool_failure["excerpt"]:
+            lines.append(f"    evidence: {tool_failure['excerpt']}")
+        lines.append(f"    operator action: {tool_failure['next_action']}")
+        recovery = tool_failure.get("recovery") or {}
+        if recovery.get("action"):
+            lines.append(f"    recovery: {recovery['action']}" + (f" ({recovery['execution_status']})" if recovery.get("execution_status") else ""))
     d = report["diagnosis"]
     lines.append(f"  diagnosis: {d['category']} at {d['stage']}: {d['summary']}" if d else "  diagnosis: none")
     if report.get("block"):
