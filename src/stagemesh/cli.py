@@ -44,6 +44,11 @@ from .capabilities import (
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
 from .capabilities import inventory as capability_inventory
 from .capabilities import task_usage as capability_task_usage
+from .capability_contracts import (
+    plan_task_capabilities,
+    set_task_capabilities,
+    task_capability_preflight,
+)
 from .capability_discovery import discover_capabilities, plan_discovered_registration
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
@@ -3597,7 +3602,7 @@ def command_capacity(args: argparse.Namespace) -> int:
 def command_capabilities(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     action = getattr(args, "capability_command", None)
-    if action is not None and args.task:
+    if action is not None and args.task and action not in {"contract", "preflight"}:
         raise CapabilityRegistryError("--task is read-only usage inspection and cannot be combined with registry changes")
     if action == "register":
         permissions = args.permission
@@ -3686,6 +3691,64 @@ def command_capabilities(args: argparse.Namespace) -> int:
             "database writes: 0; subprocess calls: 0"
         )
         return 0
+    if action == "contract":
+        config = load_config(project)
+        operation = plan_task_capabilities if args.plan else set_task_capabilities
+        payload = operation(
+            project,
+            args.task,
+            add=args.add or (),
+            remove=args.remove or (),
+            database=db_path(project),
+            config=config,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            mode = "plan (read-only)" if args.plan else "applied"
+            print(
+                f"task capability selection {mode}: task={args.task} "
+                f"changed={str(payload['changed']).lower()}"
+            )
+            print(
+                "capability_refs: "
+                + ", ".join(payload["proposed_capability_refs"] or ["(none)"])
+            )
+            print(
+                f"contract={payload['contract']} rebind_required="
+                f"{str(payload['rebind_required']).lower()}"
+            )
+            if args.plan:
+                print(
+                    "writes: none; provider calls: 0; network calls: 0; "
+                    "package installs: 0; database writes: 0"
+                )
+            else:
+                print(f"written={str(payload['written']).lower()}")
+            if payload.get("next_command"):
+                print(f"next: {payload['next_command']}")
+        return 0
+    if action == "preflight":
+        payload = task_capability_preflight(project, args.task, load_config(project))
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(
+                f"task capability preflight: task={args.task} status={payload['status']} "
+                f"policy={payload['skill_evidence_mode']}"
+            )
+            for stage in payload["stages"]:
+                assert isinstance(stage, dict)
+                print(
+                    f"{stage['stage']}: ready={str(stage['ready']).lower()} "
+                    f"capabilities={','.join(stage['requested_capabilities']) or '(none)'} "
+                    f"providers={','.join(stage['eligible_providers']) or '(none)'}"
+                )
+            print(
+                "writes: none; provider calls: 0; network calls: 0; "
+                "package installs: 0; database writes: 0"
+            )
+        return 0 if payload["ready"] else 2
     rows = capability_inventory(project)
     history_available = None
     task_exists = None
@@ -5127,6 +5190,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capability_discover.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     capability_discover.set_defaults(func=command_capabilities)
+    capability_contract = capability_sub.add_parser(
+        "contract",
+        help="Preview or apply explicit capability refs in one project task contract",
+    )
+    capability_contract.add_argument("--task", required=True)
+    capability_contract.add_argument("--add", action="append", help="Registered capability id to add")
+    capability_contract.add_argument("--remove", action="append", help="Capability id to remove")
+    capability_contract.add_argument("--plan", action="store_true", help="Validate and preview without writing")
+    capability_contract.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_contract.set_defaults(func=command_capabilities)
+    capability_preflight = capability_sub.add_parser(
+        "preflight",
+        help="Read-only provider/stage routing preflight for one task's requested capabilities",
+    )
+    capability_preflight.add_argument("--task", required=True)
+    capability_preflight.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_preflight.set_defaults(func=command_capabilities)
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")

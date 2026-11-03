@@ -121,6 +121,27 @@ works if a formerly registered source or executable has disappeared. Neither com
 creates the runtime database, or records an invocation; task-level use still requires `capability_refs` and observable execution
 evidence below.
 
+Task opt-in can also be planned and applied without hand-editing the contract:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities contract `
+  --task 123 --add domain-review --plan --json
+stagemesh --project C:\path\to\project capabilities contract `
+  --task 123 --add domain-review
+stagemesh --project C:\path\to\project capabilities preflight --task 123 --json
+```
+
+The plan reuses the production contract parser and registry validation, reports the exact project contract and proposed
+`capability_refs`, and writes nothing. Applying uses an atomic project-local write, preserves unrelated supported contract fields, and
+does not change a frozen runtime binding. When the task already has a frozen contract, the result explicitly reports
+`rebind_required: true`; the separate audited `rebind-contract --plan` workflow remains the only way to replace that binding. Removing
+a selected capability remains possible after its source or runtime disappears, and a semantic no-op does not rewrite the file.
+
+The preflight is read-only. It applies the same stage filtering, provider compatibility, adapter validation, executable availability,
+and independent-provider requirement used by dispatch, then reports `ready`, `partial`, or `blocked` with bounded reasons. It never
+invokes a provider or MCP server, creates a database, installs a package, or records usage. A successful preflight establishes only that
+a route is currently available; actual use still requires later `capability.loaded` or `capability.invoked` evidence as applicable.
+
 The skill-load evidence policy is also an explicit project operation. Preview it before opting in:
 
 ```powershell

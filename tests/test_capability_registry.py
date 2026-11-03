@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -1618,3 +1619,471 @@ def test_discovery_refuses_symlinks_without_following_them(tmp_path: Path) -> No
     with pytest.raises(CapabilityRegistryError, match="discovery refuses symlink"):
         discover_capabilities(tmp_path, "agent-skills")
     assert outside.read_text(encoding="utf-8") == "# Outside\n"
+
+
+def _capability_contract_fixture(project: Path) -> Path:
+    _skill(project)
+    _registry(
+        project,
+        [
+            _entry(
+                "domain-review",
+                providers=["test"],
+                stages=["IMPLEMENT", "REVIEW"],
+            )
+        ],
+    )
+    runtime = project / ".stagemesh"
+    (runtime / "contracts").mkdir(parents=True, exist_ok=True)
+    (runtime / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {"test": "git"},
+                "routing": {
+                    "require_independent_review": False,
+                    "pools": {"IMPLEMENT": ["test"], "REVIEW": ["test"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    contract = runtime / "contracts" / "task-1.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "objective": "Use project guidance",
+                "allowed_files": ["src/**"],
+                "invariants": ["Keep unrelated behavior unchanged"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return contract
+
+
+def test_task_capability_plan_and_apply_are_explicit_atomic_and_noop_safe(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = _capability_contract_fixture(tmp_path)
+    before = contract.read_bytes()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "contract",
+            "--task",
+            "task-1",
+            "--add",
+            "domain-review",
+            "--plan",
+            "--json",
+        ]
+    ) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["changed"] is True
+    assert plan["proposed_capability_refs"] == ["domain-review"]
+    assert plan["routing"]["status"] == "ready"
+    assert plan["writes"] == [] and plan["database_writes"] == 0
+    assert plan["provider_calls"] == 0 and contract.read_bytes() == before
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "contract",
+            "--task",
+            "task-1",
+            "--add",
+            "domain-review",
+            "--json",
+        ]
+    ) == 0
+    applied = json.loads(capsys.readouterr().out)
+    persisted = json.loads(contract.read_text(encoding="utf-8"))
+    assert applied["written"] is True and applied["writes"] == [
+        ".stagemesh/contracts/task-1.json"
+    ]
+    assert persisted["capability_refs"] == ["domain-review"]
+    assert persisted["allowed_files"] == ["src/**"]
+    assert persisted["invariants"] == ["Keep unrelated behavior unchanged"]
+
+    modified = contract.stat().st_mtime_ns
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "contract",
+            "--task",
+            "task-1",
+            "--remove",
+            "not-selected",
+            "--json",
+        ]
+    ) == 0
+    noop = json.loads(capsys.readouterr().out)
+    assert noop["changed"] is False and noop["written"] is False
+    assert contract.stat().st_mtime_ns == modified
+
+
+def test_task_capability_change_reports_frozen_binding_without_mutating_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = _capability_contract_fixture(tmp_path)
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    store = Store(database)
+    store.migrate()
+    task_id = store.upsert_task("Use project guidance", source_id="task-1")
+    canonical = canonical_contract_json(parse_contract(json.loads(contract.read_text())))
+    store.bind_task_contract(task_id, "a" * 40, 1, hashlib.sha256(canonical.encode()).hexdigest(), canonical)
+    frozen = dict(store.task_contract(task_id))
+    store.close()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "contract",
+            "--task",
+            "task-1",
+            "--add",
+            "domain-review",
+            "--plan",
+            "--json",
+        ]
+    ) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["runtime_contract_frozen"] is True
+    assert plan["rebind_required"] is True
+    assert plan["next_command"] == "stagemesh rebind-contract --task task-1 --plan"
+    assert contract.read_text(encoding="utf-8").find("capability_refs") == -1
+
+    reopened = Store(database)
+    try:
+        assert dict(reopened.task_contract(task_id)) == frozen
+    finally:
+        reopened.close()
+
+
+def test_task_capability_preflight_reuses_provider_and_stage_compatibility(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = _capability_contract_fixture(tmp_path)
+    payload = json.loads(contract.read_text(encoding="utf-8"))
+    payload["capability_refs"] = ["domain-review"]
+    contract.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "preflight",
+            "--task",
+            "task-1",
+            "--json",
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "ready" and report["ready"] is True
+    assert report["requested_capabilities"] == ["domain-review"]
+    capability = report["capabilities"][0]
+    assert capability["registered"] is True
+    assert capability["installed"] is True
+    assert capability["available"] is True
+    assert capability["enabled"] is True
+    assert capability["eligible_routes"] == [
+        {"provider": "test", "stage": "IMPLEMENT"},
+        {"provider": "test", "stage": "REVIEW"},
+    ]
+    assert report["provider_calls"] == 0 and report["writes"] == []
+    assert [stage["eligible_providers"] for stage in report["stages"]] == [
+        ["test"],
+        ["test"],
+    ]
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+    registry = json.loads((tmp_path / ".stagemesh" / "capabilities.json").read_text())
+    registry["capabilities"][0]["providers"] = ["claude"]
+    (tmp_path / ".stagemesh" / "capabilities.json").write_text(
+        json.dumps(registry), encoding="utf-8"
+    )
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "preflight",
+            "--task",
+            "task-1",
+            "--json",
+        ]
+    ) == 2
+    blocked = json.loads(capsys.readouterr().out)
+    assert blocked["status"] == "blocked" and blocked["ready"] is False
+    assert blocked["capabilities"][0]["eligible_routes"] == []
+    assert len(blocked["capabilities"][0]["ineligible_routes"]) == 2
+    reasons = [
+        provider["reason"]
+        for stage in blocked["stages"]
+        for provider in stage["providers"]
+    ]
+    assert all("not compatible with provider test" in str(reason) for reason in reasons)
+
+
+def test_task_capability_selection_rejects_unsafe_adds_but_allows_unavailable_removal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = _capability_contract_fixture(tmp_path)
+    registry_path = tmp_path / ".stagemesh" / "capabilities.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["capabilities"][0]["enabled"] = False
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    before = contract.read_bytes()
+
+    command = [
+        "--project",
+        str(tmp_path),
+        "capabilities",
+        "contract",
+        "--task",
+        "task-1",
+        "--add",
+        "domain-review",
+        "--plan",
+    ]
+    assert main(command) == 2
+    assert "disabled capability" in capsys.readouterr().err
+    assert contract.read_bytes() == before
+
+    payload = json.loads(contract.read_text(encoding="utf-8"))
+    payload["capability_refs"] = ["domain-review"]
+    contract.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "agent-skills" / "domain-review" / "SKILL.md").unlink()
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "contract",
+            "--task",
+            "task-1",
+            "--remove",
+            "domain-review",
+            "--json",
+        ]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["removed"] == ["domain-review"] and result["written"] is True
+    assert "capability_refs" not in json.loads(contract.read_text(encoding="utf-8"))
+
+
+def test_task_capability_contract_refuses_symlinks_without_touching_target(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _capability_contract_fixture(tmp_path)
+    contract = tmp_path / ".stagemesh" / "contracts" / "task-1.json"
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-contract.json"
+    outside.write_bytes(contract.read_bytes())
+    contract.unlink()
+    try:
+        contract.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    before = outside.read_bytes()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "contract",
+            "--task",
+            "task-1",
+            "--add",
+            "domain-review",
+            "--plan",
+        ]
+    ) == 2
+    assert "refuses a symlink" in capsys.readouterr().err
+    assert outside.read_bytes() == before and contract.is_symlink()
+
+
+def test_capability_preflight_routes_codex_mcp_and_claude_plugin_without_invocation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command_dir = tmp_path / "provider-bin"
+    command_dir.mkdir()
+    for name in ("codex", "claude"):
+        executable = command_dir / (f"{name}.exe" if os.name == "nt" else name)
+        executable.write_text("", encoding="utf-8")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(command_dir) + os.pathsep + os.environ.get("PATH", ""))
+    _mcp_manifest(tmp_path)
+    _claude_plugin(tmp_path)
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "skill_evidence_mode": OBSERVED_LOAD_REQUIRED,
+                "capabilities": [
+                    _entry(
+                        "serena",
+                        kind="mcp",
+                        source=".stagemesh/mcp/serena.json",
+                        providers=["codex"],
+                        stages=["IMPLEMENT"],
+                        permissions=["workspace-read", "subprocess"],
+                    ),
+                    _entry(
+                        "review-kit",
+                        kind="claude-plugin",
+                        source=".claude/plugins/review-kit",
+                        providers=["claude"],
+                        stages=["REVIEW"],
+                    ),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    contracts = tmp_path / ".stagemesh" / "contracts"
+    contracts.mkdir(parents=True)
+    (contracts / "task-1.json").write_text(
+        json.dumps(
+            {
+                "objective": "Use bounded tools and review guidance",
+                "capability_refs": ["serena", "review-kit"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {"codex": "codex", "claude": "claude"},
+                "routing": {
+                    "require_independent_review": True,
+                    "pools": {"IMPLEMENT": ["codex"], "REVIEW": ["claude"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "preflight",
+            "--task",
+            "task-1",
+            "--json",
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "ready"
+    assert report["skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
+    assert report["stages"][0]["requested_capabilities"] == ["serena"]
+    assert report["stages"][0]["evidence_requirements"] == ["mcp-invocation"]
+    assert report["stages"][0]["eligible_providers"] == ["codex"]
+    assert report["stages"][1]["requested_capabilities"] == ["review-kit"]
+    assert report["stages"][1]["evidence_requirements"] == ["observed-load"]
+    assert report["stages"][1]["eligible_providers"] == ["claude"]
+    assert report["provider_calls"] == 0 and report["writes"] == []
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+
+def test_capability_preflight_supports_distinct_grok_and_agy_skill_routes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "domain-review",
+                providers=["grok", "agy"],
+                stages=["IMPLEMENT", "REVIEW"],
+            )
+        ],
+    )
+    contracts = tmp_path / ".stagemesh" / "contracts"
+    contracts.mkdir(parents=True)
+    (contracts / "task-1.json").write_text(
+        json.dumps(
+            {
+                "objective": "Use guidance across providers",
+                "capability_refs": ["domain-review"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {"grok": "git", "agy": "git"},
+                "routing": {
+                    "require_independent_review": True,
+                    "pools": {"IMPLEMENT": ["grok"], "REVIEW": ["agy"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "preflight",
+            "--task",
+            "task-1",
+            "--json",
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["independent_provider_pair"] is True
+    assert report["stages"][0]["eligible_providers"] == ["grok"]
+    assert report["stages"][1]["eligible_providers"] == ["agy"]
+
+
+def test_capability_preflight_fails_closed_when_observed_events_are_unsupported(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = _capability_contract_fixture(tmp_path)
+    payload = json.loads(contract.read_text(encoding="utf-8"))
+    payload["capability_refs"] = ["domain-review"]
+    contract.write_text(json.dumps(payload), encoding="utf-8")
+    registry_path = tmp_path / ".stagemesh" / "capabilities.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["skill_evidence_mode"] = OBSERVED_LOAD_REQUIRED
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "preflight",
+            "--task",
+            "task-1",
+            "--json",
+        ]
+    ) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked"
+    assert report["capabilities"][0]["evidence_requirements"] == ["observed-load"]
+    reasons = [
+        route["reason"] for route in report["capabilities"][0]["ineligible_routes"]
+    ]
+    assert all("observed skill loading is unsupported" in reason for reason in reasons)
+    assert report["provider_calls"] == 0 and report["writes"] == []
