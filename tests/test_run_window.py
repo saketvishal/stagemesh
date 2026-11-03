@@ -239,6 +239,7 @@ def test_window_report_includes_bounded_task_capability_evidence(tmp_path: Path)
         json.dumps(
             {
                 "format_version": 1,
+                "skill_evidence_mode": "observed-load-required",
                 "capabilities": [
                     {
                         "id": "domain-review",
@@ -295,13 +296,40 @@ def test_window_report_includes_bounded_task_capability_evidence(tmp_path: Path)
 
     capability_report = report.capability_usage["1"]
     assert capability_report["requested"] == ["domain-review"]
+    assert capability_report["skill_evidence_mode"] == "observed-load-required"
     (row,) = capability_report["capabilities"]
     assert row["registered"] is True and row["requested"] is True
     assert row["usage"]["status"] == "loaded"
     written = json.loads(options.report_path.read_text(encoding="utf-8"))
     assert written["tasks"][0]["capabilities"] == capability_report
     assert "raw_prompt" not in json.dumps(written["tasks"][0]["capabilities"])
-    assert "capabilities: 1 requested; 1 observed" in rw.format_window_report(report)
+    assert (
+        "capabilities: 1 requested; 1 observed; policy=observed-load-required"
+        in rw.format_window_report(report)
+    )
+
+
+def test_window_report_marks_corrupt_capability_registry_unavailable(tmp_path: Path) -> None:
+    store, project, _rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
+    (project / ".stagemesh" / "capabilities.json").write_text(
+        "{not-json", encoding="utf-8"
+    )
+
+    report = rw.run_window(
+        store,
+        project,
+        config,
+        options,
+        hooks,
+        base_ref="refs/heads/main",
+        staging_ref="refs/heads/wave/staging",
+        **kwargs,
+    )
+
+    capability_report = report.capability_usage["1"]
+    assert capability_report["status"] == "unavailable"
+    assert "cannot load .stagemesh/capabilities.json" in capability_report["reason"]
+    assert "capabilities: unavailable" in rw.format_window_report(report)
 
 
 def test_an_empty_backlog_is_a_clean_window_with_nothing_to_do(tmp_path: Path) -> None:

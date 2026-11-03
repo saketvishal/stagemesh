@@ -1411,10 +1411,10 @@ def format_window_report(report: WindowReport) -> str:
                 for row in capability_rows
                 if (row.get("usage") or {}).get("status") != "not-observed"
             ]
-            if requested or observed:
-                lines.append(
-                    f"      capabilities: {len(requested)} requested; {len(observed)} observed"
-                )
+            lines.append(
+                f"      capabilities: {len(requested)} requested; {len(observed)} observed; "
+                f"policy={capability_report.get('skill_evidence_mode', 'unknown')}"
+            )
         elif capability_report:
             lines.append("      capabilities: unavailable")
         if task.reason and task.outcome not in ("done",):

@@ -122,6 +122,8 @@ Projects may opt into `observed-load-required` skill evidence. Supported provide
 `capability.loaded` receipts for implementation and review, and a provider that does not show every selected skill being read before
 its first recorded mutation is rejected without a quota cooldown. Review streams must also contain a recognized final-answer event;
 unknown JSONL shapes fail closed. The default remains attachment-only and never overstates prompt delivery as model use.
+Use `stagemesh capabilities policy observed-load-required --plan --json` to preview the bounded registry change, then remove `--plan`
+to apply it atomically. Task and run reports expose the effective policy alongside usage evidence.
 
 `codex`, `claude`, `grok` and `agy` are built-in registry entries; any other name can be added under `providers`, as a plain command string
 or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `priority` (lower first) and `weight`:

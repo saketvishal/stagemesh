@@ -108,8 +108,32 @@ def skill_evidence_mode(project: Path) -> str:
     return str(payload.get("skill_evidence_mode", ATTACHMENT_REQUIRED))
 
 
+def plan_skill_evidence_mode(project: Path, mode: str) -> dict[str, object]:
+    """Validate a project skill-evidence policy change without writing it."""
+    plan, _payload = _skill_evidence_mode_change(project, mode)
+    return plan
+
+
+def set_skill_evidence_mode(project: Path, mode: str) -> dict[str, object]:
+    """Atomically apply an explicit project skill-evidence policy."""
+    plan, payload = _skill_evidence_mode_change(project, mode)
+    if plan["changed"]:
+        _write_registry(Path(project).resolve(), payload)
+    return {
+        **plan,
+        "planned": False,
+        "applied": True,
+        "writes": list(plan["planned_writes"]) if plan["changed"] else [],
+        "written": bool(plan["changed"]),
+    }
+
+
 def _registry_payload(root: Path) -> dict[str, object] | None:
     path = root / REGISTRY_PATH
+    if path.is_symlink():
+        raise CapabilityRegistryError("capability registry read refuses a symlink target")
+    if path.parent.is_symlink():
+        raise CapabilityRegistryError("capability registry read refuses a symlink directory")
     if not path.exists():
         return None
     try:
@@ -533,6 +557,7 @@ def task_capability_summary(
         "task_id": str(task_id),
         "history_available": True,
         "task_exists": task_exists,
+        "skill_evidence_mode": skill_evidence_mode(project),
         "registry_count": len(rows),
         "requested": requested_ids,
         "unregistered_requested": [item for item in requested_ids if item not in rows],
@@ -724,6 +749,44 @@ def _enabled_change(
         "provider_calls": 0,
         "network_calls": 0,
         "package_installs": 0,
+    }
+    return plan, next_payload
+
+
+def _skill_evidence_mode_change(
+    project: Path, mode: str
+) -> tuple[dict[str, object], dict[str, object]]:
+    normalized = str(mode).strip()
+    if normalized not in SKILL_EVIDENCE_MODES:
+        raise CapabilityRegistryError(
+            "skill evidence mode must be attachment-required or observed-load-required"
+        )
+    root = Path(project).resolve()
+    payload = _registry_payload(root)
+    current = (
+        ATTACHMENT_REQUIRED
+        if payload is None
+        else str(payload.get("skill_evidence_mode", ATTACHMENT_REQUIRED))
+    )
+    changed = current != normalized
+    next_payload = dict(payload or {"format_version": 1, "capabilities": []})
+    if normalized == ATTACHMENT_REQUIRED:
+        next_payload.pop("skill_evidence_mode", None)
+    else:
+        next_payload["skill_evidence_mode"] = normalized
+    plan = {
+        "planned": True,
+        "operation": "set-skill-evidence-mode",
+        "changed": changed,
+        "registry": REGISTRY_PATH.as_posix(),
+        "current_mode": current,
+        "skill_evidence_mode": normalized,
+        "planned_writes": [REGISTRY_PATH.as_posix()] if changed else [],
+        "writes": [],
+        "provider_calls": 0,
+        "network_calls": 0,
+        "package_installs": 0,
+        "database_writes": 0,
     }
     return plan, next_payload
 

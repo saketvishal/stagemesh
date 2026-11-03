@@ -1403,7 +1403,8 @@ def format_doctor(report: dict[str, Any]) -> str:
         lines.append(
             f"  capabilities: {capabilities.get('registry_count', 0)} registered; "
             f"{len(rows)} task-relevant; "
-            f"{len(requested)} requested; {len(observed)} observed"
+            f"{len(requested)} requested; {len(observed)} observed; "
+            f"policy={capabilities.get('skill_evidence_mode', 'unknown')}"
         )
         for row in rows:
             usage = row.get("usage") or {}

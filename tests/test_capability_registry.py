@@ -1331,3 +1331,110 @@ def test_registry_skill_evidence_mode_is_explicit_and_validated(tmp_path: Path) 
     )
     with pytest.raises(CapabilityRegistryError, match="capabilities must be a list"):
         skill_evidence_mode(tmp_path)
+
+
+def test_skill_evidence_policy_plan_is_read_only_and_reports_bounded_effects(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "policy",
+            OBSERVED_LOAD_REQUIRED,
+            "--plan",
+            "--json",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload == {
+        "changed": True,
+        "current_mode": ATTACHMENT_REQUIRED,
+        "database_writes": 0,
+        "network_calls": 0,
+        "operation": "set-skill-evidence-mode",
+        "package_installs": 0,
+        "planned": True,
+        "planned_writes": [".stagemesh/capabilities.json"],
+        "provider_calls": 0,
+        "registry": ".stagemesh/capabilities.json",
+        "skill_evidence_mode": OBSERVED_LOAD_REQUIRED,
+        "writes": [],
+    }
+    assert not registry.exists()
+
+
+def test_skill_evidence_policy_apply_is_atomic_preserves_entries_and_noop_does_not_rewrite(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _registry(tmp_path, [_entry("domain-review")])
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "policy",
+            OBSERVED_LOAD_REQUIRED,
+            "--json",
+        ]
+    ) == 0
+    applied = json.loads(capsys.readouterr().out)
+    content = registry.read_bytes()
+    modified = registry.stat().st_mtime_ns
+    persisted = json.loads(content)
+
+    assert applied["written"] is True and applied["writes"] == [
+        ".stagemesh/capabilities.json"
+    ]
+    assert persisted["skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
+    assert persisted["capabilities"] == [_entry("domain-review")]
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "policy",
+            OBSERVED_LOAD_REQUIRED,
+            "--json",
+        ]
+    ) == 0
+    noop = json.loads(capsys.readouterr().out)
+    assert noop["changed"] is False and noop["written"] is False
+    assert registry.read_bytes() == content and registry.stat().st_mtime_ns == modified
+
+
+def test_skill_evidence_policy_refuses_registry_symlink_without_reading_or_writing_outside(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    registry.parent.mkdir(parents=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-policy.json"
+    outside.write_text(
+        json.dumps({"format_version": 1, "capabilities": []}), encoding="utf-8"
+    )
+    try:
+        registry.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    before = outside.read_bytes()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "policy",
+            OBSERVED_LOAD_REQUIRED,
+            "--plan",
+        ]
+    ) == 2
+    assert "read refuses a symlink" in capsys.readouterr().err
+    assert outside.read_bytes() == before and registry.is_symlink()

@@ -861,6 +861,7 @@ def test_task_doctor_distinguishes_requested_registered_and_observed_capabilitie
         json.dumps(
             {
                 "format_version": 1,
+                "skill_evidence_mode": "observed-load-required",
                 "capabilities": [
                     {
                         "id": "domain-review",
@@ -902,6 +903,7 @@ def test_task_doctor_distinguishes_requested_registered_and_observed_capabilitie
     assert audit_count(store) == before
     capabilities = report["capabilities"]
     assert capabilities["status"] == "available"
+    assert capabilities["skill_evidence_mode"] == "observed-load-required"
     assert capabilities["requested"] == ["domain-review", "removed-review"]
     assert capabilities["unregistered_requested"] == ["removed-review"]
     rows = {row["id"]: row for row in capabilities["capabilities"]}
@@ -915,8 +917,22 @@ def test_task_doctor_distinguishes_requested_registered_and_observed_capabilitie
     capability_line = next(
         line for line in text.splitlines() if line.strip().startswith("capabilities:")
     )
-    assert "2 requested; 2 observed" in capability_line
+    assert "2 requested; 2 observed; policy=observed-load-required" in capability_line
     assert "removed-review: UNREGISTERED; requested; usage=evidence-missing" in text
+
+
+def test_task_doctor_reports_corrupt_capability_registry_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    registry = project / ".stagemesh" / "capabilities.json"
+    registry.write_text("{not-json", encoding="utf-8")
+
+    report = task_doctor(store, project, TASK)
+
+    assert report["capabilities"]["status"] == "unavailable"
+    assert "cannot load .stagemesh/capabilities.json" in report["capabilities"]["reason"]
+    assert "capabilities: unavailable" in format_doctor(report)
 
 
 def test_task_doctor_projects_latest_tool_failure_and_stops_generic_continue(tmp_path: Path) -> None:
