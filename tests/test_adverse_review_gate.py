@@ -10,6 +10,7 @@ from stagemesh.config import AdverseReviewPolicy
 from stagemesh.coordinator import Coordinator, TargetSelection
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage
 from stagemesh.persistence import Store
+from stagemesh.recovery import format_doctor, task_doctor
 from stagemesh.remediation import findings_to_verify, unresolved_findings
 from stagemesh.review import adverse_gate
 from stagemesh.review_identity import command_snapshot, record_implementation_identity
@@ -65,9 +66,48 @@ def _gate(store, **kwargs):
 
 def test_executed_independent_bound_review_is_accepted(tmp_path):
     store = _store(tmp_path)
+    store.bind_contract(TASK, NEW, NEW, 1, DIGEST, "{}")
     _review(store)
     store.upsert_finding("f1", TASK, NEW, "nit", "style only")
     assert _gate(store).allowed
+
+    report = task_doctor(store, tmp_path, TASK)
+    assert report["adverse_review"]["status"] == "passed"
+    assert report["adverse_review"]["provider"] == "claude"
+    assert report["adverse_review"]["verdict"] == "PASS"
+    assert report["adverse_review"]["override_used"] is False
+    assert "adverse review: passed by claude; verdict=PASS" in format_doctor(report)
+
+
+def test_task_doctor_uses_latest_exact_adverse_evidence(tmp_path):
+    store = _store(tmp_path)
+    store.bind_contract(TASK, NEW, NEW, 1, DIGEST, "{}")
+    _review(store)
+    _review(store, review_provider="gemini")
+
+    report = task_doctor(store, tmp_path, TASK)
+
+    assert report["adverse_review"]["provider"] == "gemini"
+
+
+def test_task_doctor_finds_exact_override_behind_an_unrelated_later_override(tmp_path):
+    store = _store(tmp_path)
+    store.bind_contract(TASK, NEW, NEW, 1, DIGEST, "{}")
+    assert _gate(store, override={"actor": "operator", "reason": "accepted current candidate"}).overridden
+    assert adverse_gate(
+        store,
+        TASK,
+        OLD,
+        DIGEST,
+        POLICY,
+        override={"actor": "operator", "reason": "different candidate"},
+    ).overridden
+
+    report = task_doctor(store, tmp_path, TASK)
+
+    assert report["adverse_review"]["status"] == "overridden"
+    assert report["adverse_review"]["override_used"] is True
+    assert "adverse review: overridden; override=yes" in format_doctor(report)
 
 
 def test_missing_or_weaker_review_blocks(tmp_path):

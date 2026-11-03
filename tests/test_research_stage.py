@@ -19,6 +19,7 @@ from stagemesh.providers import (
     _build_task_prompt,
     adapters_from_config,
 )
+from stagemesh.recovery import format_doctor, task_doctor
 from stagemesh.research_context import ResearchBlocked, source_snapshot
 
 RESEARCHER = r'''
@@ -132,6 +133,23 @@ def test_accepted_research_feeds_bounded_findings_and_audits(rig) -> None:
     assert events(store)[0]["outcome"] == "accepted"
     assert events(store)[0]["finding_count"] == 1
     assert git(project, "status", "--porcelain") == ""
+
+    report = task_doctor(store, project, "t1")
+    assert report["research"]["status"] == "accepted"
+    assert report["research"]["researcher"] == "researcher"
+    assert report["research"]["finding_count"] == 1
+    assert report["research"]["inspected_path_count"] == 1
+    assert "research: accepted by researcher; findings=1" in format_doctor(report)
+
+
+def test_task_doctor_explains_why_research_was_not_required(rig) -> None:
+    project, _bound, store, _adapter = rig
+
+    report = task_doctor(store, project, "t1")
+
+    assert report["research"]["status"] == "not-required"
+    assert report["research"]["reason"] == "the project has no research provider configured"
+    assert "reason=the project has no research provider configured" in format_doctor(report)
 
 
 def test_findings_appear_in_implementation_prompt_only_when_supplied(rig) -> None:

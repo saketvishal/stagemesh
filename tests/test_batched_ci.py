@@ -28,6 +28,18 @@ from stagemesh.runtime_freshness import RuntimeFreshness
 from stagemesh.survivor_wave import RepoState, format_report, load_wave_contract, run_wave
 
 
+def test_full_ci_runs_once_for_a_feature_batch_and_still_supports_merge_queue() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    trigger = workflow.split("jobs:", 1)[0]
+
+    assert "pull_request:" in trigger
+    assert "merge_group:" in trigger
+    assert "workflow_dispatch:" in trigger
+    assert "push:" not in trigger
+
+
 def test_batch_publication_records_actual_pr_head_separately_from_task_candidates(tmp_path):
     from stagemesh.delivery_state import task_delivery
 

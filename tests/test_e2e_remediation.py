@@ -10,6 +10,7 @@ import pytest
 from stagemesh.domain import EvidenceStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
+from stagemesh.recovery import format_doctor, task_doctor
 from stagemesh.remediation import remediation_context
 from stagemesh.validation import Validator
 from stagemesh.validation_services import discover_validation_services
@@ -83,6 +84,13 @@ def test_configured_evaluation_runs_candidate_and_retains_artifacts(evaluation, 
     assert not (project / "trace.log").exists()
     assert store.latest_candidate(task)["sha"] == sha
 
+    report = task_doctor(store, project, task)
+    assert report["e2e"]["status"] == "passed"
+    assert report["e2e"]["candidate_sha"] == sha
+    assert report["e2e"]["evaluations"][0]["kind"] == kind
+    assert report["e2e"]["artifact_paths"] == [artifact["path"]]
+    assert "e2e: passed; evaluations=1; artifacts=1" in format_doctor(report)
+
 
 @pytest.mark.parametrize("code, expected", [
     ("raise AssertionError('expected checkout button')", "assertion"),
@@ -101,6 +109,11 @@ def test_failure_kind_and_actionable_output_reach_remediation(evaluation, code, 
     context = remediation_context(store, task, project)
     assert context["failed_gates"][0]["failure_kind"] == expected
     assert context["findings"][0]["stderr"]
+
+    report = task_doctor(store, project, task)
+    assert report["e2e"]["status"] == "failed"
+    assert report["e2e"]["first_actionable_error"]["failure_kind"] == expected
+    assert "e2e: failed; evaluations=1" in format_doctor(report)
 
 
 def test_missing_tool_is_not_an_assertion(evaluation):
