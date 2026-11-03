@@ -3637,6 +3637,7 @@ def command_capabilities(args: argparse.Namespace) -> int:
             source=Path(args.source),
             providers=args.provider,
             stages=args.stage,
+            update=args.update,
         )
         return _print_capability_vendor(payload, args.json, plan=args.plan)
     if action in {"enable", "disable"}:
@@ -5229,6 +5230,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capability_vendor.add_argument(
         "--plan", action="store_true", help="Validate and preview without writing"
+    )
+    capability_vendor.add_argument(
+        "--update",
+        action="store_true",
+        help="Explicitly replace the matching vendored source and leave it disabled",
     )
     capability_vendor.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     capability_vendor.set_defaults(func=command_capabilities)

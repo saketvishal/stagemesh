@@ -27,7 +27,7 @@ from stagemesh.capabilities import (
     task_capability_summary,
 )
 from stagemesh.capability_discovery import discover_capabilities
-from stagemesh.capability_vendor import vendor_capability
+from stagemesh.capability_vendor import plan_capability_vendor, vendor_capability
 from stagemesh.capacity import CapacityKind
 from stagemesh.cli import main
 from stagemesh.contracts import ChangeContract, canonical_contract_json, parse_contract
@@ -3092,3 +3092,143 @@ def test_capability_vendor_rolls_back_copy_when_registration_fails(
         )
     assert not (project / ".stagemesh" / "vendor" / "capabilities" / "reviewed").exists()
     assert not (project / ".stagemesh" / "capabilities.json").exists()
+
+
+def test_capability_vendor_refresh_plan_and_apply_replace_tree_and_disable(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "SKILL.md").write_text("# Version one\n", encoding="utf-8")
+    (source / "old-reference.md").write_text("old\n", encoding="utf-8")
+    vendor_capability(
+        project,
+        capability_id="reviewed-package",
+        kind="skill",
+        source=source,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+    )
+    set_capability_enabled(project, "reviewed-package", True)
+    target = project / ".stagemesh" / "vendor" / "capabilities" / "reviewed-package"
+    before = (target / "SKILL.md").read_bytes()
+    (source / "SKILL.md").write_text("# Version two\n", encoding="utf-8")
+    (source / "old-reference.md").unlink()
+    (source / "new-reference.md").write_text("new\n", encoding="utf-8")
+
+    plan = plan_capability_vendor(
+        project,
+        capability_id="reviewed-package",
+        kind="skill",
+        source=source,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+        update=True,
+    )
+    assert plan["operation"] == "refresh-vendored-capability"
+    assert plan["changed"] is True
+    assert plan["previous_entry"]["enabled"] is True
+    assert plan["entry"]["enabled"] is False
+    assert (target / "SKILL.md").read_bytes() == before
+
+    applied = vendor_capability(
+        project,
+        capability_id="reviewed-package",
+        kind="skill",
+        source=source,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+        update=True,
+    )
+    row = inventory(project)[0]
+    assert applied["written"] is True and applied["lifecycle"]["enabled"] is False
+    assert (target / "SKILL.md").read_text(encoding="utf-8") == "# Version two\n"
+    assert not (target / "old-reference.md").exists()
+    assert (target / "new-reference.md").read_text(encoding="utf-8") == "new\n"
+    assert row["enabled"] is False and row["integrity"] == "verified"
+    assert row["source_tree_sha256"] == plan["source"]["tree_sha256"]
+
+
+def test_capability_vendor_refresh_noop_does_not_rewrite_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "SKILL.md"
+    source.write_text("# Stable\n", encoding="utf-8")
+    vendor_capability(
+        project,
+        capability_id="stable-skill",
+        kind="skill",
+        source=source,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+    )
+    registry = project / ".stagemesh" / "capabilities.json"
+    receipt = project / ".stagemesh" / "vendor" / "capabilities" / "stable-skill" / ".stagemesh-vendor.json"
+    before = (registry.read_bytes(), registry.stat().st_mtime_ns, receipt.stat().st_mtime_ns)
+
+    payload = vendor_capability(
+        project,
+        capability_id="stable-skill",
+        kind="skill",
+        source=source,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+        update=True,
+    )
+    after = (registry.read_bytes(), registry.stat().st_mtime_ns, receipt.stat().st_mtime_ns)
+    assert payload["changed"] is False and payload["written"] is False
+    assert payload["writes"] == [] and after == before
+
+    copied_skill = receipt.parent / "SKILL.md"
+    copied_skill.write_text("# Drifted\n", encoding="utf-8")
+    repaired = vendor_capability(
+        project,
+        capability_id="stable-skill",
+        kind="skill",
+        source=source,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+        update=True,
+    )
+    assert repaired["changed"] is True and repaired["written"] is True
+    assert copied_skill.read_text(encoding="utf-8") == "# Stable\n"
+    assert inventory(project)[0]["integrity"] == "verified"
+
+
+def test_capability_vendor_refresh_rolls_back_tree_on_registry_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "SKILL.md"
+    source.write_text("# Original\n", encoding="utf-8")
+    vendor_capability(
+        project,
+        capability_id="reviewed",
+        kind="skill",
+        source=source,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+    )
+    registry = project / ".stagemesh" / "capabilities.json"
+    target = project / ".stagemesh" / "vendor" / "capabilities" / "reviewed" / "SKILL.md"
+    before = (registry.read_bytes(), target.read_bytes())
+    source.write_text("# Replacement\n", encoding="utf-8")
+
+    def fail_registration(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise CapabilityRegistryError("simulated refresh refusal")
+
+    monkeypatch.setattr(capability_vendor_module, "register_capability", fail_registration)
+    with pytest.raises(CapabilityRegistryError, match="simulated refresh refusal"):
+        vendor_capability(
+            project,
+            capability_id="reviewed",
+            kind="skill",
+            source=source,
+            providers=["codex"],
+            stages=["IMPLEMENT"],
+            update=True,
+        )
+    assert (registry.read_bytes(), target.read_bytes()) == before

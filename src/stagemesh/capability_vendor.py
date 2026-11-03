@@ -15,7 +15,9 @@ import tempfile
 from pathlib import Path
 
 from .capabilities import (
+    CapabilityDefinition,
     CapabilityRegistryError,
+    inventory,
     load_registry,
     register_capability,
     validate_capability_declaration,
@@ -41,6 +43,7 @@ def plan_capability_vendor(
     source: Path,
     providers: list[str],
     stages: list[str],
+    update: bool = False,
 ) -> dict[str, object]:
     """Validate and preview a local capability copy without writing."""
     root = Path(project).resolve()
@@ -50,10 +53,22 @@ def plan_capability_vendor(
     destination = VENDOR_ROOT / capability_id
     relative_source = _registered_source(destination, kind)
     permissions = ["workspace-read", "subprocess"] if kind == "mcp" else ["workspace-read"]
-    if any(item.id == capability_id for item in load_registry(root)):
-        raise CapabilityRegistryError(f"capability is already registered: {capability_id}")
+    existing = next((item for item in load_registry(root) if item.id == capability_id), None)
     target = root / destination
-    _validate_destination(root, target)
+    if update:
+        if existing is None:
+            raise CapabilityRegistryError(f"cannot refresh unregistered capability: {capability_id}")
+        if (
+            existing.kind != kind
+            or existing.source != relative_source.as_posix()
+            or existing.source_tree_sha256 is None
+        ):
+            raise CapabilityRegistryError(
+                "refresh is limited to a matching capability created by the local vendor operation"
+            )
+    elif existing is not None:
+        raise CapabilityRegistryError(f"capability is already registered: {capability_id}")
+    _validate_destination(root, target, update=update)
     rows = _file_rows(files)
     source_tree_sha256 = _tree_digest(rows)
     entry = validate_capability_declaration(
@@ -75,11 +90,25 @@ def plan_capability_vendor(
         "source_tree_sha256": source_tree_sha256,
         "files": rows,
     }
+    next_entry = {**entry, "content_sha256": registered_digest}
+    previous_entry = _definition_payload(existing) if existing is not None else None
+    current_row = (
+        next((row for row in inventory(root) if row["id"] == capability_id), None)
+        if update
+        else None
+    )
+    changed = previous_entry != next_entry or bool(
+        update and (current_row is None or current_row["integrity"] != "verified")
+    )
+    predicted_available = runtime_installed and (
+        kind in {"skill", "claude-plugin"} or "codex" in providers
+    )
     return {
         "planned": True,
-        "operation": "vendor-local-capability",
-        "changed": True,
-        "entry": {**entry, "content_sha256": registered_digest},
+        "operation": "refresh-vendored-capability" if update else "vendor-local-capability",
+        "changed": changed,
+        "entry": next_entry,
+        "previous_entry": previous_entry,
         "source": {
             "name": source_name,
             "file_count": len(rows),
@@ -90,11 +119,15 @@ def plan_capability_vendor(
         "registered_source": relative_source.as_posix(),
         "receipt": receipt,
         "lifecycle": {
-            "vendored": False,
-            "registered": False,
-            "enabled": False,
-            "runtime_installed": runtime_installed,
-            "available": False,
+            "vendored": bool(update and target.is_dir()),
+            "registered": update,
+            "enabled": existing.enabled if existing is not None else False,
+            "runtime_installed": (
+                current_row["runtime_installed"]
+                if current_row is not None
+                else runtime_installed
+            ),
+            "available": current_row["available"] if current_row is not None else False,
             "attached": False,
             "loaded": False,
             "invoked": False,
@@ -104,11 +137,14 @@ def plan_capability_vendor(
             "registered": True,
             "enabled": False,
             "runtime_installed": runtime_installed,
+            "available": predicted_available,
             "attached": False,
             "loaded": False,
             "invoked": False,
         },
-        "planned_writes": [destination.as_posix(), ".stagemesh/capabilities.json"],
+        "planned_writes": (
+            [destination.as_posix(), ".stagemesh/capabilities.json"] if changed else []
+        ),
         "writes": [],
         "provider_calls": 0,
         "network_calls": 0,
@@ -127,6 +163,7 @@ def vendor_capability(
     source: Path,
     providers: list[str],
     stages: list[str],
+    update: bool = False,
 ) -> dict[str, object]:
     """Stage a local copy and register it disabled, rolling back on refusal."""
     root = Path(project).resolve()
@@ -137,12 +174,25 @@ def vendor_capability(
         source=source,
         providers=providers,
         stages=stages,
+        update=update,
     )
+    if not plan["changed"]:
+        current = next(row for row in inventory(root) if row["id"] == capability_id)
+        return {
+            **plan,
+            "planned": False,
+            "applied": True,
+            "writes": [],
+            "written": False,
+            "lifecycle": _applied_lifecycle(current),
+            "inventory": current,
+        }
     target = root / str(plan["destination"])
     vendor_root = root / VENDOR_ROOT
     stage: Path | None = None
     lock_descriptor = -1
     lock_path: Path | None = None
+    backup: Path | None = None
     try:
         _validate_vendor_root(root, vendor_root)
         vendor_root.mkdir(parents=True, exist_ok=True)
@@ -167,8 +217,14 @@ def vendor_capability(
             newline="",
         )
         _validate_staged(root, stage, kind)
-        if target.exists() or target.is_symlink():
+        if not update and (target.exists() or target.is_symlink()):
             raise CapabilityRegistryError("vendor destination appeared during staging; overwrite is refused")
+        if update and target.exists():
+            if target.is_symlink() or not target.is_dir():
+                raise CapabilityRegistryError("vendored refresh target became unsafe")
+            backup = Path(tempfile.mkdtemp(dir=vendor_root, prefix=f".{capability_id}.backup."))
+            backup.rmdir()
+            os.replace(target, backup)
         os.replace(stage, target)
         stage = None
         try:
@@ -183,19 +239,26 @@ def vendor_capability(
                     ["workspace-read", "subprocess"] if kind == "mcp" else ["workspace-read"]
                 ),
                 enabled=False,
-                update=False,
+                update=update,
                 source_tree_sha256=str(plan["source"]["tree_sha256"]),
             )
         except Exception:
             _remove_exact_target(root, target)
+            if backup is not None and backup.exists():
+                os.replace(backup, target)
             raise
+        if backup is not None:
+            shutil.rmtree(backup, ignore_errors=True)
+            backup = None
     except CapabilityRegistryError:
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
+        _restore_backup(target, backup)
         raise
     except (OSError, ClaudePluginCapabilityError, McpCapabilityError) as exc:
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
+        _restore_backup(target, backup)
         raise CapabilityRegistryError(f"cannot vendor capability: {exc}") from exc
     finally:
         if lock_descriptor >= 0:
@@ -213,16 +276,7 @@ def vendor_capability(
         "applied": True,
         "writes": list(plan["planned_writes"]),
         "written": True,
-        "lifecycle": {
-            "vendored": True,
-            "registered": True,
-            "enabled": False,
-            "runtime_installed": registration["inventory"]["runtime_installed"],
-            "available": registration["inventory"]["available"],
-            "attached": False,
-            "loaded": False,
-            "invoked": False,
-        },
+        "lifecycle": _applied_lifecycle(registration["inventory"]),
         "inventory": registration["inventory"],
     }
 
@@ -380,9 +434,11 @@ def _registered_source(destination: Path, kind: str) -> Path:
     return destination
 
 
-def _validate_destination(root: Path, target: Path) -> None:
-    if target.exists() or target.is_symlink():
+def _validate_destination(root: Path, target: Path, *, update: bool) -> None:
+    if not update and (target.exists() or target.is_symlink()):
         raise CapabilityRegistryError("vendor destination already exists; overwrite is refused")
+    if update and (target.is_symlink() or target.exists() and not target.is_dir()):
+        raise CapabilityRegistryError("vendored refresh target is unsafe")
     _validate_vendor_root(root, root / VENDOR_ROOT)
 
 
@@ -411,3 +467,43 @@ def _remove_exact_target(root: Path, target: Path) -> None:
     if target.parent.resolve() != expected_parent or not target.resolve().is_relative_to(root):
         raise CapabilityRegistryError("refusing unsafe vendor rollback target")
     shutil.rmtree(target)
+
+
+def _restore_backup(target: Path, backup: Path | None) -> None:
+    if backup is None or not backup.exists():
+        return
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    os.replace(backup, target)
+
+
+def _definition_payload(item: CapabilityDefinition | None) -> dict[str, object] | None:
+    if item is None:
+        return None
+    payload: dict[str, object] = {
+        "id": item.id,
+        "kind": item.kind,
+        "source": item.source,
+        "enabled": item.enabled,
+        "providers": list(item.providers),
+        "stages": list(item.stages),
+        "permissions": list(item.permissions),
+    }
+    if item.content_sha256 is not None:
+        payload["content_sha256"] = item.content_sha256
+    if item.source_tree_sha256 is not None:
+        payload["source_tree_sha256"] = item.source_tree_sha256
+    return payload
+
+
+def _applied_lifecycle(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "vendored": True,
+        "registered": True,
+        "enabled": False,
+        "runtime_installed": row["runtime_installed"],
+        "available": row["available"],
+        "attached": False,
+        "loaded": False,
+        "invoked": False,
+    }

@@ -126,6 +126,8 @@ and bounded MCP manifests; it does not install, register, enable, attach, load, 
 source, including a UTF-8 skill package with referenced support files. Applying copies only accepted content into the project, pins the
 complete copied tree, and registers it disabled; it performs no network/package installation, provider or subprocess call, enablement,
 task selection, attachment, load, or invocation.
+An explicit `--update --plan` previews replacement of the matching tree-pinned vendored source; applying uses rollback protection and
+always leaves the refreshed declaration disabled. Verified identical content is not rewritten.
 Use `stagemesh capabilities contract --task <id> --add <capability> --plan --json` to preview explicit task opt-in, then remove
 `--plan` for an atomic project-contract update. Existing frozen task bindings are never silently changed. Before dispatch,
 `stagemesh capabilities preflight --task <id> --json` reports the exact compatible provider/stage routes without invoking them.

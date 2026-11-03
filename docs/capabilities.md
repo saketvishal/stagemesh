@@ -119,6 +119,20 @@ added, changed, linked, binary, oversized, or receipt-mismatched package content
 attachment. The frozen task capability policy and redacted attachment/load/invocation receipts also include that tree pin, so evidence
 from an older support-file tree cannot satisfy the current package identity.
 
+Refreshing a source is a separate explicit operation; the default command never overwrites:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities vendor reviewed-guidance `
+  --kind skill --source C:\reviewed\guidance --provider codex --stage IMPLEMENT `
+  --update --plan --json
+```
+
+Remove `--plan` only after reviewing the old/new content and tree digests. Refresh is accepted only when the id, kind, project-local
+vendor destination, and existing tree-pinned declaration match. StageMesh holds an operation lock, stages the replacement, keeps the old
+tree as a rollback backup, updates the registry, and restores the old tree if registration is refused. A successful refresh always leaves
+the declaration disabled and changes the frozen capability policy, so tasks that selected it require the normal audited contract rebind.
+Identical verified content is a true no-op; an identical reviewed source can also repair a missing or drifted project copy.
+
 ```powershell
 stagemesh --project C:\path\to\project capabilities register domain-review `
   --kind skill `
