@@ -30,7 +30,14 @@ from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .blocked_recovery import can_auto_retry
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
-from .capabilities import CapabilityRegistryError, skill_evidence_mode
+from .capabilities import (
+    CapabilityRegistryError,
+    plan_capability_enabled,
+    plan_capability_registration,
+    register_capability,
+    set_capability_enabled,
+    skill_evidence_mode,
+)
 from .capabilities import inventory as capability_inventory
 from .capabilities import task_usage as capability_task_usage
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
@@ -3584,6 +3591,35 @@ def command_capacity(args: argparse.Namespace) -> int:
 
 def command_capabilities(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    action = getattr(args, "capability_command", None)
+    if action is not None and args.task:
+        raise CapabilityRegistryError("--task is read-only usage inspection and cannot be combined with registry changes")
+    if action == "register":
+        permissions = args.permission
+        if permissions is None:
+            permissions = (
+                ["workspace-read", "subprocess"]
+                if args.kind == "mcp"
+                else ["workspace-read"]
+            )
+        operation = plan_capability_registration if args.plan else register_capability
+        payload = operation(
+            project,
+            capability_id=args.capability_id,
+            kind=args.kind,
+            source=args.source,
+            providers=args.provider,
+            stages=args.stage,
+            permissions=permissions,
+            enabled=args.enable,
+            update=args.update,
+        )
+        return _print_capability_change(payload, args.json, plan=args.plan)
+    if action in {"enable", "disable"}:
+        enabled = action == "enable"
+        operation = plan_capability_enabled if args.plan else set_capability_enabled
+        payload = operation(project, args.capability_id, enabled)
+        return _print_capability_change(payload, args.json, plan=args.plan)
     rows = capability_inventory(project)
     history_available = None
     task_exists = None
@@ -3650,6 +3686,27 @@ def command_capabilities(args: argparse.Namespace) -> int:
             f"available={str(row['available']).lower()} usable={str(row['usable']).lower()} "
             f"invocation={row['invocation']}{counts}"
         )
+    return 0
+
+
+def _print_capability_change(payload: dict[str, object], json_output: bool, *, plan: bool) -> int:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    inventory = payload["inventory"]
+    assert isinstance(inventory, dict)
+    mode = "plan (read-only)" if plan else "applied"
+    print(f"capability {payload['operation']} {mode}: {inventory['id']}")
+    print(
+        f"installed={str(inventory['installed']).lower()} "
+        f"available={str(inventory['available']).lower()} "
+        f"enabled={str(inventory['enabled']).lower()} "
+        f"usable={str(inventory['usable']).lower()}"
+    )
+    if plan:
+        print("writes: none; provider calls: 0; network calls: 0; package installs: 0")
+    else:
+        print(f"registry: {payload['registry']}; changed={str(payload['changed']).lower()}")
     return 0
 
 
@@ -4936,6 +4993,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capabilities.add_argument("--json", action="store_true")
     capabilities.set_defaults(func=command_capabilities)
+    capability_sub = capabilities.add_subparsers(dest="capability_command")
+    capability_register = capability_sub.add_parser(
+        "register",
+        help="Register one already-present project-local capability; never downloads or invokes it",
+    )
+    capability_register.add_argument("capability_id")
+    capability_register.add_argument("--kind", required=True, choices=("skill", "mcp", "claude-plugin"))
+    capability_register.add_argument("--source", required=True, help="Project-relative existing source path")
+    capability_register.add_argument("--provider", action="append", required=True)
+    capability_register.add_argument("--stage", action="append", required=True, choices=("IMPLEMENT", "REVIEW"))
+    capability_register.add_argument(
+        "--permission",
+        action="append",
+        help="Declared permission (defaults to the least-privilege set for the selected kind)",
+    )
+    capability_register.add_argument(
+        "--enable",
+        action="store_true",
+        help="Explicitly enable the new entry; default registration is disabled",
+    )
+    capability_register.add_argument(
+        "--update",
+        action="store_true",
+        help="Explicitly replace an existing declaration with the supplied fields",
+    )
+    capability_register.add_argument("--plan", action="store_true", help="Validate and preview without writing")
+    capability_register.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_register.set_defaults(func=command_capabilities)
+    for name in ("enable", "disable"):
+        capability_state = capability_sub.add_parser(
+            name,
+            help=f"{name.title()} exactly one registered capability without attaching or invoking it",
+        )
+        capability_state.add_argument("capability_id")
+        capability_state.add_argument("--plan", action="store_true", help="Validate and preview without writing")
+        capability_state.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        capability_state.set_defaults(func=command_capabilities)
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")

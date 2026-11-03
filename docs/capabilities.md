@@ -71,6 +71,39 @@ Registration is not task authorization. A change contract must opt in by capabil
 }
 ```
 
+The registry can be managed without hand-editing JSON. Registration accepts only an already-present, project-local source and defaults
+to disabled. It never downloads a package, activates a plugin, starts an MCP server, invokes a provider, or reads ambient user-home
+configuration. Preview the normalized entry and projected availability first:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities register domain-review `
+  --kind skill `
+  --source agent-skills/domain-review/SKILL.md `
+  --provider codex `
+  --provider claude `
+  --stage IMPLEMENT `
+  --stage REVIEW `
+  --plan --json
+```
+
+Remove `--plan` to atomically write the disabled declaration. Add `--enable` only when registration itself should explicitly enable an
+available capability. Existing ids are rejected unless the complete replacement is supplied with `--update`; unrelated entries and
+`skill_evidence_mode` are preserved. Kind-specific least-privilege permissions are used unless `--permission` is supplied: skills and
+skills-only Claude plugins receive `workspace-read`, while the bounded MCP adapter requires `workspace-read` plus `subprocess`.
+
+Enable and disable remain separate explicit registry operations and also support read-only plans:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities enable domain-review --plan --json
+stagemesh --project C:\path\to\project capabilities enable domain-review
+stagemesh --project C:\path\to\project capabilities disable domain-review
+```
+
+Enable fails unless the source, configuration, runtime command, declared provider, and StageMesh adapter are available. Disable still
+works if a formerly registered source or executable has disappeared. Neither command edits a task contract, attaches the capability,
+creates the runtime database, or records an invocation; task-level use still requires `capability_refs` and observable execution
+evidence below.
+
 At each lifecycle stage StageMesh selects only requested capabilities whose registry entry includes that stage. An
 implementation-only capability therefore does not break review, and a review-only capability does not grant implementation authority.
 Dispatch requires all of the following for the active stage: the id is registered, enabled, installed, compatible with the selected
