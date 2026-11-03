@@ -12,6 +12,7 @@ from typing import Any
 
 from .capabilities import (
     CapabilityRegistryError,
+    capability_policy_report,
     inventory,
     load_registry,
     requested_for_stage,
@@ -212,14 +213,36 @@ def set_task_capabilities(
 
 
 def task_capability_preflight(
-    project: Path, task_id: str, config: StageMeshConfig
+    project: Path,
+    task_id: str,
+    config: StageMeshConfig,
+    *,
+    database: Path | None = None,
 ) -> dict[str, object]:
     """Read one task contract and preview exact capability/provider routing."""
     root, path, _raw, contract = _load_task_contract(project, task_id)
+    connection = None
+    try:
+        if database is not None and Path(database).is_file():
+            connection = sqlite3.connect(
+                Path(database).resolve().as_uri() + "?mode=ro", uri=True
+            )
+            connection.row_factory = sqlite3.Row
+        binding = capability_policy_report(
+            root, connection, task_id, contract.capability_refs
+        )
+    finally:
+        if connection is not None:
+            connection.close()
+    report = capability_preflight(root, contract, config)
+    report["policy_binding"] = binding
+    if not binding["dispatch_ready"]:
+        report["ready"] = False
+        report["status"] = "blocked"
     return {
         "task_id": task_id,
         "contract": path.relative_to(root).as_posix(),
-        **capability_preflight(root, contract, config),
+        **report,
     }
 
 

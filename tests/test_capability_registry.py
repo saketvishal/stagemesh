@@ -17,6 +17,8 @@ from stagemesh.capabilities import (
     ATTACHMENT_REQUIRED,
     OBSERVED_LOAD_REQUIRED,
     CapabilityRegistryError,
+    capability_policy_report,
+    capability_policy_snapshot,
     inventory,
     resolve_attachments,
     skill_evidence_mode,
@@ -60,6 +62,33 @@ def _registry(project: Path, capabilities: list[dict[str, object]]) -> None:
         json.dumps({"format_version": 1, "capabilities": capabilities}),
         encoding="utf-8",
     )
+
+
+def _freeze_capability_policy(
+    store: Store, project: Path, task_id: str, contract: ChangeContract, baseline: str
+) -> None:
+    canonical = canonical_contract_json(contract)
+    snapshot = capability_policy_snapshot(project, contract.capability_refs)
+    store.bind_task_contract(
+        task_id,
+        baseline,
+        1,
+        hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        canonical,
+        capability_digest=str(snapshot["digest"]),
+        capability_json=str(snapshot["canonical_json"]),
+    )
+
+
+def _freeze_preflight_policy(project: Path, task_id: str) -> None:
+    contract = parse_contract(
+        json.loads((project / ".stagemesh" / "contracts" / f"{task_id}.json").read_text())
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("Capability preflight", source_id=task_id)
+    _freeze_capability_policy(store, project, task_id, contract, "0" * 40)
+    store.close()
 
 
 def _mcp_manifest(project: Path, name: str = "serena") -> Path:
@@ -767,6 +796,7 @@ def test_runtime_review_receives_bound_review_capability_and_records_attachment(
     task_id = store.upsert_task("Review the candidate", source_id="task-1")
     store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
     store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
+    _freeze_capability_policy(store, project, task_id, contract, candidate)
 
     def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
         shutil.copytree(project, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
@@ -832,6 +862,7 @@ def test_observed_load_policy_enforces_review_skill_reads_and_records_redacted_r
     task_id = store.upsert_task("Review the candidate", source_id="task-1")
     store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
     store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
+    _freeze_capability_policy(store, project, task_id, contract, candidate)
     seen_commands: list[list[str]] = []
 
     def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
@@ -1783,6 +1814,9 @@ def test_task_capability_preflight_reuses_provider_and_stage_compatibility(
     payload = json.loads(contract.read_text(encoding="utf-8"))
     payload["capability_refs"] = ["domain-review"]
     contract.write_text(json.dumps(payload), encoding="utf-8")
+    _freeze_preflight_policy(tmp_path, "task-1")
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    database_before = database.read_bytes()
 
     assert main(
         [
@@ -1813,7 +1847,7 @@ def test_task_capability_preflight_reuses_provider_and_stage_compatibility(
         ["test"],
         ["test"],
     ]
-    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+    assert database.read_bytes() == database_before
 
     registry = json.loads((tmp_path / ".stagemesh" / "capabilities.json").read_text())
     registry["capabilities"][0]["providers"] = ["claude"]
@@ -1983,6 +2017,9 @@ def test_capability_preflight_routes_codex_mcp_and_claude_plugin_without_invocat
         ),
         encoding="utf-8",
     )
+    _freeze_preflight_policy(tmp_path, "task-1")
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    database_before = database.read_bytes()
 
     assert main(
         [
@@ -2005,7 +2042,7 @@ def test_capability_preflight_routes_codex_mcp_and_claude_plugin_without_invocat
     assert report["stages"][1]["evidence_requirements"] == ["observed-load"]
     assert report["stages"][1]["eligible_providers"] == ["claude"]
     assert report["provider_calls"] == 0 and report["writes"] == []
-    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+    assert database.read_bytes() == database_before
 
 
 def test_capability_preflight_supports_distinct_grok_and_agy_skill_routes(
@@ -2045,6 +2082,7 @@ def test_capability_preflight_supports_distinct_grok_and_agy_skill_routes(
         ),
         encoding="utf-8",
     )
+    _freeze_preflight_policy(tmp_path, "task-1")
 
     assert main(
         [
@@ -2061,6 +2099,210 @@ def test_capability_preflight_supports_distinct_grok_and_agy_skill_routes(
     assert report["independent_provider_pair"] is True
     assert report["stages"][0]["eligible_providers"] == ["grok"]
     assert report["stages"][1]["eligible_providers"] == ["agy"]
+
+
+def test_capability_policy_snapshot_is_deterministic_and_selected_only(
+    tmp_path: Path,
+) -> None:
+    _skill(tmp_path)
+    selected = _entry("domain-review", providers=["codex"], stages=["IMPLEMENT"])
+    unrelated = _entry("other-review", providers=["claude"], stages=["REVIEW"])
+    _registry(tmp_path, [unrelated, selected])
+
+    first = capability_policy_snapshot(tmp_path, ["domain-review", "domain-review"])
+    _registry(
+        tmp_path,
+        [
+            selected,
+            {**unrelated, "enabled": False, "providers": ["grok"]},
+        ],
+    )
+    second = capability_policy_snapshot(tmp_path, ["domain-review"])
+
+    assert first == second
+    assert json.loads(str(first["canonical_json"]))["capabilities"] == [selected]
+
+    _registry(tmp_path, [{**selected, "permissions": ["workspace-read"]}, unrelated])
+    assert capability_policy_snapshot(tmp_path, ["domain-review"])["digest"] == first["digest"]
+    _registry(tmp_path, [{**selected, "enabled": False}, unrelated])
+    assert capability_policy_snapshot(tmp_path, ["domain-review"])["digest"] != first["digest"]
+
+
+def test_capability_policy_binding_reports_verified_drifted_and_invalid(
+    tmp_path: Path,
+) -> None:
+    _skill(tmp_path)
+    entry = _entry("domain-review", providers=["codex"], stages=["IMPLEMENT"])
+    _registry(tmp_path, [entry])
+    contract = ChangeContract(
+        objective="Use frozen guidance", capability_refs=("domain-review",)
+    )
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Use frozen guidance", source_id="task-1")
+
+    assert capability_policy_report(
+        tmp_path, store.conn, task_id, contract.capability_refs
+    )["state"] == "legacy-unbound"
+    _freeze_capability_policy(store, tmp_path, task_id, contract, "0" * 40)
+    verified = capability_policy_report(
+        tmp_path, store.conn, task_id, contract.capability_refs
+    )
+    assert verified["state"] == "verified"
+    assert verified["dispatch_ready"] is True
+
+    _registry(tmp_path, [{**entry, "enabled": False}])
+    drifted = capability_policy_report(
+        tmp_path, store.conn, task_id, contract.capability_refs
+    )
+    assert drifted["state"] == "drifted"
+    assert drifted["rebind_required"] is True
+    assert drifted["frozen_digest"] != drifted["current_digest"]
+
+    store.conn.execute(
+        "UPDATE task_capability_policies SET digest=? WHERE task_id=?",
+        ("f" * 64, task_id),
+    )
+    store.conn.commit()
+    assert capability_policy_report(
+        tmp_path, store.conn, task_id, contract.capability_refs
+    )["state"] == "invalid"
+    store.close()
+
+
+def test_implementation_policy_drift_refuses_before_provider_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import providers
+
+    _skill(tmp_path)
+    entry = _entry("domain-review", providers=["test"], stages=["IMPLEMENT"])
+    _registry(tmp_path, [entry])
+    bound = ChangeContract(
+        objective="Use frozen guidance", capability_refs=("domain-review",)
+    )
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Use frozen guidance", source_id="task-1")
+    _freeze_capability_policy(store, tmp_path, task_id, bound, "0" * 40)
+    _registry(tmp_path, [{**entry, "enabled": False}])
+    monkeypatch.setattr(providers, "record_task_baseline", lambda *_: "0" * 40)
+    monkeypatch.setattr(
+        providers, "bind_task_contract", lambda *_: SimpleNamespace(contract=bound)
+    )
+    monkeypatch.setattr(providers, "remediation_context", lambda *_: None)
+    monkeypatch.setattr(providers, "_provider_budget_refusal", lambda *_: None)
+    monkeypatch.setattr(
+        providers.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("provider launched after capability policy drift"),
+    )
+    lease = SimpleNamespace(path=tmp_path, check=lambda _phase: None)
+    try:
+        result = RuntimeCommandAdapter("test", (sys.executable,))._execute_owned(
+            store, task_id, None, tmp_path, lease
+        )
+        assert result.status == "FAILED"
+        assert "capability policy drifted" in str(result.failure_reason)
+        assert not list(store.running_executions())
+        receipt = json.loads(
+            store.conn.execute(
+                "SELECT payload FROM audit_events WHERE event_type='capability.policy_refused'"
+            ).fetchone()["payload"]
+        )
+        assert receipt["provider_invoked"] is False
+        assert receipt["stage"] == "IMPLEMENT"
+        assert "expected=" in receipt["reason"] and "observed=" in receipt["reason"]
+    finally:
+        store.close()
+
+
+def test_review_policy_drift_refuses_before_provider_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "StageMesh Test")
+    _skill(project)
+    entry = _entry("domain-review", providers=["test"], stages=["REVIEW"])
+    _registry(project, [entry])
+    (project / "README.md").write_text("candidate\n", encoding="utf-8")
+    git.commit_all("candidate")
+    candidate = git.head()
+    contract = ChangeContract(
+        objective="Review with frozen guidance",
+        allowed_files=("README.md",),
+        capability_refs=("domain-review",),
+    )
+    canonical = canonical_contract_json(contract)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Review with frozen guidance", source_id="task-1")
+    store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
+    store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
+    _freeze_capability_policy(store, project, task_id, contract, candidate)
+    _registry(project, [{**entry, "enabled": False}])
+
+    def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
+        shutil.copytree(project, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+
+    monkeypatch.setattr(providers_module, "_prepare_review_checkout", prepare_review)
+    monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
+    monkeypatch.setattr(
+        providers_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("review provider launched after policy drift"),
+    )
+    try:
+        response = RuntimeCommandAdapter("test", (sys.executable,)).review_candidate(
+            "Review exactly this candidate.",
+            project,
+            candidate,
+            store=store,
+            task_id=task_id,
+        )
+        failure = json.loads(response)
+        assert failure["decision"] == "INFRASTRUCTURE_FAILURE"
+        assert "capability policy drifted" in failure["reason"]
+        receipt = json.loads(
+            store.conn.execute(
+                "SELECT payload FROM audit_events WHERE event_type='capability.policy_refused'"
+            ).fetchone()["payload"]
+        )
+        assert receipt["provider_invoked"] is False
+        assert receipt["stage"] == "REVIEW"
+    finally:
+        store.close()
+
+
+def test_preflight_exposes_legacy_unbound_without_creating_a_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = _capability_contract_fixture(tmp_path)
+    payload = json.loads(contract.read_text(encoding="utf-8"))
+    payload["capability_refs"] = ["domain-review"]
+    contract.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "preflight",
+            "--task",
+            "task-1",
+            "--json",
+        ]
+    ) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked"
+    assert report["policy_binding"]["state"] == "legacy-unbound"
+    assert report["policy_binding"]["rebind_required"] is True
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
 
 
 def test_capability_preflight_fails_closed_when_observed_events_are_unsupported(

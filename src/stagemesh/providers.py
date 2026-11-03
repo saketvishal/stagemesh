@@ -22,6 +22,7 @@ from .attribution import attribution_for_worker
 from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
     CapabilityRegistryError,
+    require_capability_policy,
     skill_evidence_mode,
 )
 from .capacity import CapacityKind, CapacityRegistry
@@ -307,6 +308,25 @@ class RuntimeCommandAdapter:
             if budget_problem:
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
         capability_audit: list[dict[str, object]] = []
+        try:
+            require_capability_policy(
+                run_path, store.conn, task_id, bound.contract.capability_refs
+            )
+        except CapabilityRegistryError as exc:
+            store.add_audit_event(
+                "capability.policy_refused",
+                {
+                    "task_id": task_id,
+                    "provider": self.name,
+                    "stage": "IMPLEMENT",
+                    "provider_invoked": False,
+                    "reason": str(exc)[:500],
+                },
+            )
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=f"capability_unavailable: {exc}",
+            )
         try:
             task_prompt = _build_task_prompt(
                 task_id, task, run_path, contract=bound.contract, remediation=remediation,
@@ -773,6 +793,26 @@ class RuntimeCommandAdapter:
                     except ContractError as exc:
                         return _review_infrastructure_failure(f"invalid_contract: {exc}")
             capability_audit: list[dict[str, object]] = []
+            try:
+                if store is not None and task_id is not None and review_contract is not None:
+                    require_capability_policy(
+                        review_path,
+                        store.conn,
+                        task_id,
+                        review_contract.capability_refs,
+                    )
+            except CapabilityRegistryError as exc:
+                store.add_audit_event(
+                    "capability.policy_refused",
+                    {
+                        "task_id": task_id,
+                        "provider": self.name,
+                        "stage": "REVIEW",
+                        "provider_invoked": False,
+                        "reason": str(exc)[:500],
+                    },
+                )
+                return _review_infrastructure_failure(f"capability_unavailable: {exc}")
             try:
                 review_prompt = prompt + skill_prompt(
                     prompt,

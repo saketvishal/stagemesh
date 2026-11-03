@@ -101,6 +101,168 @@ def load_registry(project: Path) -> tuple[CapabilityDefinition, ...]:
     return definitions
 
 
+def capability_policy_snapshot(
+    project: Path, requested: tuple[str, ...] | list[str]
+) -> dict[str, object]:
+    """Return the deterministic, privacy-bounded policy for selected declarations."""
+    definitions = {item.id: item for item in load_registry(Path(project).resolve())}
+    requested_ids = list(
+        dict.fromkeys(str(item).strip() for item in requested if str(item).strip())
+    )
+    missing = [item for item in requested_ids if item not in definitions]
+    if missing:
+        raise CapabilityRegistryError(
+            "requested capability is not registered: " + ", ".join(missing)
+        )
+    selected = [
+        _definition_payload(definitions[capability_id])
+        for capability_id in sorted(requested_ids)
+    ]
+    canonical_json = json.dumps(
+        {"format_version": 1, "capabilities": selected},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if len(canonical_json) > 10000:
+        raise CapabilityRegistryError("selected capability policy exceeds the 10000 character limit")
+    return {
+        "digest": hashlib.sha256(canonical_json.encode("utf-8")).hexdigest(),
+        "canonical_json": canonical_json,
+        "capability_ids": sorted(requested_ids),
+    }
+
+
+def capability_policy_report(
+    project: Path,
+    connection: sqlite3.Connection | None,
+    task_id: str,
+    requested: tuple[str, ...] | list[str],
+) -> dict[str, object]:
+    """Compare the current selected policy with the immutable task binding."""
+    requested_ids = list(
+        dict.fromkeys(str(item).strip() for item in requested if str(item).strip())
+    )
+    try:
+        current = capability_policy_snapshot(project, requested_ids)
+    except (CapabilityRegistryError, OSError) as exc:
+        current = None
+        current_error = str(exc)[:300]
+    else:
+        current_error = None
+    try:
+        table = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_capability_policies'"
+            ).fetchone()
+            if connection is not None
+            else None
+        )
+        row = (
+            connection.execute(
+                "SELECT digest, canonical_json FROM task_capability_policies WHERE task_id=?",
+                (str(task_id),),
+            ).fetchone()
+            if connection is not None and table is not None
+            else None
+        )
+    except sqlite3.Error as exc:
+        return {
+            "state": "invalid",
+            "requested": requested_ids,
+            "frozen_digest": None,
+            "current_digest": current["digest"] if current else None,
+            "rebind_required": bool(requested_ids),
+            "dispatch_ready": not requested_ids,
+            "reason": f"cannot read frozen capability policy: {exc}"[:300],
+        }
+    if not requested_ids:
+        return {
+            "state": "not-required",
+            "requested": [],
+            "frozen_digest": str(row["digest"]) if row is not None else None,
+            "current_digest": current["digest"] if current else None,
+            "rebind_required": False,
+            "dispatch_ready": True,
+            "reason": current_error,
+        }
+    if row is None:
+        return {
+            "state": "legacy-unbound",
+            "requested": requested_ids,
+            "frozen_digest": None,
+            "current_digest": current["digest"] if current else None,
+            "rebind_required": True,
+            "dispatch_ready": False,
+            "reason": "selected capabilities are not frozen with this task contract",
+        }
+    frozen_digest = str(row["digest"])
+    canonical_json = str(row["canonical_json"])
+    actual_frozen = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    try:
+        frozen_payload = json.loads(canonical_json)
+        frozen_valid = (
+            isinstance(frozen_payload, dict)
+            and frozen_payload.get("format_version") == 1
+            and isinstance(frozen_payload.get("capabilities"), list)
+            and re.fullmatch(r"[0-9a-f]{64}", frozen_digest) is not None
+            and actual_frozen == frozen_digest
+        )
+    except json.JSONDecodeError:
+        frozen_valid = False
+    if not frozen_valid:
+        return {
+            "state": "invalid",
+            "requested": requested_ids,
+            "frozen_digest": frozen_digest[:64],
+            "current_digest": current["digest"] if current else None,
+            "rebind_required": True,
+            "dispatch_ready": False,
+            "reason": "frozen capability policy is invalid",
+        }
+    if current is None:
+        missing_selected = bool(
+            current_error
+            and current_error.startswith("requested capability is not registered:")
+        )
+        return {
+            "state": "drifted" if missing_selected else "invalid",
+            "requested": requested_ids,
+            "frozen_digest": frozen_digest,
+            "current_digest": None,
+            "rebind_required": True,
+            "dispatch_ready": False,
+            "reason": current_error,
+        }
+    verified = frozen_digest == current["digest"]
+    return {
+        "state": "verified" if verified else "drifted",
+        "requested": requested_ids,
+        "frozen_digest": frozen_digest,
+        "current_digest": current["digest"],
+        "rebind_required": not verified,
+        "dispatch_ready": verified,
+        "reason": None if verified else "selected capability declaration policy changed",
+    }
+
+
+def require_capability_policy(
+    project: Path,
+    connection: sqlite3.Connection,
+    task_id: str,
+    requested: tuple[str, ...] | list[str],
+) -> dict[str, object]:
+    """Fail closed before launch unless the current policy matches its frozen binding."""
+    report = capability_policy_report(project, connection, task_id, requested)
+    if report["dispatch_ready"]:
+        return report
+    expected = report.get("frozen_digest") or "missing"
+    observed = report.get("current_digest") or "unavailable"
+    raise CapabilityRegistryError(
+        f"capability policy {report['state']} for task {task_id}: "
+        f"expected={expected} observed={observed}; run rebind-contract --plan"
+    )
+
+
 def skill_evidence_mode(project: Path) -> str:
     """Return the project's explicit skill-load evidence policy."""
     payload = _registry_payload(Path(project).resolve())
@@ -606,6 +768,9 @@ def task_capability_summary(
         "task_id": str(task_id),
         "history_available": True,
         "task_exists": task_exists,
+        "policy_binding": capability_policy_report(
+            project, connection, task_id, requested_ids
+        ),
         "skill_evidence_mode": skill_evidence_mode(project),
         "registry_count": len(rows),
         "requested": requested_ids,

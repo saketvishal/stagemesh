@@ -230,8 +230,8 @@ def test_window_report_includes_bounded_task_capability_evidence(tmp_path: Path)
     contract["capability_refs"] = ["domain-review"]
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
     store.conn.execute("DELETE FROM task_contracts WHERE task_id='1'")
+    store.conn.execute("DELETE FROM task_capability_policies WHERE task_id='1'")
     store.conn.commit()  # let admission freeze the modified fixture contract
-    bind_task_contract(store, project, "1", str(store.task_baseline("1")))
     skill = project / "agent-skills" / "domain-review" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# Domain review\n", encoding="utf-8")
@@ -255,6 +255,7 @@ def test_window_report_includes_bounded_task_capability_evidence(tmp_path: Path)
         ),
         encoding="utf-8",
     )
+    bind_task_contract(store, project, "1", str(store.task_baseline("1")))
 
     def observed(rig: Rig, task_id: str) -> RunResult:
         worker = rig.worker_store()
@@ -297,6 +298,7 @@ def test_window_report_includes_bounded_task_capability_evidence(tmp_path: Path)
     capability_report = report.capability_usage["1"]
     assert capability_report["requested"] == ["domain-review"]
     assert capability_report["skill_evidence_mode"] == "observed-load-required"
+    assert capability_report["policy_binding"]["state"] == "verified"
     (row,) = capability_report["capabilities"]
     assert row["registered"] is True and row["requested"] is True
     assert row["usage"]["status"] == "loaded"
@@ -304,7 +306,7 @@ def test_window_report_includes_bounded_task_capability_evidence(tmp_path: Path)
     assert written["tasks"][0]["capabilities"] == capability_report
     assert "raw_prompt" not in json.dumps(written["tasks"][0]["capabilities"])
     assert (
-        "capabilities: 1 requested; 1 observed; policy=observed-load-required"
+        "capabilities: 1 requested; 1 observed; policy=observed-load-required; binding=verified"
         in rw.format_window_report(report)
     )
 

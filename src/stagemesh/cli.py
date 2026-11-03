@@ -3735,13 +3735,16 @@ def command_capabilities(args: argparse.Namespace) -> int:
                 print(f"next: {payload['next_command']}")
         return 0
     if action == "preflight":
-        payload = task_capability_preflight(project, args.task, load_config(project))
+        payload = task_capability_preflight(
+            project, args.task, load_config(project), database=db_path(project)
+        )
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
             print(
                 f"task capability preflight: task={args.task} status={payload['status']} "
-                f"policy={payload['skill_evidence_mode']}"
+                f"policy={payload['skill_evidence_mode']} "
+                f"binding={payload['policy_binding']['state']}"
             )
             for stage in payload["stages"]:
                 assert isinstance(stage, dict)
