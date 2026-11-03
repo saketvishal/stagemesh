@@ -2121,6 +2121,15 @@ def test_capability_policy_snapshot_is_deterministic_and_selected_only(
 
     assert first == second
     assert json.loads(str(first["canonical_json"]))["capabilities"] == [selected]
+    assert first["skill_evidence_mode"] == ATTACHMENT_REQUIRED
+
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    payload = json.loads(registry.read_text(encoding="utf-8"))
+    payload["skill_evidence_mode"] = OBSERVED_LOAD_REQUIRED
+    registry.write_text(json.dumps(payload), encoding="utf-8")
+    observed_mode = capability_policy_snapshot(tmp_path, ["domain-review"])
+    assert observed_mode["skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
+    assert observed_mode["digest"] != first["digest"]
 
     _registry(tmp_path, [{**selected, "permissions": ["workspace-read"]}, unrelated])
     assert capability_policy_snapshot(tmp_path, ["domain-review"])["digest"] == first["digest"]
@@ -2150,6 +2159,8 @@ def test_capability_policy_binding_reports_verified_drifted_and_invalid(
     )
     assert verified["state"] == "verified"
     assert verified["dispatch_ready"] is True
+    assert verified["frozen_skill_evidence_mode"] == ATTACHMENT_REQUIRED
+    assert verified["current_skill_evidence_mode"] == ATTACHMENT_REQUIRED
 
     _registry(tmp_path, [{**entry, "enabled": False}])
     drifted = capability_policy_report(
@@ -2170,8 +2181,9 @@ def test_capability_policy_binding_reports_verified_drifted_and_invalid(
     store.close()
 
 
+@pytest.mark.parametrize("drift", ["declaration", "evidence-mode"])
 def test_implementation_policy_drift_refuses_before_provider_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift: str
 ) -> None:
     from stagemesh import providers
 
@@ -2185,7 +2197,13 @@ def test_implementation_policy_drift_refuses_before_provider_launch(
     store.migrate()
     task_id = store.upsert_task("Use frozen guidance", source_id="task-1")
     _freeze_capability_policy(store, tmp_path, task_id, bound, "0" * 40)
-    _registry(tmp_path, [{**entry, "enabled": False}])
+    if drift == "declaration":
+        _registry(tmp_path, [{**entry, "enabled": False}])
+    else:
+        registry = tmp_path / ".stagemesh" / "capabilities.json"
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+        payload["skill_evidence_mode"] = OBSERVED_LOAD_REQUIRED
+        registry.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(providers, "record_task_baseline", lambda *_: "0" * 40)
     monkeypatch.setattr(
         providers, "bind_task_contract", lambda *_: SimpleNamespace(contract=bound)
@@ -2212,13 +2230,19 @@ def test_implementation_policy_drift_refuses_before_provider_launch(
         )
         assert receipt["provider_invoked"] is False
         assert receipt["stage"] == "IMPLEMENT"
+        assert receipt["capability_ids"] == ["domain-review"]
+        assert receipt["policy_state"] == "drifted"
         assert "expected=" in receipt["reason"] and "observed=" in receipt["reason"]
+        if drift == "evidence-mode":
+            assert receipt["frozen_skill_evidence_mode"] == ATTACHMENT_REQUIRED
+            assert receipt["current_skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
     finally:
         store.close()
 
 
+@pytest.mark.parametrize("drift", ["declaration", "evidence-mode"])
 def test_review_policy_drift_refuses_before_provider_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift: str
 ) -> None:
     project = tmp_path / "repo"
     project.mkdir()
@@ -2245,7 +2269,13 @@ def test_review_policy_drift_refuses_before_provider_launch(
     store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
     store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
     _freeze_capability_policy(store, project, task_id, contract, candidate)
-    _registry(project, [{**entry, "enabled": False}])
+    if drift == "declaration":
+        _registry(project, [{**entry, "enabled": False}])
+    else:
+        registry = project / ".stagemesh" / "capabilities.json"
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+        payload["skill_evidence_mode"] = OBSERVED_LOAD_REQUIRED
+        registry.write_text(json.dumps(payload), encoding="utf-8")
 
     def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
         shutil.copytree(project, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
@@ -2275,6 +2305,11 @@ def test_review_policy_drift_refuses_before_provider_launch(
         )
         assert receipt["provider_invoked"] is False
         assert receipt["stage"] == "REVIEW"
+        assert receipt["capability_ids"] == ["domain-review"]
+        assert receipt["policy_state"] == "drifted"
+        if drift == "evidence-mode":
+            assert receipt["frozen_skill_evidence_mode"] == ATTACHMENT_REQUIRED
+            assert receipt["current_skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
     finally:
         store.close()
 
@@ -2303,6 +2338,41 @@ def test_preflight_exposes_legacy_unbound_without_creating_a_database(
     assert report["policy_binding"]["state"] == "legacy-unbound"
     assert report["policy_binding"]["rebind_required"] is True
     assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+
+def test_preflight_reports_skill_evidence_mode_drift_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = _capability_contract_fixture(tmp_path)
+    payload = json.loads(contract.read_text(encoding="utf-8"))
+    payload["capability_refs"] = ["domain-review"]
+    contract.write_text(json.dumps(payload), encoding="utf-8")
+    _freeze_preflight_policy(tmp_path, "task-1")
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    registry_payload = json.loads(registry.read_text(encoding="utf-8"))
+    registry_payload["skill_evidence_mode"] = OBSERVED_LOAD_REQUIRED
+    registry.write_text(json.dumps(registry_payload), encoding="utf-8")
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    database_before = database.read_bytes()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "preflight",
+            "--task",
+            "task-1",
+            "--json",
+        ]
+    ) == 2
+    report = json.loads(capsys.readouterr().out)
+    binding = report["policy_binding"]
+    assert binding["state"] == "drifted"
+    assert binding["frozen_skill_evidence_mode"] == ATTACHMENT_REQUIRED
+    assert binding["current_skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
+    assert binding["reason"] == "skill evidence mode changed"
+    assert database.read_bytes() == database_before
 
 
 def test_capability_preflight_fails_closed_when_observed_events_are_unsupported(

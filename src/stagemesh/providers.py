@@ -22,6 +22,7 @@ from .attribution import attribution_for_worker
 from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
     CapabilityRegistryError,
+    capability_policy_report,
     require_capability_policy,
     skill_evidence_mode,
 )
@@ -313,6 +314,9 @@ class RuntimeCommandAdapter:
                 run_path, store.conn, task_id, bound.contract.capability_refs
             )
         except CapabilityRegistryError as exc:
+            policy = capability_policy_report(
+                run_path, store.conn, task_id, bound.contract.capability_refs
+            )
             store.add_audit_event(
                 "capability.policy_refused",
                 {
@@ -320,6 +324,16 @@ class RuntimeCommandAdapter:
                     "provider": self.name,
                     "stage": "IMPLEMENT",
                     "provider_invoked": False,
+                    "capability_ids": list(dict.fromkeys(bound.contract.capability_refs)),
+                    "policy_state": policy["state"],
+                    "frozen_digest": policy["frozen_digest"],
+                    "current_digest": policy["current_digest"],
+                    "frozen_skill_evidence_mode": policy[
+                        "frozen_skill_evidence_mode"
+                    ],
+                    "current_skill_evidence_mode": policy[
+                        "current_skill_evidence_mode"
+                    ],
                     "reason": str(exc)[:500],
                 },
             )
@@ -802,6 +816,12 @@ class RuntimeCommandAdapter:
                         review_contract.capability_refs,
                     )
             except CapabilityRegistryError as exc:
+                policy = capability_policy_report(
+                    review_path,
+                    store.conn,
+                    task_id,
+                    review_contract.capability_refs,
+                )
                 store.add_audit_event(
                     "capability.policy_refused",
                     {
@@ -809,6 +829,18 @@ class RuntimeCommandAdapter:
                         "provider": self.name,
                         "stage": "REVIEW",
                         "provider_invoked": False,
+                        "capability_ids": list(
+                            dict.fromkeys(review_contract.capability_refs)
+                        ),
+                        "policy_state": policy["state"],
+                        "frozen_digest": policy["frozen_digest"],
+                        "current_digest": policy["current_digest"],
+                        "frozen_skill_evidence_mode": policy[
+                            "frozen_skill_evidence_mode"
+                        ],
+                        "current_skill_evidence_mode": policy[
+                            "current_skill_evidence_mode"
+                        ],
                         "reason": str(exc)[:500],
                     },
                 )

@@ -158,9 +158,9 @@ invokes a provider or MCP server, creates a database, installs a package, or rec
 a route is currently available; actual use still requires later `capability.loaded` or `capability.invoked` evidence as applicable.
 
 The first runtime contract binding also freezes a deterministic selected-capability policy. The bounded snapshot contains only the
-selected ids and their normalized kind, project-relative source, provider/stage allowlists, permissions, enabled state, and source pin;
+effective skill-evidence mode plus the selected ids and their normalized kind, project-relative source, provider/stage allowlists, permissions, enabled state, and source pin;
 it contains no skill/plugin contents, absolute paths, prompts, credentials, MCP arguments/results, or provider output. Implementation
-and review compare the current selected declarations with that snapshot before provider launch. A relevant change, missing selected id,
+and review compare the current selected declarations and evidence mode with that snapshot before provider launch. A relevant change, missing selected id,
 corrupt binding, or legacy selected-capability task without a snapshot fails closed and reports `rebind_required`; changing an unrelated
 registry entry does not block the task. An explicit audited `rebind-contract` refreshes the contract and selected policy atomically.
 Preflight, task-doctor, and run-window report `not-required`, `verified`, `drifted`, `legacy-unbound`, or `invalid` with bounded frozen and

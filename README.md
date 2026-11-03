@@ -126,7 +126,7 @@ Use `stagemesh capabilities contract --task <id> --add <capability> --plan --jso
 `--plan` for an atomic project-contract update. Existing frozen task bindings are never silently changed. Before dispatch,
 `stagemesh capabilities preflight --task <id> --json` reports the exact compatible provider/stage routes without invoking them.
 When a runtime contract is first frozen, StageMesh also freezes the selected registry declarations (source, provider/stage scope,
-permissions, enablement, and source pin). Dispatch refuses relevant policy drift before implementation or review starts; unrelated
+permissions, enablement, and source pin) plus the effective skill-evidence mode. Dispatch refuses relevant policy drift before implementation or review starts; unrelated
 registry entries may change. Preflight, task-doctor, and run-window expose the frozen/current policy digests and require an audited
 `rebind-contract` for legacy-unbound or deliberately changed selections.
 Projects may opt into `observed-load-required` skill evidence. Supported provider JSON streams then produce redacted
