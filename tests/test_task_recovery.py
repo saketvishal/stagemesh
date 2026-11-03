@@ -852,8 +852,6 @@ def test_task_doctor_distinguishes_requested_registered_and_observed_capabilitie
         "capability_refs": ["domain-review", "removed-review"],
     }
     project, store = _setup(tmp_path, contract)
-    baseline = store.set_task_baseline(TASK, head(project))
-    bind_task_contract(store, project, TASK, baseline)
     skill = project / "agent-skills" / "domain-review" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# Domain review\n", encoding="utf-8")
@@ -871,11 +869,29 @@ def test_task_doctor_distinguishes_requested_registered_and_observed_capabilitie
                         "providers": ["codex"],
                         "stages": ["IMPLEMENT", "REVIEW"],
                         "permissions": ["workspace-read"],
-                    }
+                    },
+                    {
+                        "id": "removed-review",
+                        "kind": "skill",
+                        "source": "agent-skills/domain-review/SKILL.md",
+                        "enabled": True,
+                        "providers": ["codex"],
+                        "stages": ["IMPLEMENT", "REVIEW"],
+                        "permissions": ["workspace-read"],
+                    },
                 ],
             }
         ),
         encoding="utf-8",
+    )
+    baseline = store.set_task_baseline(TASK, head(project))
+    bind_task_contract(store, project, TASK, baseline)
+    registry = json.loads(
+        (project / ".stagemesh" / "capabilities.json").read_text(encoding="utf-8")
+    )
+    registry["capabilities"] = registry["capabilities"][:1]
+    (project / ".stagemesh" / "capabilities.json").write_text(
+        json.dumps(registry), encoding="utf-8"
     )
     store.add_audit_event(
         "capability.attached",
@@ -906,6 +922,7 @@ def test_task_doctor_distinguishes_requested_registered_and_observed_capabilitie
     assert capabilities["skill_evidence_mode"] == "observed-load-required"
     assert capabilities["requested"] == ["domain-review", "removed-review"]
     assert capabilities["unregistered_requested"] == ["removed-review"]
+    assert capabilities["policy_binding"]["state"] == "drifted"
     rows = {row["id"]: row for row in capabilities["capabilities"]}
     assert rows["domain-review"]["registered"] is True
     assert "configuration_error" not in rows["domain-review"]
@@ -917,8 +934,17 @@ def test_task_doctor_distinguishes_requested_registered_and_observed_capabilitie
     capability_line = next(
         line for line in text.splitlines() if line.strip().startswith("capabilities:")
     )
-    assert "2 requested; 2 observed; policy=observed-load-required" in capability_line
+    assert "2 requested; 2 observed; policy=observed-load-required; binding=drifted" in capability_line
     assert "removed-review: UNREGISTERED; requested; usage=evidence-missing" in text
+
+    contract_path = project / ".stagemesh" / "contracts" / f"{TASK}.json"
+    updated = json.loads(contract_path.read_text(encoding="utf-8"))
+    updated["capability_refs"] = ["domain-review"]
+    contract_path.write_text(json.dumps(updated), encoding="utf-8")
+    rebound = rebind_contract(store, project, TASK, reason="remove unavailable capability")
+    refreshed = task_doctor(store, project, TASK)["capabilities"]["policy_binding"]
+    assert rebound["capability_policy_digest"] == refreshed["frozen_digest"]
+    assert refreshed["state"] == "verified"
 
 
 def test_task_doctor_reports_corrupt_capability_registry_as_unavailable(

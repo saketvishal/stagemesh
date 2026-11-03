@@ -5,11 +5,15 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from .capabilities import (
+    CapabilityRegistryError,
+    capability_policy_snapshot,
+)
 from .contract_feasibility import check_contract_feasibility
 from .contracts import (
     CONTRACT_VERSION,
-    ChangeContract,
     BoundChangeContract,
+    ChangeContract,
     ContractError,
     bind_contract,
     bound_contract_from_record,
@@ -57,9 +61,21 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
     if problem:
         raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
     _require_feasible(project, task_id, contract)
+    try:
+        capability_policy = capability_policy_snapshot(project, contract.capability_refs)
+    except CapabilityRegistryError as exc:
+        raise ContractRejected("capability_policy_unavailable", str(exc)) from exc
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    store.bind_task_contract(task_id, baseline_sha, CONTRACT_VERSION, digest, canonical_json)
+    store.bind_task_contract(
+        task_id,
+        baseline_sha,
+        CONTRACT_VERSION,
+        digest,
+        canonical_json,
+        capability_digest=str(capability_policy["digest"]),
+        capability_json=str(capability_policy["canonical_json"]),
+    )
     return bound_contract_from_record(dict(store.task_contract(task_id)))
 
 

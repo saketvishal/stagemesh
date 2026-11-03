@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from stagemesh.capabilities import capability_policy_snapshot
 from stagemesh.capacity import CapacityKind
 from stagemesh.domain import ExecutionStatus
 from stagemesh.execution import ExecutionResult
@@ -25,6 +26,18 @@ from stagemesh.provider_events import (
 )
 from stagemesh.provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderPool
 from stagemesh.providers import RuntimeCommandAdapter
+
+
+def _freeze_capability_policy(
+    store: Store, project: Path, task_id: str, capability_ids: tuple[str, ...]
+) -> None:
+    snapshot = capability_policy_snapshot(project, capability_ids)
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO task_capability_policies(task_id, digest, canonical_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (task_id, snapshot["digest"], snapshot["canonical_json"], 1.0),
+        )
 
 
 @pytest.mark.parametrize(
@@ -222,6 +235,41 @@ def test_parser_does_not_return_raw_event_arguments() -> None:
 
     assert "test-fixture" not in json.dumps(receipt)
     assert "RAW_EVENT_MARKER" not in json.dumps(receipt)
+
+
+def test_observation_receipts_preserve_bounded_vendored_tree_identity() -> None:
+    skill_attachments = [
+        {
+            "capability_id": "package-skill",
+            "content_sha256": "a" * 64,
+            "source_tree_sha256": "b" * 64,
+            "_path": "C:/test-fixture/SKILL.md",
+        }
+    ]
+    skill_event = json.dumps(
+        {"name": "Read", "input": {"file_path": "C:/test-fixture/SKILL.md"}}
+    )
+    loaded = loaded_receipts(
+        observe_skill_loads(skill_event, skill_attachments), skill_attachments
+    )[0]
+    assert loaded["source_tree_sha256"] == "b" * 64
+
+    mcp_attachments = [
+        {
+            "capability_id": "serena",
+            "kind": "mcp",
+            "content_sha256": "c" * 64,
+            "source_tree_sha256": "d" * 64,
+            "_mcp": {"server_name": "serena", "allowed_tools": ["find_symbol"]},
+        }
+    ]
+    mcp_event = json.dumps(
+        {"type": "mcp_tool_call", "server": "serena", "tool": "find_symbol"}
+    )
+    invoked = mcp_invocation_receipts(
+        observe_mcp_invocations(mcp_event, mcp_attachments), mcp_attachments
+    )[0]
+    assert invoked["source_tree_sha256"] == "d" * 64
 
 
 @pytest.mark.parametrize(
@@ -632,6 +680,7 @@ def test_runtime_imports_claude_plugin_skill_without_activating_plugin_runtime(
     store = Store(tmp_path / "state.sqlite3")
     store.migrate()
     store.upsert_task("Apply review guidance", source_id="task-1")
+    _freeze_capability_policy(store, tmp_path, "task-1", ("review-kit",))
     lease = SimpleNamespace(
         path=tmp_path,
         check=lambda _phase: None,
@@ -754,6 +803,7 @@ def test_runtime_configures_codex_mcp_and_requires_invocation_receipt(
     store = Store(tmp_path / "state.sqlite3")
     store.migrate()
     store.upsert_task("Use Serena", source_id="task-1")
+    _freeze_capability_policy(store, tmp_path, "task-1", ("serena",))
     lease = SimpleNamespace(
         path=tmp_path,
         check=lambda _phase: None,

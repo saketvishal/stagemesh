@@ -34,16 +34,25 @@ from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
     CapabilityRegistryError,
     plan_capability_enabled,
+    plan_capability_pin,
     plan_capability_registration,
     plan_skill_evidence_mode,
     register_capability,
     set_capability_enabled,
+    set_capability_pin,
     set_skill_evidence_mode,
     skill_evidence_mode,
 )
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
 from .capabilities import inventory as capability_inventory
 from .capabilities import task_usage as capability_task_usage
+from .capability_contracts import (
+    plan_task_capabilities,
+    set_task_capabilities,
+    task_capability_preflight,
+)
+from .capability_discovery import discover_capabilities, plan_discovered_registration
+from .capability_vendor import plan_capability_vendor, vendor_capability
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
@@ -3596,7 +3605,7 @@ def command_capacity(args: argparse.Namespace) -> int:
 def command_capabilities(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     action = getattr(args, "capability_command", None)
-    if action is not None and args.task:
+    if action is not None and args.task and action not in {"contract", "preflight"}:
         raise CapabilityRegistryError("--task is read-only usage inspection and cannot be combined with registry changes")
     if action == "register":
         permissions = args.permission
@@ -3619,10 +3628,26 @@ def command_capabilities(args: argparse.Namespace) -> int:
             update=args.update,
         )
         return _print_capability_change(payload, args.json, plan=args.plan)
+    if action == "vendor":
+        operation = plan_capability_vendor if args.plan else vendor_capability
+        payload = operation(
+            project,
+            capability_id=args.capability_id,
+            kind=args.kind,
+            source=Path(args.source),
+            providers=args.provider,
+            stages=args.stage,
+            update=args.update,
+        )
+        return _print_capability_vendor(payload, args.json, plan=args.plan)
     if action in {"enable", "disable"}:
         enabled = action == "enable"
         operation = plan_capability_enabled if args.plan else set_capability_enabled
         payload = operation(project, args.capability_id, enabled)
+        return _print_capability_change(payload, args.json, plan=args.plan)
+    if action == "pin":
+        operation = plan_capability_pin if args.plan else set_capability_pin
+        payload = operation(project, args.capability_id)
         return _print_capability_change(payload, args.json, plan=args.plan)
     if action == "policy":
         operation = plan_skill_evidence_mode if args.plan else set_skill_evidence_mode
@@ -3643,6 +3668,109 @@ def command_capabilities(args: argparse.Namespace) -> int:
             else:
                 print(f"registry: {payload['registry']}; written={str(payload['written']).lower()}")
         return 0
+    if action == "discover":
+        discovery = discover_capabilities(project, args.root)
+        if args.registration_plan:
+            if not args.provider or not args.stage:
+                raise CapabilityRegistryError(
+                    "--registration-plan requires at least one --provider and --stage"
+                )
+            payload = plan_discovered_registration(
+                project,
+                discovery,
+                args.registration_plan,
+                providers=args.provider,
+                stages=args.stage,
+            )
+            return _print_capability_change(payload, args.json, plan=True)
+        if args.provider or args.stage:
+            raise CapabilityRegistryError(
+                "--provider and --stage require --registration-plan"
+            )
+        if args.json:
+            print(json.dumps(discovery, indent=2, sort_keys=True))
+            return 0
+        print(
+            f"capability discovery (read-only): root={discovery['root']} "
+            f"candidates={discovery['candidate_count']}"
+        )
+        for row in discovery["candidates"]:
+            assert isinstance(row, dict)
+            state = "valid" if row["valid"] else f"invalid ({row['reason']})"
+            print(
+                f"{row['id']} kind={row['kind']} source={row['source']} {state}; "
+                f"registered={str(row['registered']).lower()} "
+                f"runtime_installed={str(row['runtime_installed']).lower()} "
+                f"available={str(row['available']).lower()} "
+                f"usable={str(row['usable']).lower()} "
+                "invocation=not-observed"
+            )
+        print(
+            "writes: none; provider calls: 0; network calls: 0; package installs: 0; "
+            "database writes: 0; subprocess calls: 0"
+        )
+        return 0
+    if action == "contract":
+        config = load_config(project)
+        operation = plan_task_capabilities if args.plan else set_task_capabilities
+        payload = operation(
+            project,
+            args.task,
+            add=args.add or (),
+            remove=args.remove or (),
+            database=db_path(project),
+            config=config,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            mode = "plan (read-only)" if args.plan else "applied"
+            print(
+                f"task capability selection {mode}: task={args.task} "
+                f"changed={str(payload['changed']).lower()}"
+            )
+            print(
+                "capability_refs: "
+                + ", ".join(payload["proposed_capability_refs"] or ["(none)"])
+            )
+            print(
+                f"contract={payload['contract']} rebind_required="
+                f"{str(payload['rebind_required']).lower()}"
+            )
+            if args.plan:
+                print(
+                    "writes: none; provider calls: 0; network calls: 0; "
+                    "package installs: 0; database writes: 0"
+                )
+            else:
+                print(f"written={str(payload['written']).lower()}")
+            if payload.get("next_command"):
+                print(f"next: {payload['next_command']}")
+        return 0
+    if action == "preflight":
+        payload = task_capability_preflight(
+            project, args.task, load_config(project), database=db_path(project)
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(
+                f"task capability preflight: task={args.task} status={payload['status']} "
+                f"policy={payload['skill_evidence_mode']} "
+                f"binding={payload['policy_binding']['state']}"
+            )
+            for stage in payload["stages"]:
+                assert isinstance(stage, dict)
+                print(
+                    f"{stage['stage']}: ready={str(stage['ready']).lower()} "
+                    f"capabilities={','.join(stage['requested_capabilities']) or '(none)'} "
+                    f"providers={','.join(stage['eligible_providers']) or '(none)'}"
+                )
+            print(
+                "writes: none; provider calls: 0; network calls: 0; "
+                "package installs: 0; database writes: 0"
+            )
+        return 0 if payload["ready"] else 2
     rows = capability_inventory(project)
     history_available = None
     task_exists = None
@@ -3661,10 +3789,22 @@ def command_capabilities(args: argparse.Namespace) -> int:
                     "evidence_missing": 0,
                     "providers": [],
                     "stages": [],
+                    "content_sha256s": [],
                     "last_observed_at": None,
                 },
             )
-            row["invocation"] = usage["status"]
+            invocation = usage["status"]
+            current_digest = row.get("observed_content_sha256")
+            evidence_digests = usage.get("content_sha256s", [])
+            evidence_matches_current = (
+                None
+                if not evidence_digests
+                else isinstance(current_digest, str) and current_digest in evidence_digests
+            )
+            if invocation in {"loaded", "invoked"} and evidence_matches_current is not True:
+                invocation = "evidence-digest-mismatch"
+            row["invocation"] = invocation
+            row["evidence_matches_current"] = evidence_matches_current
             row["usage"] = usage
     payload = {
         "project": str(project),
@@ -3707,7 +3847,7 @@ def command_capabilities(args: argparse.Namespace) -> int:
             f"{row['id']} kind={row['kind']} enabled={str(row['enabled']).lower()} "
             f"installed={str(row['installed']).lower()} adapter={str(row['adapter_supported']).lower()} "
             f"available={str(row['available']).lower()} usable={str(row['usable']).lower()} "
-            f"invocation={row['invocation']}{counts}"
+            f"integrity={row['integrity']} invocation={row['invocation']}{counts}"
         )
     return 0
 
@@ -3730,6 +3870,33 @@ def _print_capability_change(payload: dict[str, object], json_output: bool, *, p
         print("writes: none; provider calls: 0; network calls: 0; package installs: 0")
     else:
         print(f"registry: {payload['registry']}; changed={str(payload['changed']).lower()}")
+    return 0
+
+
+def _print_capability_vendor(payload: dict[str, object], json_output: bool, *, plan: bool) -> int:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    lifecycle = payload["lifecycle"]
+    assert isinstance(lifecycle, dict)
+    mode = "plan (read-only)" if plan else "applied"
+    print(f"capability vendor {mode}: {payload['entry']['id']} -> {payload['destination']}")
+    print(
+        f"vendored={str(lifecycle['vendored']).lower()} "
+        f"registered={str(lifecycle['registered']).lower()} "
+        f"enabled={str(lifecycle['enabled']).lower()} "
+        f"available={str(lifecycle['available']).lower()} "
+        f"attached={str(lifecycle['attached']).lower()} "
+        f"loaded={str(lifecycle['loaded']).lower()} "
+        f"invoked={str(lifecycle['invoked']).lower()}"
+    )
+    if plan:
+        print(
+            "writes: none; provider calls: 0; network calls: 0; package installs: 0; "
+            "subprocess calls: 0; user-home writes: 0"
+        )
+    else:
+        print("registered disabled; explicit enable and task selection are still required")
     return 0
 
 
@@ -5044,6 +5211,33 @@ def build_parser() -> argparse.ArgumentParser:
     capability_register.add_argument("--plan", action="store_true", help="Validate and preview without writing")
     capability_register.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     capability_register.set_defaults(func=command_capabilities)
+    capability_vendor = capability_sub.add_parser(
+        "vendor",
+        help="Copy one reviewed local source into the project and register it disabled",
+    )
+    capability_vendor.add_argument("capability_id")
+    capability_vendor.add_argument(
+        "--kind", required=True, choices=("skill", "mcp", "claude-plugin")
+    )
+    capability_vendor.add_argument(
+        "--source",
+        required=True,
+        help="Explicit local SKILL.md or skill directory, MCP manifest, or plugin directory",
+    )
+    capability_vendor.add_argument("--provider", action="append", required=True)
+    capability_vendor.add_argument(
+        "--stage", action="append", required=True, choices=("IMPLEMENT", "REVIEW")
+    )
+    capability_vendor.add_argument(
+        "--plan", action="store_true", help="Validate and preview without writing"
+    )
+    capability_vendor.add_argument(
+        "--update",
+        action="store_true",
+        help="Explicitly replace the matching vendored source and leave it disabled",
+    )
+    capability_vendor.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_vendor.set_defaults(func=command_capabilities)
     for name in ("enable", "disable"):
         capability_state = capability_sub.add_parser(
             name,
@@ -5053,6 +5247,14 @@ def build_parser() -> argparse.ArgumentParser:
         capability_state.add_argument("--plan", action="store_true", help="Validate and preview without writing")
         capability_state.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
         capability_state.set_defaults(func=command_capabilities)
+    capability_pin = capability_sub.add_parser(
+        "pin",
+        help="Preview or pin one capability to its current validated project-local content",
+    )
+    capability_pin.add_argument("capability_id")
+    capability_pin.add_argument("--plan", action="store_true", help="Validate and preview without writing")
+    capability_pin.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_pin.set_defaults(func=command_capabilities)
     capability_policy = capability_sub.add_parser(
         "policy",
         help="Preview or set the project skill-load evidence policy without invoking providers",
@@ -5066,6 +5268,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capability_policy.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     capability_policy.set_defaults(func=command_capabilities)
+    capability_discover = capability_sub.add_parser(
+        "discover",
+        help="Inspect one explicit project-local subtree for capability candidates without writing",
+    )
+    capability_discover.add_argument(
+        "--root", required=True, help="Project-relative directory to inspect without following links"
+    )
+    capability_discover.add_argument(
+        "--registration-plan",
+        metavar="CANDIDATE_ID",
+        help="Preview registration of exactly one discovered candidate without writing",
+    )
+    capability_discover.add_argument("--provider", action="append")
+    capability_discover.add_argument(
+        "--stage", action="append", choices=("IMPLEMENT", "REVIEW")
+    )
+    capability_discover.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_discover.set_defaults(func=command_capabilities)
+    capability_contract = capability_sub.add_parser(
+        "contract",
+        help="Preview or apply explicit capability refs in one project task contract",
+    )
+    capability_contract.add_argument("--task", required=True)
+    capability_contract.add_argument("--add", action="append", help="Registered capability id to add")
+    capability_contract.add_argument("--remove", action="append", help="Capability id to remove")
+    capability_contract.add_argument("--plan", action="store_true", help="Validate and preview without writing")
+    capability_contract.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_contract.set_defaults(func=command_capabilities)
+    capability_preflight = capability_sub.add_parser(
+        "preflight",
+        help="Read-only provider/stage routing preflight for one task's requested capabilities",
+    )
+    capability_preflight.add_argument("--task", required=True)
+    capability_preflight.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_preflight.set_defaults(func=command_capabilities)
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")

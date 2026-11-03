@@ -56,6 +56,18 @@ MIGRATIONS = [
         "explicit subprocess tree authority",
         "ALTER TABLE executions ADD COLUMN process_tree_scope TEXT;",
     ),
+    Migration(
+        6,
+        "frozen task capability policy",
+        """
+        CREATE TABLE IF NOT EXISTS task_capability_policies (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+            digest TEXT NOT NULL,
+            canonical_json TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        """,
+    ),
 ]
 
 

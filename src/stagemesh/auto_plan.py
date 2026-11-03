@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .capabilities import capability_policy_snapshot
 from .contracts import (
     CONTRACT_VERSION,
     ContractError,
@@ -385,12 +386,15 @@ def refresh_stale_generated_contract(store: Store, project: Path, task_id: str) 
         candidate = store.latest_candidate(task_id)
         candidate_sha = str(candidate["sha"]) if candidate is not None else None
         baseline_sha = str(frozen["baseline_sha"]) if frozen["baseline_sha"] is not None else None
+        capability_policy = capability_policy_snapshot(project, contract.capability_refs)
         store.rebind_task_contract(
             task_id,
             CONTRACT_VERSION,
             digest,
             canonical_json,
             candidate_sha,
+            capability_digest=str(capability_policy["digest"]),
+            capability_json=str(capability_policy["canonical_json"]),
         )
         if candidate_sha is not None and store.contract_binding(task_id, candidate_sha) is None:
             store.bind_contract(task_id, candidate_sha, baseline_sha, CONTRACT_VERSION, digest, canonical_json)

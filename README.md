@@ -112,12 +112,29 @@ isolated git worktree and the integration ref only advances after validation, in
 
 Provider registration is separate from worker capabilities. Projects can inventory local skills, MCP definitions, and Claude plugin
 packages in `.stagemesh/capabilities.json`; `stagemesh capabilities --json` reports declared, installed, enabled, adapter-supported,
-and usable states without installing or invoking anything. Read-only `SKILL.md` attachment, skills-only Claude plugin import, and
+usable, and content-integrity states without installing or invoking anything. New registration pins reviewed source content;
+`stagemesh capabilities pin <id> --plan --json` previews an explicit legacy pin or reviewed refresh, and dispatch refuses drifted pins.
+Read-only `SKILL.md` attachment, skills-only Claude plugin import, and
 bounded Codex stdio MCP have runtime adapters, and contracts opt in by id with `capability_refs`. The plugin importer never activates
 hooks, agents, commands, MCP, LSP, or other executable plugin components. Codex MCP disables ambient servers, restricts an
 already-installed server to declared read-only tools, and requires redacted invocation evidence. MCP for other providers and executable
 plugin requests fail closed. See
 [docs/capabilities.md](docs/capabilities.md) for the schema and audit semantics.
+`stagemesh capabilities discover --root <project-directory>` safely inventories additional vendored skills, skills-only Claude plugins,
+and bounded MCP manifests; it does not install, register, enable, attach, load, or invoke them.
+`stagemesh capabilities vendor <id> --kind ... --source ... --plan --json` previews a bounded copy of one explicitly reviewed local
+source, including a UTF-8 skill package with referenced support files. Applying copies only accepted content into the project, pins the
+complete copied tree, and registers it disabled; it performs no network/package installation, provider or subprocess call, enablement,
+task selection, attachment, load, or invocation.
+An explicit `--update --plan` previews replacement of the matching tree-pinned vendored source; applying uses rollback protection and
+always leaves the refreshed declaration disabled. Verified identical content is not rewritten.
+Use `stagemesh capabilities contract --task <id> --add <capability> --plan --json` to preview explicit task opt-in, then remove
+`--plan` for an atomic project-contract update. Existing frozen task bindings are never silently changed. Before dispatch,
+`stagemesh capabilities preflight --task <id> --json` reports the exact compatible provider/stage routes without invoking them.
+When a runtime contract is first frozen, StageMesh also freezes the selected registry declarations (source, provider/stage scope,
+permissions, enablement, and source pin) plus the effective skill-evidence mode. Dispatch refuses relevant policy drift before implementation or review starts; unrelated
+registry entries may change. Preflight, task-doctor, and run-window expose the frozen/current policy digests and require an audited
+`rebind-contract` for legacy-unbound or deliberately changed selections.
 Projects may opt into `observed-load-required` skill evidence. Supported provider JSON streams then produce redacted
 `capability.loaded` receipts for implementation and review, and a provider that does not show every selected skill being read before
 its first recorded mutation is rejected without a quota cooldown. Review streams must also contain a recognized final-answer event;

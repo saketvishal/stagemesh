@@ -24,6 +24,7 @@ SCHEMA_VERSION = latest_schema_version()
 
 
 MAX_CANONICAL_CONTRACT_CHARS = 10000
+MAX_CAPABILITY_POLICY_CHARS = 10000
 
 
 class StoreValidationError(ValueError):
@@ -208,6 +209,12 @@ class Store:
                 task_id TEXT PRIMARY KEY REFERENCES tasks(id),
                 baseline_sha TEXT NOT NULL,
                 version INTEGER NOT NULL,
+                digest TEXT NOT NULL,
+                canonical_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS task_capability_policies (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(id),
                 digest TEXT NOT NULL,
                 canonical_json TEXT NOT NULL,
                 created_at REAL NOT NULL
@@ -492,24 +499,51 @@ class Store:
         return str(row["baseline_sha"]) if row is not None else None
 
     def bind_task_contract(
-        self, task_id: str, baseline_sha: str, version: int, digest: str, canonical_json: str
+        self,
+        task_id: str,
+        baseline_sha: str,
+        version: int,
+        digest: str,
+        canonical_json: str,
+        *,
+        capability_digest: str | None = None,
+        capability_json: str | None = None,
     ) -> None:
-        """Freeze the contract the provider is instructed with; the first binding wins."""
+        """Freeze the contract and selected capability policy; the first binding wins."""
         task_id = _validate_text(task_id, "task id")
         baseline_sha = _validate_text(baseline_sha, "baseline sha")
         digest = _validate_text(digest, "contract hash", 128)
         canonical_json = _validate_text(canonical_json, "canonical contract", MAX_CANONICAL_CONTRACT_CHARS)
+        if (capability_digest is None) != (capability_json is None):
+            raise StoreValidationError("capability policy digest and payload must be supplied together")
+        if capability_digest is not None:
+            capability_digest = _validate_text(capability_digest, "capability policy hash", 128)
+            capability_json = _validate_text(
+                capability_json, "canonical capability policy", MAX_CAPABILITY_POLICY_CHARS
+            )
         if not isinstance(version, int) or version < 1:
             raise StoreValidationError("contract version must be a positive integer")
-        self.conn.execute(
-            "INSERT OR IGNORE INTO task_contracts VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, baseline_sha, version, digest, canonical_json, time.time()),
-        )
-        self.conn.commit()
+        now = time.time()
+        with self.conn:
+            inserted = self.conn.execute(
+                "INSERT OR IGNORE INTO task_contracts VALUES (?, ?, ?, ?, ?, ?)",
+                (task_id, baseline_sha, version, digest, canonical_json, now),
+            ).rowcount
+            if inserted and capability_digest is not None:
+                self.conn.execute(
+                    "INSERT INTO task_capability_policies VALUES (?, ?, ?, ?)",
+                    (task_id, capability_digest, capability_json, now),
+                )
 
     def task_contract(self, task_id: str) -> sqlite3.Row | None:
         task_id = _validate_text(task_id, "task id")
         return self.conn.execute("SELECT * FROM task_contracts WHERE task_id=?", (task_id,)).fetchone()
+
+    def task_capability_policy(self, task_id: str) -> sqlite3.Row | None:
+        task_id = _validate_text(task_id, "task id")
+        return self.conn.execute(
+            "SELECT * FROM task_capability_policies WHERE task_id=?", (task_id,)
+        ).fetchone()
 
     def contract_binding(self, task_id: str, candidate_sha: str) -> sqlite3.Row | None:
         task_id = _validate_text(task_id, "task id")
@@ -654,7 +688,15 @@ class Store:
         return self.conn.execute("SELECT 1 FROM claims WHERE task_id=? AND active=1", (task_id,)).fetchone() is not None
 
     def rebind_task_contract(
-        self, task_id: str, version: int, digest: str, canonical_json: str, candidate_sha: str | None = None
+        self,
+        task_id: str,
+        version: int,
+        digest: str,
+        canonical_json: str,
+        candidate_sha: str | None = None,
+        *,
+        capability_digest: str | None = None,
+        capability_json: str | None = None,
     ) -> None:
         """Replace the frozen task contract (and the binding of `candidate_sha`, if any) in one transaction.
 
@@ -664,6 +706,13 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         digest = _validate_text(digest, "contract hash", 128)
         canonical_json = _validate_text(canonical_json, "canonical contract", MAX_CANONICAL_CONTRACT_CHARS)
+        if (capability_digest is None) != (capability_json is None):
+            raise StoreValidationError("capability policy digest and payload must be supplied together")
+        if capability_digest is not None:
+            capability_digest = _validate_text(capability_digest, "capability policy hash", 128)
+            capability_json = _validate_text(
+                capability_json, "canonical capability policy", MAX_CAPABILITY_POLICY_CHARS
+            )
         if not isinstance(version, int) or isinstance(version, bool) or version < 1:
             raise StoreValidationError("contract version must be a positive integer")
         with self.conn:
@@ -682,6 +731,13 @@ class Store:
                 self.conn.execute(
                     "UPDATE contract_bindings SET version=?, digest=?, canonical_json=? WHERE task_id=? AND candidate_sha=?",
                     (version, digest, canonical_json, task_id, candidate_sha),
+                )
+            if capability_digest is not None:
+                self.conn.execute(
+                    "INSERT INTO task_capability_policies(task_id, digest, canonical_json, created_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET "
+                    "digest=excluded.digest, canonical_json=excluded.canonical_json, created_at=excluded.created_at",
+                    (task_id, capability_digest, capability_json, time.time()),
                 )
 
     def rebaseline_task(self, task_id: str, baseline_sha: str, candidate_sha: str | None = None) -> None:

@@ -17,7 +17,11 @@ from .audit import record_audit
 from .auto_plan import outside_label_selector
 from .autonomy.destructive_git import execute_preserved_cleanup
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
-from .capabilities import CapabilityRegistryError, task_capability_summary
+from .capabilities import (
+    CapabilityRegistryError,
+    capability_policy_snapshot,
+    task_capability_summary,
+)
 from .config import AdverseReviewPolicy, ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
 from .contracts import (
@@ -248,6 +252,10 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     if len(canonical) > MAX_CANONICAL_CONTRACT_CHARS:
         raise RecoveryRefusal("invalid_contract", f"contract is {len(canonical)} characters canonicalized; the limit is {MAX_CANONICAL_CONTRACT_CHARS}")
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    try:
+        capability_policy = capability_policy_snapshot(project, contract.capability_refs)
+    except CapabilityRegistryError as exc:
+        raise RecoveryRefusal("capability_policy_unavailable", str(exc)) from exc
 
     old_digest = str(old["digest"]) if old is not None else None
     old_version = int(old["version"]) if old is not None else None
@@ -259,6 +267,7 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     at_risk = [row for d in sorted(stale_digests) for row in store.passed_evidence_for_digest(task_id, d)]
     if plan:
         return {"plan": True, "task_id": task_id, "old_digest": old_digest, "new_digest": digest,
+                "capability_policy_digest": capability_policy["digest"],
                 "classification": classification, "invalidated_evidence": [str(r["id"]) for r in at_risk],
                 "requires_force": bool(at_risk), "new_canonical_json": canonical,
                 "stage": task["stage"], "status": task["status"]}
@@ -280,7 +289,15 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
             "invariant_classification": classification, "candidate_sha": candidate_sha,
             "reason": reason.strip(), "operator": _operator(), "forced": bool(force),
         })
-    store.rebind_task_contract(task_id, CONTRACT_VERSION, digest, canonical, candidate_sha if binding is not None else None)
+    store.rebind_task_contract(
+        task_id,
+        CONTRACT_VERSION,
+        digest,
+        canonical,
+        candidate_sha if binding is not None else None,
+        capability_digest=str(capability_policy["digest"]),
+        capability_json=str(capability_policy["canonical_json"]),
+    )
     changes = _resume_at_validate(store, task_id, task)
     # Even an unchanged rebind must repair a stage that has no current validation.
     if (
@@ -304,6 +321,7 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         "new_version": CONTRACT_VERSION,
         "old_canonical_json": str(old["canonical_json"]) if old is not None else original_canonical,
         "new_canonical_json": canonical,
+        "capability_policy_digest": capability_policy["digest"],
         "invariant_classification": classification,
         "candidate_sha": candidate_sha,
         "binding_updated": binding is not None,
@@ -1404,7 +1422,8 @@ def format_doctor(report: dict[str, Any]) -> str:
             f"  capabilities: {capabilities.get('registry_count', 0)} registered; "
             f"{len(rows)} task-relevant; "
             f"{len(requested)} requested; {len(observed)} observed; "
-            f"policy={capabilities.get('skill_evidence_mode', 'unknown')}"
+            f"policy={capabilities.get('skill_evidence_mode', 'unknown')}; "
+            f"binding={(capabilities.get('policy_binding') or {}).get('state', 'unknown')}"
         )
         for row in rows:
             usage = row.get("usage") or {}

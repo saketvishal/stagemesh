@@ -22,6 +22,8 @@ from .attribution import attribution_for_worker
 from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
     CapabilityRegistryError,
+    capability_policy_report,
+    require_capability_policy,
     skill_evidence_mode,
 )
 from .capacity import CapacityKind, CapacityRegistry
@@ -48,7 +50,7 @@ from .execution import (
 from .execution_ownership import RESEARCH_PROCESS_TREE
 from .focused_validation import focused_test_prompt
 from .git_identity import provider_environment
-from .mcp_capabilities import McpCapabilityError, configure_codex_mcp_command
+from .mcp_capabilities import McpCapabilityError, configure_mcp_command
 from .persistence import Store
 from .process_identity import owner_execution_fields, popen_identity
 from .provider_events import (
@@ -308,6 +310,38 @@ class RuntimeCommandAdapter:
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
         capability_audit: list[dict[str, object]] = []
         try:
+            require_capability_policy(
+                run_path, store.conn, task_id, bound.contract.capability_refs
+            )
+        except CapabilityRegistryError as exc:
+            policy = capability_policy_report(
+                run_path, store.conn, task_id, bound.contract.capability_refs
+            )
+            store.add_audit_event(
+                "capability.policy_refused",
+                {
+                    "task_id": task_id,
+                    "provider": self.name,
+                    "stage": "IMPLEMENT",
+                    "provider_invoked": False,
+                    "capability_ids": list(dict.fromkeys(bound.contract.capability_refs)),
+                    "policy_state": policy["state"],
+                    "frozen_digest": policy["frozen_digest"],
+                    "current_digest": policy["current_digest"],
+                    "frozen_skill_evidence_mode": policy[
+                        "frozen_skill_evidence_mode"
+                    ],
+                    "current_skill_evidence_mode": policy[
+                        "current_skill_evidence_mode"
+                    ],
+                    "reason": str(exc)[:500],
+                },
+            )
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=f"capability_unavailable: {exc}",
+            )
+        try:
             task_prompt = _build_task_prompt(
                 task_id, task, run_path, contract=bound.contract, remediation=remediation,
                 planning_project=project,
@@ -325,7 +359,7 @@ class RuntimeCommandAdapter:
         permitted_codex_config: frozenset[str] = frozenset()
         if mcp_requested:
             try:
-                configured, permitted_codex_config = configure_codex_mcp_command(
+                configured, permitted_codex_config = configure_mcp_command(
                     configured_command, capability_audit
                 )
                 configured_command = tuple(configured)
@@ -774,6 +808,44 @@ class RuntimeCommandAdapter:
                         return _review_infrastructure_failure(f"invalid_contract: {exc}")
             capability_audit: list[dict[str, object]] = []
             try:
+                if store is not None and task_id is not None and review_contract is not None:
+                    require_capability_policy(
+                        review_path,
+                        store.conn,
+                        task_id,
+                        review_contract.capability_refs,
+                    )
+            except CapabilityRegistryError as exc:
+                policy = capability_policy_report(
+                    review_path,
+                    store.conn,
+                    task_id,
+                    review_contract.capability_refs,
+                )
+                store.add_audit_event(
+                    "capability.policy_refused",
+                    {
+                        "task_id": task_id,
+                        "provider": self.name,
+                        "stage": "REVIEW",
+                        "provider_invoked": False,
+                        "capability_ids": list(
+                            dict.fromkeys(review_contract.capability_refs)
+                        ),
+                        "policy_state": policy["state"],
+                        "frozen_digest": policy["frozen_digest"],
+                        "current_digest": policy["current_digest"],
+                        "frozen_skill_evidence_mode": policy[
+                            "frozen_skill_evidence_mode"
+                        ],
+                        "current_skill_evidence_mode": policy[
+                            "current_skill_evidence_mode"
+                        ],
+                        "reason": str(exc)[:500],
+                    },
+                )
+                return _review_infrastructure_failure(f"capability_unavailable: {exc}")
+            try:
                 review_prompt = prompt + skill_prompt(
                     prompt,
                     review_contract,
@@ -788,7 +860,17 @@ class RuntimeCommandAdapter:
                 return _review_infrastructure_failure(f"capability_unavailable: {exc}")
             configured_command = self.command_for("review")
             evidence_mode = skill_evidence_mode(review_path)
-            event_stream = evidence_mode == OBSERVED_LOAD_REQUIRED
+            mcp_requested = any(item.get("kind") == "mcp" for item in capability_audit)
+            permitted_codex_config: frozenset[str] = frozenset()
+            if mcp_requested:
+                try:
+                    configured, permitted_codex_config = configure_mcp_command(
+                        configured_command, capability_audit
+                    )
+                    configured_command = tuple(configured)
+                except McpCapabilityError as exc:
+                    return _review_infrastructure_failure(f"capability_unavailable: {exc}")
+            event_stream = evidence_mode == OBSERVED_LOAD_REQUIRED or mcp_requested
             if event_stream:
                 try:
                     validate_observable_attachments(capability_audit)
@@ -799,7 +881,13 @@ class RuntimeCommandAdapter:
                     )
             command_identity = command_snapshot(self.name, configured_command, self.all_commands())
             command, provider_input = _command_and_input(configured_command, review_prompt, structured_review=True)
-            refused = _authorization_refusal(self, project, "review", command=command)
+            refused = _authorization_refusal(
+                self,
+                project,
+                "review",
+                command=command,
+                permitted_codex_config=permitted_codex_config,
+            )
             if refused:
                 return _review_infrastructure_failure("provider_not_authorized", refused)
             if store is not None and task_id is not None:
@@ -844,35 +932,71 @@ class RuntimeCommandAdapter:
                     return _review_infrastructure_failure(reason, output, retry_after)
                 return _review_infrastructure_failure(reason)
             if event_stream:
-                observation = observe_skill_loads(stdout, capability_audit)
-                if store is not None and task_id is not None:
-                    for receipt in loaded_receipts(observation, capability_audit):
-                        store.add_audit_event(
-                            "capability.loaded",
-                            {
-                                "task_id": task_id,
-                                "provider": self.name,
-                                "stage": "REVIEW",
-                                **receipt,
-                            },
-                        )
-                if observation.missing:
+                if evidence_mode == OBSERVED_LOAD_REQUIRED:
+                    observation = observe_skill_loads(stdout, capability_audit)
                     if store is not None and task_id is not None:
-                        store.add_audit_event(
-                            "capability.evidence_missing",
-                            {
-                                "task_id": task_id,
-                                "provider": self.name,
-                                "stage": "REVIEW",
-                                "provider_invoked": True,
-                                "missing_capabilities": list(observation.missing),
-                                "event_count": observation.event_count,
-                                "malformed_lines": observation.malformed_lines,
-                            },
+                        for receipt in loaded_receipts(observation, capability_audit):
+                            store.add_audit_event(
+                                "capability.loaded",
+                                {
+                                    "task_id": task_id,
+                                    "provider": self.name,
+                                    "stage": "REVIEW",
+                                    **receipt,
+                                },
+                            )
+                    if observation.missing:
+                        if store is not None and task_id is not None:
+                            store.add_audit_event(
+                                "capability.evidence_missing",
+                                {
+                                    "task_id": task_id,
+                                    "provider": self.name,
+                                    "stage": "REVIEW",
+                                    "provider_invoked": True,
+                                    "missing_capabilities": list(observation.missing),
+                                    "event_count": observation.event_count,
+                                    "malformed_lines": observation.malformed_lines,
+                                },
+                            )
+                        return _review_infrastructure_failure(
+                            f"{CAPABILITY_EVIDENCE_MISSING}: {', '.join(observation.missing)}"
                         )
-                    return _review_infrastructure_failure(
-                        f"{CAPABILITY_EVIDENCE_MISSING}: {', '.join(observation.missing)}"
-                    )
+                if mcp_requested:
+                    mcp_observation = observe_mcp_invocations(stdout, capability_audit)
+                    if store is not None and task_id is not None:
+                        for receipt in mcp_invocation_receipts(
+                            mcp_observation, capability_audit
+                        ):
+                            store.add_audit_event(
+                                "capability.invoked",
+                                {
+                                    "task_id": task_id,
+                                    "provider": self.name,
+                                    "stage": "REVIEW",
+                                    **receipt,
+                                },
+                            )
+                    if mcp_observation.violations:
+                        return _review_infrastructure_failure(CAPABILITY_POLICY_VIOLATION)
+                    if mcp_observation.missing:
+                        if store is not None and task_id is not None:
+                            store.add_audit_event(
+                                "capability.evidence_missing",
+                                {
+                                    "task_id": task_id,
+                                    "provider": self.name,
+                                    "stage": "REVIEW",
+                                    "provider_invoked": True,
+                                    "missing_capabilities": list(mcp_observation.missing),
+                                    "event_count": mcp_observation.event_count,
+                                    "malformed_lines": mcp_observation.malformed_lines,
+                                },
+                            )
+                        return _review_infrastructure_failure(
+                            f"{CAPABILITY_EVIDENCE_MISSING}: "
+                            f"{', '.join(mcp_observation.missing)}"
+                        )
                 response = provider_event_response(stdout)
                 if response is None:
                     return _review_infrastructure_failure(

@@ -1413,7 +1413,8 @@ def format_window_report(report: WindowReport) -> str:
             ]
             lines.append(
                 f"      capabilities: {len(requested)} requested; {len(observed)} observed; "
-                f"policy={capability_report.get('skill_evidence_mode', 'unknown')}"
+                f"policy={capability_report.get('skill_evidence_mode', 'unknown')}; "
+                f"binding={(capability_report.get('policy_binding') or {}).get('state', 'unknown')}"
             )
         elif capability_report:
             lines.append("      capabilities: unavailable")
