@@ -126,6 +126,316 @@ def _entry(
     }
 
 
+def test_capability_registration_plan_validates_existing_source_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+
+    code = main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "register",
+            "domain-review",
+            "--kind",
+            "skill",
+            "--source",
+            "agent-skills/domain-review/SKILL.md",
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+            "--plan",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0 and payload["operation"] == "register" and payload["changed"] is True
+    assert payload["inventory"]["installed"] is True
+    assert payload["inventory"]["available"] is True
+    assert payload["inventory"]["enabled"] is False
+    assert payload["inventory"]["usable"] is False
+    assert payload["planned_writes"] == [".stagemesh/capabilities.json"]
+    assert payload["writes"] == [] and payload["provider_calls"] == 0
+    assert payload["network_calls"] == 0 and payload["package_installs"] == 0
+    assert not (tmp_path / ".stagemesh" / "capabilities.json").exists()
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+
+def test_capability_change_preserves_parent_json_flag_and_refuses_task_scope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    base = [
+        "--project",
+        str(tmp_path),
+        "capabilities",
+        "--json",
+    ]
+    change = [
+        "register",
+        "domain-review",
+        "--kind",
+        "skill",
+        "--source",
+        "agent-skills/domain-review/SKILL.md",
+        "--provider",
+        "codex",
+        "--stage",
+        "IMPLEMENT",
+        "--plan",
+    ]
+
+    assert main([*base, *change]) == 0
+    assert json.loads(capsys.readouterr().out)["writes"] == []
+    assert main([*base[:-1], "--task", "T-1", *change]) == 2
+    assert "read-only usage inspection" in capsys.readouterr().err
+    assert not (tmp_path / ".stagemesh" / "capabilities.json").exists()
+
+
+def test_cli_registers_existing_skill_plugin_and_mcp_without_installing_or_invoking(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _claude_plugin(tmp_path)
+    _mcp_manifest(tmp_path)
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "skill_evidence_mode": OBSERVED_LOAD_REQUIRED,
+                "capabilities": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands = [
+        [
+            "domain-review",
+            "--kind",
+            "skill",
+            "--source",
+            "agent-skills/domain-review/SKILL.md",
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+        ],
+        [
+            "review-kit",
+            "--kind",
+            "claude-plugin",
+            "--source",
+            ".claude/plugins/review-kit",
+            "--provider",
+            "claude",
+            "--stage",
+            "REVIEW",
+        ],
+        [
+            "serena",
+            "--kind",
+            "mcp",
+            "--source",
+            ".stagemesh/mcp/serena.json",
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+        ],
+    ]
+
+    for command in commands:
+        assert main(["--project", str(tmp_path), "capabilities", "register", *command, "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["written"] is True
+
+    payload = json.loads(registry.read_text(encoding="utf-8"))
+    assert payload["skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
+    assert [entry["id"] for entry in payload["capabilities"]] == [
+        "domain-review",
+        "review-kit",
+        "serena",
+    ]
+    assert all(entry["enabled"] is False for entry in payload["capabilities"])
+    assert payload["capabilities"][1]["permissions"] == ["workspace-read"]
+    assert payload["capabilities"][2]["permissions"] == ["workspace-read", "subprocess"]
+    rows = {row["id"]: row for row in inventory(tmp_path)}
+    assert all(rows[name]["available"] is True for name in rows)
+    assert all(rows[name]["usable"] is False for name in rows)
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+
+def test_capability_enable_plan_and_disable_are_explicit_and_do_not_create_usage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skill = _skill(tmp_path)
+    _registry(tmp_path, [_entry("domain-review", enabled=False)])
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    before = registry.read_bytes()
+
+    assert main(
+        ["--project", str(tmp_path), "capabilities", "enable", "domain-review", "--plan", "--json"]
+    ) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["writes"] == [] and plan["inventory"]["usable"] is True
+    assert registry.read_bytes() == before
+
+    assert main(["--project", str(tmp_path), "capabilities", "enable", "domain-review", "--json"]) == 0
+    enabled = json.loads(capsys.readouterr().out)
+    assert enabled["written"] is True and enabled["inventory"]["usable"] is True
+    skill.unlink()
+    assert main(["--project", str(tmp_path), "capabilities", "disable", "domain-review", "--json"]) == 0
+    disabled = json.loads(capsys.readouterr().out)
+    assert disabled["written"] is True
+    assert disabled["inventory"]["enabled"] is False and disabled["inventory"]["available"] is False
+    assert main(["--project", str(tmp_path), "capabilities", "disable", "domain-review", "--json"]) == 0
+    unchanged = json.loads(capsys.readouterr().out)
+    assert unchanged["written"] is False and unchanged["changed"] is False
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+
+def test_unavailable_enable_and_duplicate_registration_leave_registry_unchanged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _registry(tmp_path, [_entry("domain-review", enabled=False)])
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    before = registry.read_bytes()
+    duplicate = [
+        "--project",
+        str(tmp_path),
+        "capabilities",
+        "register",
+        "domain-review",
+        "--kind",
+        "skill",
+        "--source",
+        "agent-skills/domain-review/SKILL.md",
+        "--provider",
+        "codex",
+        "--stage",
+        "IMPLEMENT",
+    ]
+
+    assert main(duplicate) == 2
+    assert "already registered" in capsys.readouterr().err
+    assert registry.read_bytes() == before
+
+    manifest = _mcp_manifest(tmp_path, "unavailable")
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["command"] = "stagemesh-no-such-mcp-runtime"
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "register",
+            "unavailable",
+            "--kind",
+            "mcp",
+            "--source",
+            ".stagemesh/mcp/unavailable.json",
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+        ]
+    ) == 0
+    capsys.readouterr()
+    registered = registry.read_bytes()
+    assert main(["--project", str(tmp_path), "capabilities", "enable", "unavailable"]) == 2
+    assert "not available" in capsys.readouterr().err
+    assert registry.read_bytes() == registered
+
+
+def test_explicit_capability_update_preserves_policy_and_unrelated_entries(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path, "domain-review")
+    _skill(tmp_path, "unrelated")
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    unrelated = _entry("unrelated", source="agent-skills/unrelated/SKILL.md", enabled=False)
+    registry.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "skill_evidence_mode": OBSERVED_LOAD_REQUIRED,
+                "capabilities": [_entry("domain-review", enabled=False), unrelated],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "register",
+            "domain-review",
+            "--kind",
+            "skill",
+            "--source",
+            "agent-skills/domain-review/SKILL.md",
+            "--provider",
+            "claude",
+            "--stage",
+            "REVIEW",
+            "--update",
+            "--json",
+        ]
+    )
+
+    assert code == 0 and json.loads(capsys.readouterr().out)["operation"] == "update"
+    payload = json.loads(registry.read_text(encoding="utf-8"))
+    assert payload["skill_evidence_mode"] == OBSERVED_LOAD_REQUIRED
+    assert payload["capabilities"][1] == unrelated
+    assert payload["capabilities"][0]["providers"] == ["claude"]
+    assert payload["capabilities"][0]["stages"] == ["REVIEW"]
+    assert payload["capabilities"][0]["enabled"] is False
+
+
+def test_capability_registry_write_refuses_an_existing_symlink(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-capabilities.json"
+    outside.write_text(json.dumps({"format_version": 1, "capabilities": []}), encoding="utf-8")
+    try:
+        registry.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    before = outside.read_bytes()
+
+    code = main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "register",
+            "domain-review",
+            "--kind",
+            "skill",
+            "--source",
+            "agent-skills/domain-review/SKILL.md",
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+        ]
+    )
+
+    assert code == 2 and "refuses a symlink" in capsys.readouterr().err
+    assert registry.is_symlink() and outside.read_bytes() == before
+
+
 def test_inventory_distinguishes_declared_enabled_installed_adapter_and_invocation(
     tmp_path: Path,
 ) -> None:

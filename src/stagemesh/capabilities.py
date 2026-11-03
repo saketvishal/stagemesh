@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,59 +135,89 @@ def _registry_payload(root: Path) -> dict[str, object] | None:
 def inventory(project: Path) -> list[dict[str, object]]:
     """Distinguish declared, enabled, installed, adapter-supported and usable."""
     root = Path(project).resolve()
-    rows: list[dict[str, object]] = []
-    for item in load_registry(root):
-        target = _source_path(root, item.source)
-        installed = _installed(item, target)
-        supported_providers = (
-            list(item.providers)
-            if item.kind == "skill"
-            else ["codex"]
-            if item.kind == "mcp"
-            else ["claude"]
-        )
-        adapter_supported = bool(supported_providers)
-        configuration_valid = installed
-        configuration_error = None
-        runtime_installed = installed
-        if installed and item.kind == "mcp":
-            try:
-                config = load_mcp_manifest(target, root)
-                runtime_installed = shutil.which(config.command) is not None
-            except McpCapabilityError as exc:
-                configuration_valid = False
-                runtime_installed = False
-                configuration_error = str(exc)
-        if installed and item.kind == "claude-plugin":
-            try:
-                load_claude_plugin(target, root)
-            except ClaudePluginCapabilityError as exc:
-                configuration_valid = False
-                runtime_installed = False
-                configuration_error = str(exc)
-        available = installed and adapter_supported and configuration_valid and runtime_installed
-        rows.append(
-            {
-                "id": item.id,
-                "kind": item.kind,
-                "source": item.source,
-                "declared": True,
-                "enabled": item.enabled,
-                "installed": installed,
-                "adapter_supported": adapter_supported,
-                "supported_providers": supported_providers,
-                "configuration_valid": configuration_valid,
-                "configuration_error": configuration_error,
-                "runtime_installed": runtime_installed,
-                "available": available,
-                "usable": item.enabled and available,
-                "providers": list(item.providers),
-                "stages": list(item.stages),
-                "permissions": list(item.permissions),
-                "invocation": "not-observed",
-            }
-        )
-    return rows
+    return [_inventory_row(root, item) for item in load_registry(root)]
+
+
+def plan_capability_registration(
+    project: Path,
+    *,
+    capability_id: str,
+    kind: str,
+    source: str,
+    providers: list[str],
+    stages: list[str],
+    permissions: list[str],
+    enabled: bool = False,
+    update: bool = False,
+) -> dict[str, object]:
+    """Validate one project-local registry addition without writing anything."""
+    plan, _payload = _registration_change(
+        project,
+        capability_id=capability_id,
+        kind=kind,
+        source=source,
+        providers=providers,
+        stages=stages,
+        permissions=permissions,
+        enabled=enabled,
+        update=update,
+    )
+    return plan
+
+
+def register_capability(
+    project: Path,
+    *,
+    capability_id: str,
+    kind: str,
+    source: str,
+    providers: list[str],
+    stages: list[str],
+    permissions: list[str],
+    enabled: bool = False,
+    update: bool = False,
+) -> dict[str, object]:
+    """Atomically register one already-present project capability."""
+    plan, payload = _registration_change(
+        project,
+        capability_id=capability_id,
+        kind=kind,
+        source=source,
+        providers=providers,
+        stages=stages,
+        permissions=permissions,
+        enabled=enabled,
+        update=update,
+    )
+    if plan["changed"]:
+        _write_registry(Path(project).resolve(), payload)
+    return {
+        **plan,
+        "planned": False,
+        "applied": True,
+        "writes": list(plan["planned_writes"]) if plan["changed"] else [],
+        "written": bool(plan["changed"]),
+    }
+
+
+def plan_capability_enabled(project: Path, capability_id: str, enabled: bool) -> dict[str, object]:
+    """Validate one explicit enable/disable change without writing it."""
+    plan, _payload = _enabled_change(project, capability_id, enabled)
+    return plan
+
+
+def set_capability_enabled(project: Path, capability_id: str, enabled: bool) -> dict[str, object]:
+    """Atomically enable or disable one declaration without attaching or invoking it."""
+    plan, payload = _enabled_change(project, capability_id, enabled)
+    if plan["changed"]:
+        _write_registry(Path(project).resolve(), payload)
+    return {
+        **plan,
+        "planned": False,
+        "applied": True,
+        "writes": list(plan["planned_writes"]) if plan["changed"] else [],
+        "written": bool(plan["changed"]),
+    }
 
 
 def resolve_attachments(
@@ -422,6 +454,219 @@ def task_usage(
         raise CapabilityRegistryError(f"cannot read capability usage evidence: {exc}") from exc
     finally:
         connection.close()
+
+
+def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:
+    target = _source_path(root, item.source)
+    installed = _installed(item, target)
+    supported_providers = (
+        list(item.providers)
+        if item.kind == "skill"
+        else ["codex"]
+        if item.kind == "mcp"
+        else ["claude"]
+    )
+    adapter_supported = any(provider in supported_providers for provider in item.providers)
+    configuration_valid = installed
+    configuration_error = None
+    runtime_installed = installed
+    if installed and item.kind == "mcp":
+        try:
+            config = load_mcp_manifest(target, root)
+            runtime_installed = shutil.which(config.command) is not None
+        except McpCapabilityError as exc:
+            configuration_valid = False
+            runtime_installed = False
+            configuration_error = str(exc)
+    if installed and item.kind == "claude-plugin":
+        try:
+            load_claude_plugin(target, root)
+        except ClaudePluginCapabilityError as exc:
+            configuration_valid = False
+            runtime_installed = False
+            configuration_error = str(exc)
+    available = installed and adapter_supported and configuration_valid and runtime_installed
+    return {
+        "id": item.id,
+        "kind": item.kind,
+        "source": item.source,
+        "declared": True,
+        "enabled": item.enabled,
+        "installed": installed,
+        "adapter_supported": adapter_supported,
+        "supported_providers": supported_providers,
+        "configuration_valid": configuration_valid,
+        "configuration_error": configuration_error,
+        "runtime_installed": runtime_installed,
+        "available": available,
+        "usable": item.enabled and available,
+        "providers": list(item.providers),
+        "stages": list(item.stages),
+        "permissions": list(item.permissions),
+        "invocation": "not-observed",
+    }
+
+
+def _definition_payload(item: CapabilityDefinition) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "kind": item.kind,
+        "source": item.source,
+        "enabled": item.enabled,
+        "providers": list(item.providers),
+        "stages": list(item.stages),
+        "permissions": list(item.permissions),
+    }
+
+
+def _registration_change(
+    project: Path,
+    *,
+    capability_id: str,
+    kind: str,
+    source: str,
+    providers: list[str],
+    stages: list[str],
+    permissions: list[str],
+    enabled: bool,
+    update: bool,
+) -> tuple[dict[str, object], dict[str, object]]:
+    root = Path(project).resolve()
+    existing = load_registry(root)
+    payload = _registry_payload(root) or {"format_version": 1, "capabilities": []}
+    entries = list(payload["capabilities"])
+    indexes = {item.id: index for index, item in enumerate(existing)}
+    index = indexes.get(str(capability_id))
+    if index is not None and not update:
+        raise CapabilityRegistryError(
+            f"capability is already registered: {capability_id}; use an explicit update"
+        )
+    if index is None and update:
+        raise CapabilityRegistryError(f"cannot update unregistered capability: {capability_id}")
+    raw = {
+        "id": capability_id,
+        "kind": kind,
+        "source": source,
+        "enabled": enabled,
+        "providers": providers,
+        "stages": stages,
+        "permissions": permissions,
+    }
+    item = _definition(root, raw)
+    entry = _definition_payload(item)
+    row = _inventory_row(root, item)
+    if not row["installed"]:
+        raise CapabilityRegistryError(
+            f"capability {item.id} source is not installed inside the project"
+        )
+    if not row["configuration_valid"]:
+        raise CapabilityRegistryError(
+            f"capability {item.id} configuration is invalid: {row['configuration_error']}"
+        )
+    if enabled and not row["available"]:
+        raise CapabilityRegistryError(
+            f"capability {item.id} cannot be enabled because it is not available for a declared provider"
+        )
+    previous = _definition_payload(existing[index]) if index is not None else None
+    changed = previous != entry
+    if index is None:
+        entries.append(entry)
+    else:
+        entries[index] = entry
+    next_payload = {**payload, "capabilities": entries}
+    plan = {
+        "planned": True,
+        "operation": "update" if index is not None else "register",
+        "changed": changed,
+        "registry": REGISTRY_PATH.as_posix(),
+        "entry": entry,
+        "inventory": row,
+        "planned_writes": [REGISTRY_PATH.as_posix()] if changed else [],
+        "writes": [],
+        "provider_calls": 0,
+        "network_calls": 0,
+        "package_installs": 0,
+    }
+    return plan, next_payload
+
+
+def _enabled_change(
+    project: Path, capability_id: str, enabled: bool
+) -> tuple[dict[str, object], dict[str, object]]:
+    if not isinstance(enabled, bool):
+        raise CapabilityRegistryError("capability enabled state must be a boolean")
+    root = Path(project).resolve()
+    existing = load_registry(root)
+    payload = _registry_payload(root)
+    if payload is None:
+        raise CapabilityRegistryError(f"capability is not registered: {capability_id}")
+    entries = list(payload["capabilities"])
+    index = next((i for i, item in enumerate(existing) if item.id == capability_id), None)
+    if index is None:
+        raise CapabilityRegistryError(f"capability is not registered: {capability_id}")
+    raw = dict(entries[index])
+    changed = raw.get("enabled", False) is not enabled
+    raw["enabled"] = enabled
+    item = _definition(root, raw)
+    row = _inventory_row(root, item)
+    if enabled and not row["available"]:
+        raise CapabilityRegistryError(
+            f"capability {item.id} cannot be enabled because it is not available for a declared provider"
+        )
+    entries[index] = raw
+    next_payload = {**payload, "capabilities": entries}
+    plan = {
+        "planned": True,
+        "operation": "enable" if enabled else "disable",
+        "changed": changed,
+        "registry": REGISTRY_PATH.as_posix(),
+        "entry": raw,
+        "inventory": row,
+        "planned_writes": [REGISTRY_PATH.as_posix()] if changed else [],
+        "writes": [],
+        "provider_calls": 0,
+        "network_calls": 0,
+        "package_installs": 0,
+    }
+    return plan, next_payload
+
+
+def _write_registry(root: Path, payload: dict[str, object]) -> None:
+    path = root / REGISTRY_PATH
+    parent = path.parent
+    if path.is_symlink():
+        raise CapabilityRegistryError("capability registry write refuses a symlink target")
+    if parent.is_symlink():
+        raise CapabilityRegistryError("capability registry write refuses a symlink directory")
+    if parent.exists() and not parent.resolve().is_relative_to(root):
+        raise CapabilityRegistryError("capability registry directory must stay inside the project")
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        if not parent.resolve().is_relative_to(root):
+            raise CapabilityRegistryError(
+                "capability registry directory must stay inside the project"
+            )
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            descriptor = -1
+            handle.write(json.dumps(payload, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise CapabilityRegistryError(f"cannot write {REGISTRY_PATH.as_posix()}: {exc}") from exc
 
 
 def _definition(root: Path, raw: object) -> CapabilityDefinition:
