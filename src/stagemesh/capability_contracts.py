@@ -22,7 +22,7 @@ from .capabilities import (
 from .capacity import CapacityKind
 from .config import StageMeshConfig
 from .contracts import ChangeContract, ContractError, parse_contract
-from .mcp_capabilities import McpCapabilityError, configure_codex_mcp_command
+from .mcp_capabilities import McpCapabilityError, configure_mcp_command
 from .provider_events import ProviderEventError, event_stream_command
 from .provider_pool import IMPLEMENT, REVIEW, default_pools
 from .providers import adapters_from_config
@@ -317,7 +317,7 @@ def capability_preflight(
                     )
                     command = adapter.command_for(stage_capability[stage])
                     if mcp_requested:
-                        command, _permitted = configure_codex_mcp_command(
+                        command, _permitted = configure_mcp_command(
                             command, [item.audit_payload() for item in attachments]
                         )
                     if mcp_requested or observed_skill_requested:

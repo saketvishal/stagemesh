@@ -1,15 +1,10 @@
-"""Bounded, project-local MCP configuration for provider invocations.
-
-The first adapter deliberately supports only Codex stdio servers. Codex can
-ignore ambient user configuration, require one server, and enforce an exact
-tool allowlist for a single invocation. Other providers remain fail-closed
-until they can provide the same isolation and evidence properties.
-"""
+"""Bounded, project-local MCP configuration for provider invocations."""
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,12 +139,134 @@ def configure_codex_mcp_command(
     return args, frozenset(permitted)
 
 
+def configure_claude_mcp_command(
+    command: Iterable[str], attachments: Iterable[dict[str, object]]
+) -> tuple[list[str], frozenset[str]]:
+    """Attach allowlist-filtered stdio servers to one isolated Claude invocation."""
+    args = list(command)
+    executable = Path(args[0]).stem.casefold() if args else ""
+    selected = [item for item in attachments if item.get("kind") == "mcp"]
+    if not selected:
+        return args, frozenset()
+    if executable != "claude":
+        raise McpCapabilityError("Claude MCP runtime adapter requires the claude executable")
+    if _has_option(args, "--mcp-config"):
+        raise McpCapabilityError(
+            "Claude MCP runtime adapter refuses a provider command with preconfigured MCP servers"
+        )
+
+    servers: dict[str, dict[str, object]] = {}
+    permitted_tools: list[str] = []
+    for attachment in selected:
+        config = attachment.get("_mcp")
+        manifest = attachment.get("_path")
+        project = attachment.get("_project")
+        if not isinstance(config, dict) or not isinstance(manifest, str) or not manifest:
+            raise McpCapabilityError("selected MCP capability is missing private runtime metadata")
+        if not isinstance(project, str) or not project:
+            raise McpCapabilityError("selected MCP capability is missing its project boundary")
+        name = str(config.get("server_name") or "")
+        if not _NAME.fullmatch(name):
+            raise McpCapabilityError("selected MCP capability has an invalid server_name")
+        if name in servers:
+            raise McpCapabilityError(f"duplicate MCP server_name: {name}")
+        tools = config.get("allowed_tools")
+        if not isinstance(tools, list) or not tools:
+            raise McpCapabilityError(f"MCP server {name} has no allowed tools")
+        servers[name] = {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": [
+                "-m",
+                "stagemesh.mcp_proxy",
+                "--manifest",
+                manifest,
+                "--project",
+                project,
+            ],
+        }
+        permitted_tools.extend(f"mcp__{name}__{tool}" for tool in tools)
+
+    args = _set_option(args, "--permission-prompts", "none")
+    args = _merge_allowed_tools(args, permitted_tools)
+    if "--strict-mcp-config" not in args:
+        args.append("--strict-mcp-config")
+    args.extend(
+        (
+            "--mcp-config",
+            json.dumps({"mcpServers": servers}, ensure_ascii=False, separators=(",", ":")),
+        )
+    )
+    return args, frozenset()
+
+
+def configure_mcp_command(
+    command: Iterable[str], attachments: Iterable[dict[str, object]]
+) -> tuple[list[str], frozenset[str]]:
+    """Dispatch one MCP attachment set to a provider-specific, fail-closed adapter."""
+    args = list(command)
+    selected = list(attachments)
+    if not any(item.get("kind") == "mcp" for item in selected):
+        return args, frozenset()
+    executable = Path(args[0]).stem.casefold() if args else ""
+    if executable == "codex":
+        return configure_codex_mcp_command(args, selected)
+    if executable == "claude":
+        return configure_claude_mcp_command(args, selected)
+    raise McpCapabilityError(
+        f"MCP runtime adapter is unavailable for provider executable: {executable or '(missing)'}"
+    )
+
+
 def _toml_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _has_option(args: list[str], option: str) -> bool:
+    return any(token == option or token.startswith(f"{option}=") for token in args)
+
+
+def _set_option(args: list[str], option: str, value: str) -> list[str]:
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == option:
+            index += 2
+            continue
+        if token.startswith(f"{option}="):
+            index += 1
+            continue
+        result.append(token)
+        index += 1
+    return [*result, option, value]
+
+
+def _merge_allowed_tools(args: list[str], additions: Iterable[str]) -> list[str]:
+    """Canonicalize Claude's variadic allowed-tools option without widening it."""
+    result: list[str] = []
+    existing: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in {"--allowedTools", "--allowed-tools"}:
+            index += 1
+            while index < len(args) and not args[index].startswith("-"):
+                existing.extend(part for part in args[index].split(",") if part)
+                index += 1
+            continue
+        if token.startswith(("--allowedTools=", "--allowed-tools=")):
+            existing.extend(part for part in token.split("=", 1)[1].split(",") if part)
+            index += 1
+            continue
+        result.append(token)
+        index += 1
+    merged = list(dict.fromkeys([*existing, *additions]))
+    return [*result, "--allowedTools", ",".join(merged)]
 
 
 def _seconds(value: object, field: str) -> int:

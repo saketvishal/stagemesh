@@ -32,7 +32,11 @@ from stagemesh.capacity import CapacityKind
 from stagemesh.cli import main
 from stagemesh.contracts import ChangeContract, canonical_contract_json, parse_contract
 from stagemesh.git import GitWorkspace
-from stagemesh.mcp_capabilities import configure_codex_mcp_command
+from stagemesh.mcp_capabilities import (
+    McpCapabilityError,
+    configure_codex_mcp_command,
+    configure_mcp_command,
+)
 from stagemesh.persistence import Store
 from stagemesh.provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderPool
 from stagemesh.providers import (
@@ -647,10 +651,10 @@ def test_registered_skill_is_provider_neutral_prompt_attachment_with_audit_metad
                 "serena",
                 kind="mcp",
                 source=".stagemesh/mcp/serena.json",
-                providers=["codex", "claude"],
+                providers=["grok"],
                 permissions=["workspace-read", "subprocess"],
             ),
-            "claude",
+            "grok",
             "no bounded MCP adapter",
         ),
     ],
@@ -744,7 +748,7 @@ def test_claude_plugin_skills_may_be_scoped_to_review(tmp_path: Path) -> None:
     assert "Registered Claude plugin skill review-kit/verify" in prompt
 
 
-def test_mcp_capability_remains_implementation_only(tmp_path: Path) -> None:
+def test_mcp_capability_can_be_scoped_to_review(tmp_path: Path) -> None:
     _mcp_manifest(tmp_path)
     _registry(
         tmp_path,
@@ -753,15 +757,16 @@ def test_mcp_capability_remains_implementation_only(tmp_path: Path) -> None:
                 "serena",
                 kind="mcp",
                 source=".stagemesh/mcp/serena.json",
-                providers=["codex"],
+                providers=["claude"],
                 stages=["REVIEW"],
                 permissions=["workspace-read", "subprocess"],
             )
         ],
     )
 
-    with pytest.raises(CapabilityRegistryError, match="only the IMPLEMENT stage"):
-        inventory(tmp_path)
+    row = inventory(tmp_path)[0]
+    assert row["configuration_valid"] is True
+    assert row["stages"] == ["REVIEW"]
 
 
 def test_runtime_review_receives_bound_review_capability_and_records_attachment(
@@ -825,6 +830,125 @@ def test_runtime_review_receives_bound_review_capability_and_records_attachment(
         assert payload["stage"] == "REVIEW"
         assert payload["provider"] == "test"
         assert payload["invocation"] == "unverified"
+    finally:
+        store.close()
+
+
+def test_claude_review_mcp_is_isolated_invoked_and_audited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "StageMesh Test")
+    _mcp_manifest(project)
+    _registry(
+        project,
+        [
+            _entry(
+                "serena",
+                kind="mcp",
+                source=".stagemesh/mcp/serena.json",
+                providers=["claude"],
+                stages=["REVIEW"],
+                permissions=["workspace-read", "subprocess"],
+            )
+        ],
+    )
+    (project / "README.md").write_text("candidate\n", encoding="utf-8")
+    git.commit_all("candidate")
+    candidate = git.head()
+    contract = ChangeContract(
+        objective="Review with Serena",
+        allowed_files=("README.md",),
+        capability_refs=("serena",),
+    )
+    canonical = canonical_contract_json(contract)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Review with Serena", source_id="task-1")
+    store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
+    store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
+    _freeze_capability_policy(store, project, task_id, contract, candidate)
+    seen_commands: list[list[str]] = []
+
+    def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
+        shutil.copytree(project, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+
+    def popen(command: list[str], *_args: object, **_kwargs: object) -> SimpleNamespace:
+        seen_commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "mcp__serena__find_symbol",
+                        "input": {"name_path_pattern": "Target"},
+                    },
+                    {"type": "text", "text": '{"decision":"PASS"}'},
+                ]
+            },
+        }
+    )
+    monkeypatch.setattr(providers_module, "_prepare_review_checkout", prepare_review)
+    monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
+    monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
+    monkeypatch.setattr(providers_module, "_authorization_refusal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(providers_module, "_review_provider_environment", lambda *_args: {})
+    monkeypatch.setattr(providers_module, "popen_session_kwargs", lambda: {})
+    monkeypatch.setattr(providers_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        providers_module,
+        "communicate_bounded",
+        lambda *_args, **_kwargs: (event, "", False),
+    )
+    try:
+        response = RuntimeCommandAdapter(
+            "claude",
+            (
+                "claude",
+                "-p",
+                "--permission-mode",
+                "plan",
+                "--permission-prompts",
+                "none",
+                "--allowedTools",
+                "Read",
+            ),
+        ).review_candidate(
+            "Review exactly this candidate.",
+            project,
+            candidate,
+            store=store,
+            task_id=task_id,
+        )
+
+        assert json.loads(response) == {"decision": "PASS"}
+        command = seen_commands[0]
+        assert "--strict-mcp-config" in command
+        assert command[command.index("--output-format") + 1] == "stream-json"
+        allowed = command[command.index("--allowedTools") + 1].split(",")
+        assert allowed == [
+            "Read",
+            "mcp__serena__find_symbol",
+            "mcp__serena__search_for_pattern",
+        ]
+        row = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='capability.invoked' "
+            "AND json_extract(payload, '$.capability_id')='serena'"
+        ).fetchone()
+        evidence = json.loads(row["payload"])
+        assert evidence["stage"] == "REVIEW"
+        assert evidence["provider"] == "claude"
+        assert evidence["tools"] == ["find_symbol"]
+        assert "name_path_pattern" not in json.dumps(evidence)
     finally:
         store.close()
 
@@ -985,12 +1109,94 @@ def test_codex_mcp_is_configured_per_invocation_with_no_ambient_servers(tmp_path
     assert attachment["invocation"] == "unverified"
     assert attachment["content_sha256"]
     assert attachment["_path"] == str(manifest.resolve())
+    assert attachment["_project"] == str(tmp_path.resolve())
     assert "--ignore-user-config" in command
     assert "--json" not in command
     assert f"mcp_servers.serena.command={json.dumps(sys.executable)}" in command
     assert 'mcp_servers.serena.enabled_tools=["find_symbol","search_for_pattern"]' in command
     assert "mcp_servers.serena.required=true" in command
     assert "mcp_servers.serena.command" in permitted
+
+
+def test_claude_mcp_is_strict_per_invocation_and_filtered_by_proxy(tmp_path: Path) -> None:
+    manifest = _mcp_manifest(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "serena",
+                kind="mcp",
+                source=".stagemesh/mcp/serena.json",
+                providers=["claude"],
+                permissions=["workspace-read", "subprocess"],
+            )
+        ],
+    )
+    attachment = resolve_attachments(
+        tmp_path, ("serena",), provider="claude", stage="IMPLEMENT"
+    )[0].audit_payload()
+
+    command, permitted = configure_mcp_command(
+        (
+            "claude",
+            "-p",
+            "--permission-mode",
+            "acceptEdits",
+            "--permission-prompts",
+            "host",
+            "--allowedTools",
+            "Edit",
+            "Read",
+        ),
+        [attachment],
+    )
+
+    assert permitted == frozenset()
+    assert command.count("--strict-mcp-config") == 1
+    prompts = command.index("--permission-prompts")
+    assert command[prompts + 1] == "none"
+    allowed = command[command.index("--allowedTools") + 1].split(",")
+    assert allowed == [
+        "Edit",
+        "Read",
+        "mcp__serena__find_symbol",
+        "mcp__serena__search_for_pattern",
+    ]
+    payload = json.loads(command[command.index("--mcp-config") + 1])
+    server = payload["mcpServers"]["serena"]
+    assert server["command"] == sys.executable
+    assert server["args"] == [
+        "-m",
+        "stagemesh.mcp_proxy",
+        "--manifest",
+        str(manifest.resolve()),
+        "--project",
+        str(tmp_path.resolve()),
+    ]
+
+
+def test_claude_mcp_refuses_ambient_provider_mcp_config(tmp_path: Path) -> None:
+    _mcp_manifest(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "serena",
+                kind="mcp",
+                source=".stagemesh/mcp/serena.json",
+                providers=["claude"],
+                permissions=["workspace-read", "subprocess"],
+            )
+        ],
+    )
+    attachment = resolve_attachments(
+        tmp_path, ("serena",), provider="claude", stage="IMPLEMENT"
+    )[0].audit_payload()
+
+    with pytest.raises(McpCapabilityError, match="preconfigured MCP servers"):
+        configure_mcp_command(
+            ("claude", "-p", "--mcp-config", "ambient.json"), [attachment]
+        )
 
 
 def test_mcp_manifest_rejects_ambient_authority_and_invalid_config(tmp_path: Path) -> None:

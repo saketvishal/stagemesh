@@ -12,10 +12,10 @@ StageMesh separates seven states that are easy to conflate:
 
 `stagemesh capabilities --json` reports declared, resource-installed, runtime-installed, configuration-valid, available, enabled,
 and usable states. Add `--task TASK_ID` to project that task's durable attachment/load/invocation receipts without creating or
-mutating the runtime database. It never downloads or installs a capability. StageMesh has three registry adapters:
+mutating the runtime database. It never downloads or installs a capability. StageMesh has four registry adapters:
 read-only project `SKILL.md` attachment, skills-only import from a project-local Claude Code plugin, and an explicitly requested,
-read-only Codex stdio MCP adapter. Executable Claude plugin components and MCP requests for Claude, Grok, Agy, or custom providers
-remain inventory-only and fail closed.
+read-only stdio MCP adapter for either Codex or Claude. Executable Claude plugin components and MCP requests for Grok, Agy, or custom
+providers remain inventory-only and fail closed.
 
 The registry may set `"skill_evidence_mode": "observed-load-required"`. In that opt-in mode, StageMesh enables the selected provider's
 JSON event stream and accepts an implementation result or review verdict only when every selected skill for that stage was observed
@@ -45,8 +45,8 @@ provider loading.
       "kind": "mcp",
       "source": ".stagemesh/mcp/serena.json",
       "enabled": false,
-      "providers": ["codex"],
-      "stages": ["IMPLEMENT"],
+      "providers": ["codex", "claude"],
+      "stages": ["IMPLEMENT", "REVIEW"],
       "permissions": ["workspace-read", "subprocess"]
     },
     {
@@ -248,7 +248,7 @@ plugin-packaged skills, not general plugin runtime support.
 With `observed-load-required`, one exact `SKILL.md` read from the requested plugin is required before the first recorded mutation. The
 redacted `capability.loaded` receipt identifies the plugin and component name without persisting an absolute path or file contents.
 
-## Codex stdio MCP manifest
+## Bounded stdio MCP manifest
 
 An MCP capability's `source` is a StageMesh manifest, not a user-home client configuration:
 
@@ -277,9 +277,13 @@ An MCP capability's `source` is a StageMesh manifest, not a user-home client con
 ```
 
 The command must already be installed on the StageMesh host. StageMesh does not run `uvx`, package installation, or a network fetch to
-obtain it. For each invocation StageMesh adds Codex `--ignore-user-config`, a required server definition, and an exact
-`enabled_tools` allowlist. No project or user Codex configuration is modified. The example follows Serena's current installed-command
-guidance while disabling its optional web dashboard.
+obtain it. For a Codex invocation StageMesh adds `--ignore-user-config`, a required server definition, and an exact `enabled_tools`
+allowlist. For a Claude invocation it adds `--strict-mcp-config`, an inline per-invocation server definition, non-interactive permission
+denial, and exact `mcp__<server>__<tool>` approvals. The Claude server definition launches a StageMesh stdio policy proxy: discovery
+returns only the declared tools, an undeclared `tools/call` is refused before it reaches the server, MCP resources/prompts are not
+exposed, and manifest startup/tool timeouts are enforced by terminating the proxied server. Preconfigured Claude `--mcp-config` is
+refused rather than merged. Neither adapter modifies project or user client configuration. The example follows Serena's current
+installed-command guidance while disabling its optional web dashboard.
 
 The tool allowlist limits what Codex can discover and call, but StageMesh does not yet provide an OS-level sandbox for the MCP server
 process itself. `subprocess` therefore means the operator trusts the installed server executable with the host account's process
@@ -287,8 +291,8 @@ authority. Do not enable an unreviewed server. Process-level filesystem/network 
 
 ## Audit meaning
 
-Registry-backed standalone skills and skills-only Claude plugin imports may be scoped to `IMPLEMENT`, `REVIEW`, or both. The Codex MCP
-adapter remains implementation-stage only.
+Registry-backed standalone skills, skills-only Claude plugin imports, and Codex/Claude MCP capabilities may be scoped to `IMPLEMENT`,
+`REVIEW`, or both.
 
 Before a provider starts, StageMesh writes one `capability.attached` event per bundled, project-referenced, automatically selected, or
 registry-selected skill. The event includes provider, stage, origin, project-relative source, content SHA-256, declared permission,
@@ -299,9 +303,9 @@ When a selected provider is incompatible with a contract-requested capability, S
 penalize the provider for a compatibility mismatch.
 
 That is deliberately not an invocation claim. Default skill transport proves that the prompt contained a readable path; it does not
-prove the model opened or followed the file. The Codex MCP adapter uses its structured event stream for execution binding, allowlist
-enforcement, argument/result redaction, and verified invocation receipts. Self-reported prose is not sufficient. Executable plugin
-and other MCP adapters still need equivalent evidence.
+prove the model opened or followed the file. The Codex and Claude MCP adapters use structured event streams for execution binding,
+allowlist enforcement, argument/result redaction, and verified invocation receipts. Self-reported prose is not sufficient. Executable
+plugin and other MCP adapters still need equivalent evidence.
 
 With `observed-load-required`, successful normalized reads produce `capability.loaded` receipts containing only provider, stage,
 capability id, content hash, and ordering (plus execution identity when the stage owns one). Raw event streams, prompts, file contents,
@@ -316,7 +320,7 @@ missing runtime database remains `history_available: false`;
 the inspection command does not create one. `loaded` means an exact skill read was observed. `invoked` is reserved for an allowlisted
 MCP tool call. Neither means that the capability was correctly applied.
 
-A requested Codex MCP capability always requires at least one observed allowlisted tool call. StageMesh records
+A requested Codex or Claude MCP capability always requires at least one observed allowlisted tool call. StageMesh records
 `capability.invoked` with the capability id, manifest hash, and tool names only. Raw arguments, results, prompts, paths, and event
 streams are not persisted. Missing invocation evidence rejects the attempt without provider cooldown; an observed unallowlisted call
 is a capability policy violation and the candidate is rejected.
@@ -325,7 +329,9 @@ is a capability policy violation and the candidate is rejected.
 
 - No network or global installer, marketplace client, plugin hook runner, or arbitrary setup command. The local vendor command copies only
   reviewed bounded sources into the current project.
-- No provider-neutral MCP process sandbox, credential broker, HTTP/network transport, or MCP adapter outside Codex.
+- No OS-level MCP process sandbox, credential broker, HTTP/network transport, or MCP adapter outside Codex and Claude. The Claude policy
+  proxy limits protocol-level discovery and calls; it does not reduce the installed server process's host-account filesystem or network
+  authority.
 - No executable Claude plugin activation, marketplace installation, or translation to Codex/Grok.
 - No ambient user-home discovery. Project registry state is read from the isolated checkout only.
 
@@ -335,5 +341,7 @@ invocation evidence before StageMesh reports the capability as used.
 
 Reference behavior: [Claude Code plugins](https://code.claude.com/docs/en/plugins),
 [Claude plugin manifests](https://code.claude.com/docs/en/plugins-reference),
+[Claude MCP](https://code.claude.com/docs/en/mcp),
+[Claude CLI flags](https://code.claude.com/docs/en/cli-usage),
 [Codex MCP configuration](https://developers.openai.com/codex/extend/mcp), and
 [Serena client configuration](https://oraios.github.io/serena/02-usage/030_clients).

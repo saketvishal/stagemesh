@@ -64,6 +64,10 @@ class CapabilityAttachment:
     runtime: dict[str, object] | None = None
 
     def audit_payload(self) -> dict[str, object]:
+        resolved_path = self.path.resolve()
+        project = resolved_path
+        for _part in Path(self.source).parts:
+            project = project.parent
         payload: dict[str, object] = {
             "capability_id": self.id,
             "kind": self.kind,
@@ -76,7 +80,8 @@ class CapabilityAttachment:
             # Prompt delivery proves attachment, not that a model read or followed it.
             "invocation": "unverified",
             # Internal dispatch metadata. Audit persistence strips private keys.
-            "_path": str(self.path.resolve()),
+            "_path": str(resolved_path),
+            "_project": str(project),
             **(
                 {"_mcp": self.runtime}
                 if self.runtime is not None and self.kind == "mcp"
@@ -559,7 +564,7 @@ def resolve_attachments(
                 )
         runtime = None
         if item.kind == "mcp":
-            if provider != "codex":
+            if provider not in {"codex", "claude"}:
                 raise CapabilityRegistryError(
                     f"capability {capability_id} has no bounded MCP adapter for provider {provider}"
                 )
@@ -1313,10 +1318,6 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
     if kind == "mcp" and set(permissions) != {"workspace-read", "subprocess"}:
         raise CapabilityRegistryError(
             f"MCP capability {capability_id} currently requires exactly workspace-read and subprocess"
-        )
-    if kind == "mcp" and set(stages) != {"IMPLEMENT"}:
-        raise CapabilityRegistryError(
-            f"MCP capability {capability_id} currently supports only the IMPLEMENT stage"
         )
     if kind == "claude-plugin" and set(providers) != {"claude"}:
         raise CapabilityRegistryError(
