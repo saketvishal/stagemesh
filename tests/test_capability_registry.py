@@ -29,6 +29,10 @@ from stagemesh.capabilities import (
 from stagemesh.capability_discovery import discover_capabilities
 from stagemesh.capability_vendor import plan_capability_vendor, vendor_capability
 from stagemesh.capacity import CapacityKind
+from stagemesh.claude_plugin_capabilities import (
+    ClaudePluginCapabilityError,
+    configure_claude_plugin_command,
+)
 from stagemesh.cli import main
 from stagemesh.contracts import ChangeContract, canonical_contract_json, parse_contract
 from stagemesh.git import GitWorkspace
@@ -523,7 +527,7 @@ def test_inventory_distinguishes_declared_enabled_installed_adapter_and_invocati
     assert rows["claude-review"]["supported_providers"] == ["claude"]
 
 
-def test_skills_only_claude_plugin_is_attached_without_activating_plugin_runtime(
+def test_skills_only_claude_plugin_is_attached_for_bounded_activation(
     tmp_path: Path,
 ) -> None:
     plugin = _claude_plugin(tmp_path)
@@ -559,11 +563,197 @@ def test_skills_only_claude_plugin_is_attached_without_activating_plugin_runtime
     assert attachment["status"] == "attached"
     assert attachment["invocation"] == "unverified"
     assert attachment["_path"] == str(plugin.resolve())
-    assert attachment["_plugin"]["activation"] == "skills-only-import"
+    assert attachment["_plugin"]["activation"] == "skills-only-plugin-dir"
     row = inventory(tmp_path)[0]
     assert row["configuration_valid"] is True
     assert row["available"] is True
     assert row["usable"] is True
+
+
+def test_claude_plugin_command_activates_validated_tree_and_rechecks_drift(
+    tmp_path: Path,
+) -> None:
+    plugin = _claude_plugin(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+            )
+        ],
+    )
+    attachments = [
+        item.audit_payload()
+        for item in resolve_attachments(
+            tmp_path, ("review-kit",), provider="claude", stage="IMPLEMENT"
+        )
+    ]
+
+    configured = configure_claude_plugin_command(("claude", "-p"), attachments)
+
+    assert configured[-2:] == ["--plugin-dir", str(plugin.resolve())]
+    for command in (
+        ("claude", "--plugin-dir", "ambient"),
+        ("claude", "--plugin-url=ambient"),
+        ("claude", "--bare"),
+        ("claude", "--safe-mode"),
+    ):
+        with pytest.raises(ClaudePluginCapabilityError, match="conflicting provider plugin"):
+            configure_claude_plugin_command(command, attachments)
+    (plugin / "skills" / "review" / "SKILL.md").write_text("changed\n", encoding="utf-8")
+    with pytest.raises(ClaudePluginCapabilityError, match="changed after validation"):
+        configure_claude_plugin_command(("claude", "-p"), attachments)
+
+
+@pytest.mark.parametrize(
+    ("relative", "content"),
+    [
+        ("README.md", "not part of the bounded package\n"),
+        (".stagemesh-vendor.json", "{}\n"),
+        ("skills/review/helper.py", "print('unexpected')\n"),
+        ("hooks/on-start.ps1", "Write-Output unsafe\n"),
+    ],
+)
+def test_claude_plugin_rejects_every_unreviewed_tree_entry(
+    tmp_path: Path, relative: str, content: str
+) -> None:
+    plugin = _claude_plugin(tmp_path)
+    extra = plugin / relative
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_text(content, encoding="utf-8")
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+            )
+        ],
+    )
+
+    with pytest.raises(CapabilityRegistryError, match="invalid Claude plugin configuration"):
+        resolve_attachments(tmp_path, ("review-kit",), provider="claude", stage="IMPLEMENT")
+
+
+def test_claude_plugin_rejects_symlinked_tree_entry(tmp_path: Path) -> None:
+    plugin = _claude_plugin(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    try:
+        (plugin / "skills" / "review" / "REFERENCE.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+            )
+        ],
+    )
+
+    with pytest.raises(CapabilityRegistryError, match="must not contain symlinks"):
+        resolve_attachments(tmp_path, ("review-kit",), provider="claude", stage="IMPLEMENT")
+
+
+def test_claude_plugin_rejects_oversized_manifest_before_json_loading(
+    tmp_path: Path,
+) -> None:
+    plugin = _claude_plugin(tmp_path)
+    (plugin / ".claude-plugin" / "plugin.json").write_bytes(b" " * (256 * 1024 + 1))
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+            )
+        ],
+    )
+
+    with pytest.raises(CapabilityRegistryError, match="manifest must be a bounded file"):
+        resolve_attachments(tmp_path, ("review-kit",), provider="claude", stage="IMPLEMENT")
+
+
+@pytest.mark.parametrize("field", ["allowed-tools", "hooks"])
+def test_claude_plugin_skill_frontmatter_cannot_expand_authority(
+    tmp_path: Path, field: str
+) -> None:
+    plugin = _claude_plugin(tmp_path)
+    skill = plugin / "skills" / "review" / "SKILL.md"
+    skill.write_text(
+        f"---\nname: review\n{field}: Bash\ndescription: unsafe\n---\n",
+        encoding="utf-8",
+    )
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+            )
+        ],
+    )
+
+    with pytest.raises(CapabilityRegistryError, match="may not grant tools or hooks"):
+        resolve_attachments(tmp_path, ("review-kit",), provider="claude", stage="IMPLEMENT")
+
+
+def test_implementation_route_refuses_ambient_claude_plugin_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude_plugin(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+            )
+        ],
+    )
+    contract = ChangeContract(objective="Use plugin", capability_refs=("review-kit",))
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Use plugin", source_id="task-1")
+    monkeypatch.setattr(providers_module, "record_task_baseline", lambda *_args: "0" * 40)
+    monkeypatch.setattr(
+        providers_module,
+        "bind_task_contract",
+        lambda *_args: SimpleNamespace(contract=contract),
+    )
+    monkeypatch.setattr(providers_module, "remediation_context", lambda *_args: None)
+    monkeypatch.setattr(providers_module, "_provider_budget_refusal", lambda *_args: None)
+    monkeypatch.setattr(providers_module, "require_capability_policy", lambda *_args: None)
+    monkeypatch.setattr(
+        providers_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("provider launched with ambient plugin config"),
+    )
+    lease = SimpleNamespace(path=tmp_path, check=lambda _phase: None)
+    try:
+        result = RuntimeCommandAdapter(
+            "claude", ("claude", "--plugin-dir", "ambient")
+        )._execute_owned(store, task_id, None, tmp_path, lease)
+
+        assert result.status.value == "FAILED"
+        assert "refuses conflicting provider plugin" in str(result.failure_reason)
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize(
@@ -834,6 +1024,91 @@ def test_runtime_review_receives_bound_review_capability_and_records_attachment(
         store.close()
 
 
+def test_claude_review_activates_validated_skills_only_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "StageMesh Test")
+    plugin = _claude_plugin(project)
+    _registry(
+        project,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+                stages=["REVIEW"],
+            )
+        ],
+    )
+    (project / "README.md").write_text("candidate\n", encoding="utf-8")
+    git.commit_all("candidate")
+    candidate = git.head()
+    contract = ChangeContract(
+        objective="Review with plugin",
+        allowed_files=("README.md",),
+        capability_refs=("review-kit",),
+    )
+    canonical = canonical_contract_json(contract)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Review with plugin", source_id="task-1")
+    store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
+    store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
+    _freeze_capability_policy(store, project, task_id, contract, candidate)
+    seen_commands: list[list[str]] = []
+
+    def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
+        shutil.copytree(project, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+
+    def popen(command: list[str], *_args: object, **_kwargs: object) -> SimpleNamespace:
+        seen_commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(providers_module, "_prepare_review_checkout", prepare_review)
+    monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
+    monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
+    monkeypatch.setattr(providers_module, "_authorization_refusal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(providers_module, "_review_provider_environment", lambda *_args: {})
+    monkeypatch.setattr(providers_module, "popen_session_kwargs", dict)
+    monkeypatch.setattr(providers_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        providers_module,
+        "communicate_bounded",
+        lambda *_args, **_kwargs: ('{"decision":"PASS"}', "", False),
+    )
+    try:
+        response = RuntimeCommandAdapter("claude", ("claude", "-p")).review_candidate(
+            "Review exactly this candidate.",
+            project,
+            candidate,
+            store=store,
+            task_id=task_id,
+        )
+
+        assert json.loads(response) == {"decision": "PASS"}
+        command = seen_commands[0]
+        activated = Path(command[command.index("--plugin-dir") + 1])
+        assert activated.parts[-3:] == (".claude", "plugins", "review-kit")
+        assert activated != plugin.resolve()
+        row = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='capability.attached' "
+            "AND json_extract(payload, '$.capability_id')='review-kit'"
+        ).fetchone()
+        payload = json.loads(row["payload"])
+        assert payload["status"] == "attached"
+        assert payload["invocation"] == "unverified"
+        assert "_path" not in payload and "_plugin" not in payload
+    finally:
+        store.close()
+
+
 def test_claude_review_mcp_is_isolated_invoked_and_audited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -902,7 +1177,7 @@ def test_claude_review_mcp_is_isolated_invoked_and_audited(
     monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
     monkeypatch.setattr(providers_module, "_authorization_refusal", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(providers_module, "_review_provider_environment", lambda *_args: {})
-    monkeypatch.setattr(providers_module, "popen_session_kwargs", lambda: {})
+    monkeypatch.setattr(providers_module, "popen_session_kwargs", dict)
     monkeypatch.setattr(providers_module.subprocess, "Popen", popen)
     monkeypatch.setattr(
         providers_module,
@@ -1720,7 +1995,7 @@ def test_discovery_lists_multiple_vendored_skills_and_previews_registration_with
     discovered = json.loads(capsys.readouterr().out)
 
     rows = {row["id"]: row for row in discovered["candidates"]}
-    assert list(sorted(rows)) == ["brainstorming", "executing-plans", "writing-plans"]
+    assert sorted(rows) == ["brainstorming", "executing-plans", "writing-plans"]
     assert rows["brainstorming"]["registered"] is True
     assert rows["brainstorming"]["enabled"] is True
     assert rows["brainstorming"]["usable"] is True

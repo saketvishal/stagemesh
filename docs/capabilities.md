@@ -236,14 +236,20 @@ from the change contract. Registration alone does not enable or attach it.
 
 A `claude-plugin` source names a project-local plugin directory. StageMesh accepts the standard
 `.claude-plugin/plugin.json` metadata file and one or more `skills/<name>/SKILL.md` components. It validates path containment and bounded
-skill counts and sizes, then lists the skill files in the applicable Claude implementation or review prompt through the same read-only
-adapter used for standalone skills.
+skill counts and sizes, then lists the exact skill files in the applicable Claude implementation or review prompt. For the selected
+invocation only, it also passes the validated project-local root through Claude's `--plugin-dir` flag. It does not edit user-home or
+project client configuration, install a marketplace package, or make the plugin ambient for another task.
 
-StageMesh does **not** pass `--plugin-dir` and does not install, enable, or execute the plugin as a Claude Code plugin. Manifests that
+The accepted tree is exact: optional `.claude-plugin/plugin.json`, `skills/`, each selected skill directory, and one `SKILL.md` per
+skill. A locally vendored package may also carry StageMesh's validated `.stagemesh-vendor.json` provenance receipt. Symlinks and every
+other file or directory fail closed. A skill frontmatter block may not declare `allowed-tools` or `hooks`.
+StageMesh revalidates the tree and content digest during command construction, detecting changes that occurred after attachment.
+Manifests that
 declare commands, agents, hooks, MCP servers, LSP servers, dependencies, settings, user configuration, experimental components, or
 other non-metadata fields fail closed. Standard runtime component paths such as `agents/`, `commands/`, `hooks/`, `.mcp.json`, and
 `.lsp.json`, `workflows/`, `monitors/`, `bin/`, and `settings.json` also fail closed. This is a compatibility import for
-plugin-packaged skills, not general plugin runtime support.
+plugin-packaged skills, not general plugin runtime support. Provider command lines that already contain plugin, bare, or safe-mode
+flags are refused rather than merged with registry policy.
 
 With `observed-load-required`, one exact `SKILL.md` read from the requested plugin is required before the first recorded mutation. The
 redacted `capability.loaded` receipt identifies the plugin and component name without persisting an absolute path or file contents.
@@ -304,8 +310,8 @@ penalize the provider for a compatibility mismatch.
 
 That is deliberately not an invocation claim. Default skill transport proves that the prompt contained a readable path; it does not
 prove the model opened or followed the file. The Codex and Claude MCP adapters use structured event streams for execution binding,
-allowlist enforcement, argument/result redaction, and verified invocation receipts. Self-reported prose is not sufficient. Executable
-plugin and other MCP adapters still need equivalent evidence.
+allowlist enforcement, argument/result redaction, and verified invocation receipts. Self-reported prose is not sufficient. Claude
+`--plugin-dir` configuration proves bounded activation, not that Claude discovered, loaded, or followed a plugin skill.
 
 With `observed-load-required`, successful normalized reads produce `capability.loaded` receipts containing only provider, stage,
 capability id, content hash, and ordering (plus execution identity when the stage owns one). Raw event streams, prompts, file contents,
@@ -332,7 +338,8 @@ is a capability policy violation and the candidate is rejected.
 - No OS-level MCP process sandbox, credential broker, HTTP/network transport, or MCP adapter outside Codex and Claude. The Claude policy
   proxy limits protocol-level discovery and calls; it does not reduce the installed server process's host-account filesystem or network
   authority.
-- No executable Claude plugin activation, marketplace installation, or translation to Codex/Grok.
+- No Claude plugin hooks, agents, commands, MCP/LSP servers, marketplace installation, or translation to Codex/Grok. Only validated
+  skills-only roots are activated for one Claude invocation.
 - No ambient user-home discovery. Project registry state is read from the isolated checkout only.
 
 Those boundaries keep an available plugin or server from silently becoming an authorized executable. Provider-specific adapters can

@@ -181,7 +181,7 @@ def test_claude_plugin_receipt_requires_one_exact_component_read_and_stays_redac
             "content_sha256": "a" * 64,
             "_path": "C:/test-fixture/.claude/plugins/review-kit",
             "_plugin": {
-                "activation": "skills-only-import",
+                "activation": "skills-only-plugin-dir",
                 "skills": [
                     {
                         "name": "review",
@@ -576,7 +576,7 @@ def test_runtime_records_redacted_observed_load_receipt_before_candidate(
         store.close()
 
 
-def test_runtime_imports_claude_plugin_skill_without_activating_plugin_runtime(
+def test_runtime_activates_claude_plugin_skill_and_requires_load_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from stagemesh import agent_skills, providers
@@ -695,7 +695,7 @@ def test_runtime_imports_claude_plugin_skill_without_activating_plugin_runtime(
 
         assert result.status == "SUCCEEDED", result.failure_reason
         assert "--output-format" in captured[0] and "stream-json" in captured[0]
-        assert "--plugin-dir" not in captured[0]
+        assert captured[0][captured[0].index("--plugin-dir") + 1] == str(plugin.resolve())
         row = store.conn.execute(
             "SELECT payload FROM audit_events WHERE event_type='capability.loaded' "
             "AND payload LIKE '%review-kit%'"
