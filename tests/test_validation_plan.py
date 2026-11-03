@@ -345,16 +345,21 @@ def test_localized_focused_pytest_executes_through_planned_contract(tmp_path: Pa
     store.close()
 
 
-def test_validator_preserves_required_gates_even_when_plan_prefers_focus(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source, classification, components", [
+    ("src/provider.py", CONFIG_OR_PROVIDER_COMMAND, []),
+    ("src/stagemesh/review.py", CORE_LIFECYCLE_OR_SCHEMA_SECURITY, ["review"]),
+])
+def test_validator_preserves_required_gates_even_when_plan_prefers_focus(
+    tmp_path: Path, source, classification, components,
+) -> None:
     project = tmp_path / "repo"
     project.mkdir()
     workspace = GitWorkspace(project)
     workspace.init_if_needed()
     workspace.run("config", "user.email", "test@example.invalid")
     workspace.run("config", "user.name", "StageMesh Test")
-    (project / "src").mkdir()
-    (project / "src" / "provider.py").write_text("VALUE = 1\n", encoding="utf-8")
-    workspace.commit_all("initial")
+    (project / source).parent.mkdir(parents=True)
+    (project / source).write_text("VALUE = 1\n", encoding="utf-8")
     (project / ".stagemesh" / "contracts").mkdir(parents=True)
     (project / ".stagemesh" / "contracts" / "TASK-1.json").write_text(
         json.dumps(
@@ -370,7 +375,9 @@ def test_validator_preserves_required_gates_even_when_plan_prefers_focus(tmp_pat
         ),
         encoding="utf-8",
     )
-    (project / "src" / "provider.py").write_text("VALUE = 2\n", encoding="utf-8")
+    # Keep the contract in the baseline so the candidate changes only the source root.
+    workspace.commit_all("initial")
+    (project / source).write_text("VALUE = 2\n", encoding="utf-8")
     sha = workspace.commit_all("candidate")
     store = Store(tmp_path / "state.sqlite3")
     store.migrate()
@@ -384,7 +391,8 @@ def test_validator_preserves_required_gates_even_when_plan_prefers_focus(tmp_pat
     ).fetchone()
     payload = json.loads(row["payload"])
 
-    assert payload["validation_plan"]["classification"] == CONFIG_OR_PROVIDER_COMMAND
+    assert payload["validation_plan"]["classification"] == classification
+    assert payload["validation_plan"]["affected_components"] == components
     assert [gate["name"] for gate in payload["gates"]] == ["provider-smoke", "full pytest"]
     assert payload["gates"][1]["status"] == "FAILED"  # The declared suite found no tests (pytest exit 5).
     assert payload["validation_checks"]["missing"] == []
@@ -504,3 +512,175 @@ def test_component_map_does_not_classify_client_or_similarly_named_files(path) -
 
     assert plan.classification == LOCALIZED_CODE
     assert not plan.allows_broad_validation
+
+
+@pytest.mark.parametrize(
+    ("source", "component", "direct", "dependent"),
+    [
+        (
+            "validation_plan.py", "planning",
+            ["tests/test_validation_plan.py"],
+            ["tests/test_contract_fail_closed.py", "tests/test_invariant_semantics.py",
+             "tests/test_stagemesh_validation_profile.py"],
+        ),
+        (
+            "validation.py", "validation_execution",
+            ["tests/test_contract_fail_closed.py", "tests/test_validation_plan.py"],
+            ["tests/test_builtin_execution_ownership.py", "tests/test_candidate_binding_hardening.py",
+             "tests/test_invariant_semantics.py"],
+        ),
+        (
+            "review.py", "review",
+            ["tests/test_review_reliability.py", "tests/test_review_terminalization.py"],
+            ["tests/test_autonomy_review.py", "tests/test_builtin_execution_ownership.py",
+             "tests/test_invariant_semantics.py"],
+        ),
+    ],
+)
+@pytest.mark.parametrize("scope_kind", ["allowed", "changed", "windows"])
+def test_audited_component_evidence_matches_exact_roots(
+    source, component, direct, dependent, scope_kind,
+) -> None:
+    path = f"src/stagemesh/{source}"
+    contract = ChangeContract(objective="Audit evidence", allowed_files=(path,))
+    changed = () if scope_kind == "allowed" else (
+        path.replace("/", "\\") if scope_kind == "windows" else path,
+    )
+
+    plan = derive_validation_plan(contract, changed)
+    evidence = json.loads(json.dumps(plan.to_dict()))
+
+    assert evidence["affected_components"] == [component]
+    assert evidence["direct_test_targets"] == direct
+    assert evidence["dependent_test_targets"] == dependent
+    # Evidence does not manufacture executable gates from the documented targets.
+    assert plan.debug_checks == ("focused-tests",)
+    assert plan.release_checks == ()
+    assert planned_contract(contract, plan).gates == ()
+
+
+def test_audited_component_evidence_deduplicates_independently_of_path_order() -> None:
+    paths = (
+        "src/stagemesh/review.py", "src/stagemesh/validation.py",
+        "src/stagemesh/validation_plan.py", "src\\stagemesh\\validation.py",
+        "SRC/STAGEMESH/REVIEW.PY",
+    )
+    contract = ChangeContract(objective="Multiple audited roots", allowed_files=("**",))
+    evidence = derive_validation_plan(contract, paths).to_dict()
+
+    assert evidence == derive_validation_plan(contract, tuple(reversed(paths))).to_dict()
+    assert evidence["affected_components"] == ["planning", "review", "validation_execution"]
+    assert evidence["direct_test_targets"] == [
+        "tests/test_contract_fail_closed.py", "tests/test_review_reliability.py",
+        "tests/test_review_terminalization.py", "tests/test_validation_plan.py",
+    ]
+    assert evidence["dependent_test_targets"] == [
+        "tests/test_autonomy_review.py", "tests/test_builtin_execution_ownership.py",
+        "tests/test_candidate_binding_hardening.py", "tests/test_contract_fail_closed.py",
+        "tests/test_invariant_semantics.py", "tests/test_stagemesh_validation_profile.py",
+    ]
+
+
+@pytest.mark.parametrize("path", [
+    "src/customer/review.py", "src/customer/validation.py", "src/customer/validation_plan.py",
+    "src/stagemesh/review_helpers.py", "src/stagemesh/validation_helpers.py",
+    "src/stagemesh/validation_plan_helpers.py", "src/stagemesh/review.py/child.py",
+    "vendor/src/stagemesh/review.py", "src/stagemesh/contracts.py",
+    "src/stagemesh/contract_binding.py", "src/stagemesh/persistence.py",
+    "src/stagemesh/execution.py", "src/unknown.py", "src/stagemesh/**",
+    "tests/test_validation_plan.py", "docs/validation-components.md", "pyproject.toml",
+])
+def test_unaudited_paths_have_no_inferred_component_evidence(path) -> None:
+    contract = ChangeContract(
+        objective="Unknown impact",
+        allowed_files=("src/stagemesh/review.py",),
+        validation_escalation_reasons=("unknown impact: dependent callers not audited",),
+        required_tests=(GateCommand("full pytest", (sys.executable, "-m", "pytest")),),
+        invariants=("review: preserve authorization", "python scripts/invariants.py"),
+    )
+
+    # Actual changes override an audited allowed scope; filenames and globs do not infer edges.
+    plan = derive_validation_plan(contract, (path,))
+    evidence = plan.to_dict()
+
+    assert evidence["affected_components"] == []
+    assert evidence["direct_test_targets"] == []
+    assert evidence["dependent_test_targets"] == []
+    assert evidence["escalation_reasons"] == ["unknown impact: dependent callers not audited"]
+    assert planned_contract(contract, plan).gates == contract.gates
+    assert planned_contract(contract, plan).invariants == contract.invariants
+    required = with_required_checks(contract, plan)
+    assert "full pytest" in required.planned_checks
+    assert required.to_dict()["affected_components"] == []
+
+
+@pytest.mark.parametrize("other_paths", [
+    ("src/stagemesh/contracts.py", "src/unknown.py"),
+    ("src/customer/review.py",),
+    ("src/stagemesh/review_helpers.py",),
+    ("src/stagemesh/**",),
+    ("pyproject.toml",),
+    ("scripts/invariants.py",),
+    ("README.md",),
+    ("docs_extra/guide.md",),
+    ("tests_extra/test_review.py",),
+])
+@pytest.mark.parametrize("scope_kind", ["allowed", "changed", "windows"])
+def test_audited_component_evidence_preserves_required_checks_with_mixed_scope(
+    other_paths, scope_kind,
+) -> None:
+    scope = ("src/stagemesh/review.py", *other_paths)
+    if scope_kind == "windows":
+        scope = tuple(path.replace("/", "\\") for path in scope)
+    contract = ChangeContract(
+        objective="Audited and unknown impact",
+        allowed_files=scope if scope_kind == "allowed" else ("src/stagemesh/review.py",),
+        validation_escalation_reasons=("unknown impact: shared contract callers",),
+        required_tests=(
+            GateCommand("focused-tests", (sys.executable, "-c", "pass")),
+            GateCommand("full pytest", (sys.executable, "-m", "pytest")),
+        ),
+        invariants=("review: preserve independent review", "python scripts/invariants.py"),
+    )
+    known = derive_validation_plan(contract, ("src/stagemesh/review.py",))
+    mixed = derive_validation_plan(
+        contract, () if scope_kind == "allowed" else scope,
+    )
+
+    assert known.to_dict()["affected_components"] == ["review"]
+    # An unaudited path outside docs/tests makes the mapping incomplete, so the evidence
+    # fails closed instead of presenting a partial set as the affected test map.
+    assert mixed.to_dict()["affected_components"] == []
+    assert mixed.to_dict()["direct_test_targets"] == []
+    assert mixed.to_dict()["dependent_test_targets"] == []
+    required = with_required_checks(contract, mixed)
+    assert required.to_dict()["affected_components"] == []
+    assert required.direct_test_targets == mixed.direct_test_targets
+    assert required.dependent_test_targets == mixed.dependent_test_targets
+    assert required.escalation_reasons == ("unknown impact: shared contract callers",)
+    assert required.debug_checks == ("focused-tests", "full pytest")
+    assert required.release_checks == ("full pytest", "invariant:python scripts/invariants.py")
+    assert planned_contract(contract, required).gates == contract.gates
+    assert planned_contract(contract, required).invariants == contract.invariants
+
+
+@pytest.mark.parametrize("scope_kind", ["allowed", "changed", "windows"])
+def test_supporting_docs_and_tests_are_neutral_to_audited_evidence(scope_kind) -> None:
+    scope = (
+        "src/stagemesh/review.py", "docs/validation-components.md",
+        "tests/test_validation_plan.py", "docs/**", "tests/**",
+    )
+    if scope_kind == "windows":
+        scope = tuple(path.replace("/", "\\") for path in scope)
+    contract = ChangeContract(objective="Supporting changes", allowed_files=scope)
+
+    evidence = derive_validation_plan(contract, () if scope_kind == "allowed" else scope).to_dict()
+
+    assert evidence["affected_components"] == ["review"]
+    assert evidence["direct_test_targets"] == [
+        "tests/test_review_reliability.py", "tests/test_review_terminalization.py",
+    ]
+    assert evidence["dependent_test_targets"] == [
+        "tests/test_autonomy_review.py", "tests/test_builtin_execution_ownership.py",
+        "tests/test_invariant_semantics.py",
+    ]

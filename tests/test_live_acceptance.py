@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+import urllib.error
 from pathlib import Path
 
-from scripts.live_acceptance import provider_execution_status
+from scripts.live_acceptance import live_acceptance_checks, provider_execution_status
 from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.persistence import Store
 
@@ -49,3 +51,25 @@ def test_provider_execution_status_ignores_non_provider_stage(tmp_path: Path) ->
         store.close()
 
     assert provider_execution_status(tmp_path, "codex") == "NOT_PROVEN"
+
+
+def test_live_acceptance_reports_github_transport_failure_as_unknown(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "config.json").write_text(
+        json.dumps({"github": {"owner": "example", "repo": "project"}}),
+        encoding="utf-8",
+    )
+
+    def unavailable(_client) -> None:
+        raise urllib.error.URLError("SENSITIVE_MARKER")
+
+    monkeypatch.setattr("scripts.live_acceptance.GitHubClient.list_open_issues", unavailable)
+    monkeypatch.setattr("scripts.live_acceptance.adapters_from_config", lambda _config: [])
+
+    assert live_acceptance_checks(tmp_path) == [
+        {"name": "github", "status": "UNKNOWN"},
+        {"name": "github:sync", "status": "NOT_PROVEN"},
+    ]

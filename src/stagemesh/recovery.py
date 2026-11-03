@@ -17,6 +17,7 @@ from .audit import record_audit
 from .auto_plan import outside_label_selector
 from .autonomy.destructive_git import execute_preserved_cleanup
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
+from .config import AdverseReviewPolicy
 from .contract_binding import contract_for_candidate
 from .contracts import (
     CONTRACT_VERSION,
@@ -37,6 +38,7 @@ from .operator_actions import OperatorActionError, _operator, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .redaction import redact_mapping
 from .remediation import latest_candidate_findings
+from .review import adverse_gate
 from .timing import format_task_summary, task_timing
 from .validation import Validator
 
@@ -95,7 +97,12 @@ def _resume_at_validate(store: Store, task_id: str, task: Any) -> dict[str, Any]
     return changes
 
 
-def resume_task(store: Store, task_id: str) -> dict[str, Any]:
+def resume_task(
+    store: Store,
+    task_id: str,
+    *,
+    adverse_policy: AdverseReviewPolicy | None = None,
+) -> dict[str, Any]:
     """Resume a stuck or blocked task at the earliest incomplete stage warranted by its candidate and bound evidence."""
     task = _require_repairable(store, task_id)
     unblocked = False
@@ -110,7 +117,17 @@ def resume_task(store: Store, task_id: str) -> dict[str, Any]:
         digest = str(bound["digest"]) if bound is not None and "digest" in bound.keys() else None
         stage = Stage(current["stage"])
         if digest and store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED):
-            if store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, digest, EvidenceStatus.PASSED):
+            review_passed = store.has_bound_evidence(
+                task_id, sha, EvidenceKind.REVIEW, digest, EvidenceStatus.PASSED
+            )
+            review_gate_passed = (
+                review_passed
+                and (
+                    adverse_policy is None
+                    or adverse_gate(store, task_id, sha, digest, adverse_policy).allowed
+                )
+            )
+            if review_gate_passed:
                 if stage in (Stage.IMPLEMENT, Stage.VALIDATE, Stage.REVIEW):
                     store.advance_task(task_id, Stage.INTEGRATE)
                     advanced_to = Stage.INTEGRATE
@@ -917,6 +934,11 @@ def _recommend(report: dict[str, Any], task_id: str, ref: str | None) -> tuple[s
     if report["baseline"].get("stale"):
         return f"stagemesh rebaseline-task --task {task_id} --to {ref}", "the baseline is stale: other work's files appear in this task's diff"
     if report["status"] == "BLOCKED":
+        block = report.get("block")
+        if block and block["kind"] == "BLOCKED_EXTERNAL_DEPENDENCY":
+            return f"stagemesh retry-task --task {task_id}", f"external condition not met: {block['reason']}; resolve condition before retrying"
+        if block and block["kind"] == "BLOCKED_HUMAN_DECISION" and "objective root" in str(block["reason"]):
+            return "stagemesh plan", f"task {task_id} is an objective root ({block['reason']}); plan child tasks instead"
         return f"stagemesh retry-task --task {task_id}", diagnosis["recommendation"] if diagnosis else "task is blocked; unblock it once the cause is fixed"
     if contract["frozen"] is None and contract["file"]["path"] is None:
         return "stagemesh continue", "no contract yet; continue auto-plans one deterministically"

@@ -30,15 +30,20 @@ from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .blocked_recovery import can_auto_retry
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
-from .capabilities import CapabilityRegistryError
+from .capabilities import CapabilityRegistryError, skill_evidence_mode
 from .capabilities import inventory as capability_inventory
-from .capabilities import skill_evidence_mode
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
-from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, StageMeshConfig, TaskSelectionConfig, load_config
+from .config import (
+    BALANCED_PROVIDER_POOLS,
+    ConfigValidationError,
+    StageMeshConfig,
+    TaskSelectionConfig,
+    load_config,
+)
 from .config_migration import (
     config_path_for,
     plan_provider_stage_command_migration,
@@ -70,8 +75,8 @@ from .operator import operator_report
 from .operator_actions import (
     OperatorActionError,
     adopt_candidate,
-    recover_stale,
     recover_implementation_identity,
+    recover_stale,
     release_unknown_execution,
     task_details,
 )
@@ -1814,7 +1819,7 @@ def _selection_policy(config: StageMeshConfig, args: argparse.Namespace) -> Task
 
 
 def _prepare_selection_scope(store, project, config, args, *, task_id=None):
-    from .selection_scope import ScopeError, attach, refresh, resolve_scope, preview
+    from .selection_scope import ScopeError, attach, preview, refresh, resolve_scope
 
     try:
         if (getattr(args, "label", None) is not None or getattr(args, "resume_scope", None)) and (
@@ -2135,6 +2140,7 @@ def command_cooldown(args: argparse.Namespace) -> int:
 
 def command_retry_task(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
     task = store.get_task(args.task)
@@ -2146,7 +2152,50 @@ def command_retry_task(args: argparse.Namespace) -> int:
         print(f"task is not blocked: {args.task} (status {task['status']})", file=sys.stderr)
         store.close()
         return 2
-    resume_task(store, args.task)
+    try:
+        _sync_all_sources(store, project, config, args.task)
+    except Exception as exc:  # noqa: BLE001 - a stale eligibility snapshot must never authorize retry.
+        print(
+            f"retry refused: source eligibility could not be refreshed ({type(exc).__name__}); "
+            f"task {args.task} remains blocked",
+            file=sys.stderr,
+        )
+        store.close()
+        return 2
+    task = store.get_task(args.task)
+    if task is None:
+        print(f"task does not exist: {args.task}", file=sys.stderr)
+        store.close()
+        return 2
+    from .objective_roots import objective_root_reason
+    from .scheduling import _source_refusal_reason
+
+    obj_reason = objective_root_reason(store, task)
+    if obj_reason:
+        print(
+            f"retry refused: task {args.task} is an objective root ({obj_reason}); "
+            "plan child tasks (stagemesh plan) instead of retrying directly",
+            file=sys.stderr,
+        )
+        store.close()
+        return 2
+    source_reason = _source_refusal_reason(store, task)
+    if source_reason:
+        state = store.source_state(str(task["source"]), str(task["source_id"])) if task["source"] and task["source_id"] else {}
+        detail = state.get("eligibility_reason")
+        reason_msg = f"{source_reason} ({detail})" if detail and detail not in source_reason else source_reason
+        print(
+            f"retry refused: task {args.task} cannot be unblocked because {reason_msg}; "
+            "resolve the source condition before retrying",
+            file=sys.stderr,
+        )
+        store.close()
+        return 2
+    resume_task(
+        store,
+        args.task,
+        adverse_policy=config.adverse_review if config.require_independent_review else None,
+    )
     task = store.get_task(args.task)
     if args.json:
         print(json.dumps({"task_id": args.task, "status": task["status"], "stage": task["stage"]}, sort_keys=True))

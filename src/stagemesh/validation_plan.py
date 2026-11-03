@@ -77,6 +77,29 @@ _FRONTEND_PATTERNS = (
 )
 _BROWSER_E2E_SCRIPTS = ("e2e:ui-gate", "test:e2e", "e2e", "playwright")
 
+# Bounded evidence from docs/validation-components.md, never executable gate selection.
+# Each exact source root maps to (component, direct pytest targets, dependent targets).
+_AUDITED_COMPONENTS = {
+    "src/stagemesh/validation_plan.py": (
+        "planning",
+        ("tests/test_validation_plan.py",),
+        ("tests/test_contract_fail_closed.py", "tests/test_invariant_semantics.py",
+         "tests/test_stagemesh_validation_profile.py"),
+    ),
+    "src/stagemesh/validation.py": (
+        "validation_execution",
+        ("tests/test_contract_fail_closed.py", "tests/test_validation_plan.py"),
+        ("tests/test_builtin_execution_ownership.py", "tests/test_candidate_binding_hardening.py",
+         "tests/test_invariant_semantics.py"),
+    ),
+    "src/stagemesh/review.py": (
+        "review",
+        ("tests/test_review_reliability.py", "tests/test_review_terminalization.py"),
+        ("tests/test_autonomy_review.py", "tests/test_builtin_execution_ownership.py",
+         "tests/test_invariant_semantics.py"),
+    ),
+}
+
 
 @dataclass(frozen=True)
 class ValidationPlan:
@@ -85,6 +108,9 @@ class ValidationPlan:
     debug_checks: tuple[str, ...]
     release_checks: tuple[str, ...]
     escalation_reasons: tuple[str, ...] = ()
+    affected_components: tuple[str, ...] = ()
+    direct_test_targets: tuple[str, ...] = ()
+    dependent_test_targets: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -93,6 +119,9 @@ class ValidationPlan:
             "debug_checks": list(self.debug_checks),
             "release_checks": list(self.release_checks),
             "escalation_reasons": list(self.escalation_reasons),
+            "affected_components": list(self.affected_components),
+            "direct_test_targets": list(self.direct_test_targets),
+            "dependent_test_targets": list(self.dependent_test_targets),
         }
 
     @property
@@ -108,12 +137,20 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
     classification = _classification(contract, changed_files)
     reasons = _escalation_reasons(contract, changed_files, classification)
     if classification == CORE_LIFECYCLE_OR_SCHEMA_SECURITY:
+        scope = {path.replace("\\", "/").casefold() for path in changed_files or contract.allowed_files}
+        impact = [entry for root, entry in _AUDITED_COMPONENTS.items() if root in scope]
+        # Supporting docs/tests are neutral; any other unaudited path invalidates the map.
+        if any(path not in _AUDITED_COMPONENTS and not path.startswith(("docs/", "tests/")) for path in scope):
+            impact = []
         return ValidationPlan(
             classification,
             "HIGH",
             _gate_names(contract.gates) or ("focused-tests",),
             _broad_gate_names(contract),
             reasons or ("core lifecycle/state-machine, schema, or security boundary",),
+            affected_components=tuple(sorted({name for name, _, _ in impact})),
+            direct_test_targets=tuple(sorted({target for _, direct, _ in impact for target in direct})),
+            dependent_test_targets=tuple(sorted({target for _, _, dependent in impact for target in dependent})),
         )
     if classification == CONFIG_OR_PROVIDER_COMMAND:
         checks = _matching_gate_names(contract.gates, ("smoke", "provider", "runtime", "focused"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,10 +54,17 @@ def live_acceptance_checks(root: Path = ROOT) -> list[dict[str, str]]:
             config.github.repo or "",
             UrlLibGitHubTransport(config.github.token),
         )
-        result = client.list_open_issues()
-        checks.append({"name": "github", "status": result.status})
-        if result.status not in {"OK", "UNKNOWN", "STALE"}:
-            raise AssertionError(result)
+        try:
+            result = client.list_open_issues()
+        except (TimeoutError, urllib.error.URLError):
+            # Live acceptance is an evidence report. A transport failure is UNKNOWN,
+            # never a traceback and never proof that GitHub is working.
+            github_status = "UNKNOWN"
+        else:
+            github_status = result.status
+            if github_status not in {"OK", "UNKNOWN", "STALE"}:
+                raise AssertionError(result)
+        checks.append({"name": "github", "status": github_status})
         checks.append({"name": "github:sync", "status": "NOT_PROVEN"})
     else:
         checks.append({"name": "github", "status": "NOT_CONFIGURED"})
