@@ -269,6 +269,9 @@ _TOOL_KINDS: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
          "Provision the browser runtime for the gate (operator action); do not retry the implementation."),
         ("permission", r"permission denied|\bEACCES\b|\bEPERM\b|access is denied|operation not permitted",
          "Fix file or process permissions for the workspace (operator action)."),
+        ("path_quoting", (r"unexpected EOF while looking for matching|unterminated quoted string|no closing quotation|"
+                          r"filename, directory name, or volume label syntax is incorrect"),
+         "Pass the command as argv, quote paths containing spaces, and verify the working directory."),
         ("cwd_path", r"no such file or directory|cannot find the path|\bENOENT\b|not a directory|winerror 3\b|working directory",
          "Verify the command's cwd and referenced paths exist in the workspace."),
         ("service_unavailable", r"connection refused|\bECONNREFUSED\b|could not connect to server|service unavailable|host unreachable",

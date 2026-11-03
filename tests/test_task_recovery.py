@@ -14,26 +14,34 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_bounded_execution import TASK
+from test_bounded_execution import _setup as _base_setup
+from test_diagnosis import DOCS_CONTRACT as _DOCS
+from test_diagnosis import Attempts, drive, events
 
 import stagemesh.cli as cli_module
+from stagemesh.audit import record_audit
+from stagemesh.autonomy.provenance import claim_workspace, load_ownership
 from stagemesh.baseline import analyze_baseline
 from stagemesh.contract_binding import bind_task_contract, contract_for_candidate
 from stagemesh.contracts import CONTRACT_VERSION, ContractError, changed_files
 from stagemesh.coordinator import Coordinator, TargetSelection
-from stagemesh.diagnosis import STALE_BASELINE, VALIDATION_GATE, diagnose
+from stagemesh.diagnosis import STALE_BASELINE, TOOL_FAILURE_EVENT, VALIDATION_GATE, diagnose
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.providers import _remediation_prompt
-from stagemesh.audit import record_audit
-from stagemesh.autonomy.provenance import claim_workspace, load_ownership
-from stagemesh.recovery import RecoveryRefusal, advance_baseline, rebaseline_task, rebind_contract, task_doctor
+from stagemesh.recovery import (
+    RecoveryRefusal,
+    advance_baseline,
+    format_doctor,
+    rebaseline_task,
+    rebind_contract,
+    task_doctor,
+)
 from stagemesh.remediation import finding_identity, remediation_context
 from stagemesh.run_ready import RunSummary, drive_task, format_stop
 from stagemesh.validation import Validator
 from stagemesh.workspaces import prepare_task_workspace
-
-from test_bounded_execution import TASK, _setup as _base_setup
-from test_diagnosis import DOCS_CONTRACT as _DOCS, Attempts, drive, events
 
 PY = sys.executable
 # a docs-only change plans a "docs-static" check, which must exist as a gate for the validation to be able to pass
@@ -834,6 +842,42 @@ def test_task_doctor_text_and_json_output(tmp_path: Path) -> None:
     assert "contract: digest" in text and "version 1" in text and "[outside_allowed_files]" in text
     assert "diagnosis: stale_baseline" in text and f"next: stagemesh rebaseline-task --task {TASK}" in text
     assert cli(project, "task-doctor", "--task", "nope")[0] == 2
+
+
+def test_task_doctor_projects_latest_tool_failure_and_stops_generic_continue(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    evidence = {
+        "kind": "path_quoting",
+        "command": {"executable": "runner", "argc": 2, "text": "runner 'docs/a b.md'"},
+        "cwd": str(project),
+        "status": "exit 1",
+        "excerpt": "unexpected EOF while looking for matching quote",
+        "next_action": "Pass argv and quote paths containing spaces.",
+        "recovery": {"action": "stop", "operator_action": "Correct the quoted path."},
+    }
+    record_audit(store, TOOL_FAILURE_EVENT, {"task_id": TASK, "execution_id": "exec-1", "evidence": evidence})
+
+    before = audit_count(store)
+    report = task_doctor(store, project, TASK)
+
+    assert audit_count(store) == before
+    assert report["tool_failure"] == {
+        "at": report["tool_failure"]["at"],
+        "execution_id": "exec-1",
+        "kind": "path_quoting",
+        "command": {"executable": "runner", "text": "runner 'docs/a b.md'"},
+        "cwd": str(project),
+        "status": "exit 1",
+        "excerpt": "unexpected EOF while looking for matching quote",
+        "next_action": "Pass argv and quote paths containing spaces.",
+        "recovery": {"action": "stop", "operator_action": "Correct the quoted path."},
+    }
+    assert report["recommended_command"] == ""
+    assert "Correct the quoted path" in report["recommendation_reason"]
+    text = format_doctor(report)
+    assert "latest tool failure: path_quoting (exit 1)" in text
+    assert "command: runner 'docs/a b.md'" in text
+    assert "operator action: Pass argv and quote paths containing spaces." in text
 
 
 def test_task_doctor_flags_an_unsupported_stored_version_instead_of_needing_sqlite(tmp_path: Path) -> None:

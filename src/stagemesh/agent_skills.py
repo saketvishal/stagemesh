@@ -11,7 +11,11 @@ import json
 import re
 from pathlib import Path
 
-from .capabilities import CapabilityRegistryError, resolve_attachments
+from .capabilities import (
+    CapabilityRegistryError,
+    requested_for_stage,
+    resolve_attachments,
+)
 
 SKILL_ROOT = Path(__file__).resolve().parent / "skill_packs"
 _SKILL_FILES = {
@@ -322,11 +326,17 @@ def skill_prompt(
             raise CapabilityRegistryError(
                 "registered capabilities require a project workspace and provider identity"
             )
-        registered = resolve_attachments(
+        capability_stage = "REVIEW" if stage == "review" else "IMPLEMENT"
+        stage_requested = requested_for_stage(
             project,
             tuple(str(item) for item in requested),
+            stage=capability_stage,
+        )
+        registered = resolve_attachments(
+            project,
+            stage_requested,
             provider=provider_name,
-            stage="REVIEW" if stage == "review" else "IMPLEMENT",
+            stage=capability_stage,
         )
     lines = [
         "\n" + _ADAPTER_POLICY,

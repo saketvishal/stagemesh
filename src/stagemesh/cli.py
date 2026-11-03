@@ -32,6 +32,7 @@ from .blocked_recovery import can_auto_retry
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
 from .capabilities import CapabilityRegistryError, skill_evidence_mode
 from .capabilities import inventory as capability_inventory
+from .capabilities import task_usage as capability_task_usage
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
@@ -3492,12 +3493,42 @@ def command_capacity(args: argparse.Namespace) -> int:
 def command_capabilities(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     rows = capability_inventory(project)
+    history_available = None
+    task_exists = None
+    if args.task:
+        history_available, task_exists, observed = capability_task_usage(
+            db_path(project), args.task
+        )
+        for row in rows:
+            usage = observed.get(
+                str(row["id"]),
+                {
+                    "status": "not-observed",
+                    "attached": 0,
+                    "loaded": 0,
+                    "invoked": 0,
+                    "evidence_missing": 0,
+                    "providers": [],
+                    "stages": [],
+                    "last_observed_at": None,
+                },
+            )
+            row["invocation"] = usage["status"]
+            row["usage"] = usage
     payload = {
         "project": str(project),
         "registry": CAPABILITY_REGISTRY_PATH.as_posix(),
         "skill_evidence_mode": skill_evidence_mode(project),
         "capabilities": rows,
     }
+    if args.task:
+        payload.update(
+            {
+                "task_id": args.task,
+                "history_available": history_available,
+                "task_exists": task_exists,
+            }
+        )
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3508,12 +3539,24 @@ def command_capabilities(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"skill evidence mode={payload['skill_evidence_mode']}")
+    if args.task:
+        print(
+            f"task={args.task} history_available={str(history_available).lower()} "
+            f"task_exists={str(task_exists).lower()}"
+        )
     for row in rows:
+        usage = row.get("usage")
+        counts = ""
+        if isinstance(usage, dict):
+            counts = (
+                f" attached={usage['attached']} loaded={usage['loaded']} "
+                f"invoked={usage['invoked']} evidence_missing={usage['evidence_missing']}"
+            )
         print(
             f"{row['id']} kind={row['kind']} enabled={str(row['enabled']).lower()} "
             f"installed={str(row['installed']).lower()} adapter={str(row['adapter_supported']).lower()} "
             f"available={str(row['available']).lower()} usable={str(row['usable']).lower()} "
-            f"invocation={row['invocation']}"
+            f"invocation={row['invocation']}{counts}"
         )
     return 0
 
@@ -4767,6 +4810,10 @@ def build_parser() -> argparse.ArgumentParser:
     capabilities = sub.add_parser(
         "capabilities",
         help="Inspect project-local capability declarations without installing or invoking them",
+    )
+    capabilities.add_argument(
+        "--task",
+        help="Read durable attached/loaded/invoked evidence for one task without mutating runtime state",
     )
     capabilities.add_argument("--json", action="store_true")
     capabilities.set_defaults(func=command_capabilities)

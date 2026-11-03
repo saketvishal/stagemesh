@@ -7,6 +7,10 @@ Installed projects can also own skills. A change contract may list complete, pro
 StageMesh validates that each path stays inside the task checkout and fails closed when an explicitly required skill is missing.
 Projects that need named, provider-compatible opt-in can instead use the project capability registry and `capability_refs`; see
 [`capabilities.md`](capabilities.md). Registry attachment is audited separately from actual invocation.
+Registry skills may declare `IMPLEMENT`, `REVIEW`, or both. StageMesh filters the contract's capability ids by that declaration, so a
+review-only skill is never handed to an implementation provider. This is the supported path for project-vendored Superpowers skills
+outside the deliberately small pinned built-in pack. Task-scoped receipts remain distinct: prompt attachment is not a load, and a load
+is not proof that the provider followed the guidance.
 For frontend tasks, StageMesh automatically uses `agent-skills/genui-architect/SKILL.md` when the project provides it, with generated
 runtime mirror locations as fallbacks. Project skills are read from the task's isolated checkout and never expand its allowed files,
 acceptance criteria, or authority.

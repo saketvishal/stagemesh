@@ -27,6 +27,7 @@ from .capabilities import (
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
+from .contracts import ContractError, bound_contract_from_record
 from .domain import ExecutionKind, ExecutionStatus
 from .efficiency import (
     CallRecorder,
@@ -762,10 +763,19 @@ class RuntimeCommandAdapter:
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
+            review_contract = None
+            if store is not None and task_id is not None:
+                record = store.contract_binding(task_id, candidate_sha) or store.task_contract(task_id)
+                if record is not None:
+                    try:
+                        review_contract = bound_contract_from_record(dict(record)).contract
+                    except ContractError as exc:
+                        return _review_infrastructure_failure(f"invalid_contract: {exc}")
             capability_audit: list[dict[str, object]] = []
             try:
                 review_prompt = prompt + skill_prompt(
                     prompt,
+                    review_contract,
                     stage="review",
                     project=review_path,
                     provider_name=self.name,

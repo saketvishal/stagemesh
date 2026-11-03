@@ -13,6 +13,7 @@ from stagemesh.execution import SubprocessExecutor
         ("missing_dependency", "ModuleNotFoundError: No module named 'requests'"),
         ("cwd_path", "FileNotFoundError: [Errno 2] No such file or directory: 'web'"),
         ("permission", "EACCES: permission denied, open '/x'"),
+        ("path_quoting", "bash: unexpected EOF while looking for matching quote"),
         ("service_unavailable", "Error: connect ECONNREFUSED 127.0.0.1:5432"),
         ("browser_startup", "browserType.launch: Executable doesn't exist; run playwright install"),
         ("assertion_failure", "E   AssertionError: assert 1 == 2"),
