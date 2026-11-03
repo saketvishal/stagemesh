@@ -9,9 +9,12 @@ import pytest
 from test_run_ready import FAKE_CONTRACT, _project, _run
 
 from stagemesh.config import ConfigValidationError, load_config
+from stagemesh.contract_binding import bind_task_contract
 from stagemesh.contracts import canonical_contract_json, parse_contract
 from stagemesh.git import GitWorkspace
+from stagemesh.persistence import Store
 from stagemesh.providers import _approved_scope_prompt
+from stagemesh.recovery import format_doctor, task_doctor
 from stagemesh.spec_planning import (
     NEXT_APPROVE_SPEC,
     NEXT_REFRESH_SPEC,
@@ -130,6 +133,37 @@ def test_run_ready_blocks_then_allows_with_approved_spec(tmp_path: Path):
     approval_path.write_text(json.dumps(_approval(spec)), encoding="utf-8")
     code, result = _run(project)
     assert code == 0 and result["stop_reason"] == "DONE", result
+
+
+def test_task_doctor_exposes_approved_planning_gate_without_spec_contents(tmp_path: Path):
+    project = _project(tmp_path, ["T-1"], config={"planning_gate": {"require_approved_spec": True}})
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("task T-1", source_id="T-1")
+    baseline = GitWorkspace(project).head()
+    store.set_task_baseline("T-1", baseline)
+    bound = bind_task_contract(store, project, "T-1", baseline)
+    spec = _spec(contract_hash=bound.digest, baseline_sha=baseline)
+    spec_path, approval_path = planning_artifact_paths(project, "T-1")
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    approval_path.write_text(json.dumps(_approval(spec)), encoding="utf-8")
+
+    report = task_doctor(store, project, "T-1")
+
+    assert report["planning"] == {
+        "required": True,
+        "status": "approved",
+        "spec_path": ".stagemesh/planning/T-1.spec.json",
+        "approval_path": ".stagemesh/planning/T-1.approval.json",
+        "spec_present": True,
+        "approval_present": True,
+        "next_action": None,
+        "reason": "",
+        "approved_scope": ["src/app.py"],
+    }
+    assert "planning: approved" in format_doctor(report)
+    assert "Gate implementation" not in json.dumps(report)
 
 
 def test_legacy_project_without_gate_runs_unchanged(tmp_path: Path):

@@ -17,7 +17,7 @@ from .audit import record_audit
 from .auto_plan import outside_label_selector
 from .autonomy.destructive_git import execute_preserved_cleanup
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
-from .config import AdverseReviewPolicy
+from .config import AdverseReviewPolicy, ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
 from .contracts import (
     CONTRACT_VERSION,
@@ -44,9 +44,19 @@ from .operator_actions import OperatorActionError, _operator, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .redaction import redact_mapping
 from .remediation import latest_candidate_findings
-from .review import adverse_gate
+from .review import adverse_gate, adverse_outcome
+from .spec_planning import (
+    NEXT_APPROVE_SPEC,
+    NEXT_REFRESH_SPEC,
+    NEXT_RESOLVE_DECISIONS,
+    NEXT_WRITE_SPEC,
+    evaluate_planning_gate,
+    load_planning_artifacts,
+    planning_artifact_paths,
+)
 from .timing import format_task_summary, task_timing
 from .validation import Validator
+from .validation_services import ValidationServiceError, discover_validation_services
 
 REBIND_EVENT = "task.contract_rebound"
 REBASELINE_EVENT = "task.rebaselined"
@@ -860,6 +870,10 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
         "validation_failures": validation_failures,
         "review_findings": review_findings,
         "tool_failure": _latest_tool_failure(store, task_id),
+        "research": _research_summary(store, project, task_id),
+        "planning": _planning_summary(store, project, task_id),
+        "adverse_review": _adverse_review_summary(store, project, task_id, candidate_sha),
+        "e2e": _e2e_summary(store, project, task_id, candidate_sha),
         "diagnosis": (
             {
                 "category": diagnosis.category,
@@ -962,6 +976,323 @@ def _latest_tool_failure(store: Store, task_id: str) -> dict[str, Any] | None:
     }
 
 
+def _research_summary(store: Store, project: Path, task_id: str) -> dict[str, Any]:
+    """Project opt-in and latest bounded research receipt for task-doctor."""
+    try:
+        configured = load_config(project).research
+    except ConfigValidationError as exc:
+        return {"required": None, "status": "config-invalid", "reason": str(exc)[:300]}
+    row = store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type='research_stage' "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    summary: dict[str, Any] = {
+        "required": configured is not None,
+        "configured_provider": configured.provider if configured is not None else None,
+        "status": "pending" if configured is not None else "not-required",
+        "observed": row is not None,
+        "reason": (
+            "no research receipt has been recorded yet"
+            if configured is not None
+            else "the project has no research provider configured"
+        ),
+    }
+    if row is None:
+        return summary
+    payload = _loads(row["payload"])
+    report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+    inspected = payload.get("inspected_paths")
+    finding_count = payload.get("finding_count")
+    summary.update(
+        status=str(payload.get("outcome") or "unknown")[:80],
+        at=row["created_at"],
+        researcher=str(payload.get("researcher") or "")[:100] or None,
+        reason=str(payload.get("reason") or "")[:300] or None,
+        execution_id=str(payload.get("execution_id") or "") or None,
+        baseline_sha=str(payload.get("baseline_sha") or "")[:64] or None,
+        contract_digest=str(payload.get("contract_digest") or "")[:128] or None,
+        finding_count=(
+            finding_count
+            if isinstance(finding_count, int)
+            and not isinstance(finding_count, bool)
+            and finding_count >= 0
+            else 0
+        ),
+        inspected_path_count=len(inspected) if isinstance(inspected, list) else 0,
+        unresolved_scope_gap_count=len(report.get("unresolved_scope_gaps", []))
+        if isinstance(report.get("unresolved_scope_gaps"), list)
+        else 0,
+    )
+    return summary
+
+
+def _planning_summary(store: Store, project: Path, task_id: str) -> dict[str, Any]:
+    """Read-only planning gate state without exposing spec contents."""
+    spec_path, approval_path = planning_artifact_paths(project, task_id)
+    try:
+        required = load_config(project).require_approved_spec
+    except ConfigValidationError as exc:
+        return {"required": None, "status": "config-invalid", "reason": str(exc)[:300]}
+    spec_payload, approval = load_planning_artifacts(project, task_id)
+    summary: dict[str, Any] = {
+        "required": required,
+        "status": "not-required",
+        "spec_path": spec_path.relative_to(project).as_posix(),
+        "approval_path": approval_path.relative_to(project).as_posix(),
+        "spec_present": spec_payload is not None,
+        "approval_present": approval is not None,
+        "next_action": None,
+        "reason": "" if required else "the approved-spec gate is disabled",
+        "approved_scope": [],
+    }
+    if not required:
+        return summary
+    contract = store.task_contract(task_id)
+    baseline = store.task_baseline(task_id)
+    if contract is None or baseline is None:
+        summary.update(status="identity-unavailable", reason="task contract or baseline is not bound yet")
+        return summary
+    decision = evaluate_planning_gate(
+        enabled=True,
+        spec_payload=spec_payload,
+        approval=approval,
+        contract_hash=str(contract["digest"]),
+        baseline_sha=baseline,
+    )
+    statuses = {
+        NEXT_WRITE_SPEC: "missing" if spec_payload is None else "invalid",
+        NEXT_RESOLVE_DECISIONS: "needs-decision",
+        NEXT_REFRESH_SPEC: "stale",
+        NEXT_APPROVE_SPEC: "awaiting-approval",
+    }
+    summary.update(
+        status="approved" if decision.allowed else statuses.get(decision.next_action, "blocked"),
+        next_action=decision.next_action,
+        reason=decision.reason,
+        approved_scope=list(decision.approved_scope),
+    )
+    return summary
+
+
+def _adverse_review_summary(
+    store: Store,
+    project: Path,
+    task_id: str,
+    candidate_sha: str | None,
+) -> dict[str, Any]:
+    """Exact-candidate adverse gate state and bounded role evidence."""
+    try:
+        policy = load_config(project).adverse_review
+    except ConfigValidationError as exc:
+        return {"required": True, "status": "config-invalid", "reason": str(exc)[:300]}
+    summary: dict[str, Any] = {
+        "required": True,
+        "status": "pending",
+        "candidate_sha": candidate_sha,
+        "policy_digest": policy.digest(),
+        "blocking_severities": list(policy.blocking_severities),
+        "unavailable_reviewer": policy.unavailable_reviewer,
+        "provider": None,
+        "verdict": None,
+        "findings_by_severity": {},
+        "reasons": [],
+        "override_used": False,
+    }
+    if candidate_sha is None:
+        return summary
+    binding = store.contract_binding(task_id, candidate_sha)
+    if binding is None:
+        summary.update(status="identity-unavailable", reasons=["candidate contract is not bound"])
+        return summary
+    digest = str(binding["digest"])
+    decision = adverse_gate(store, task_id, candidate_sha, digest, policy)
+    rows = store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
+        "AND status IN (?, ?) ORDER BY created_at DESC, rowid DESC",
+        (
+            task_id,
+            candidate_sha,
+            EvidenceKind.REVIEW,
+            EvidenceStatus.PASSED,
+            EvidenceStatus.FAILED,
+        ),
+    ).fetchall()
+    payload = next(
+        (
+            parsed
+            for row in rows
+            if (parsed := _loads(row["payload"])).get("contract_hash") == digest
+            and parsed.get("adverse_review_gate") is True
+        ),
+        None,
+    )
+    if payload is not None:
+        roles = payload.get("review_roles") if isinstance(payload.get("review_roles"), dict) else {}
+        evidence = roles.get("adverse") if isinstance(roles.get("adverse"), dict) else {}
+        counts: dict[str, int] = {}
+        findings = evidence.get("findings") if isinstance(evidence.get("findings"), list) else []
+        for finding in findings:
+            if isinstance(finding, dict):
+                severity = str(finding.get("severity") or "unknown")[:40]
+                counts[severity] = counts.get(severity, 0) + 1
+        summary.update(
+            provider=str(evidence.get("provider") or payload.get("review_provider") or "")[:100] or None,
+            verdict=adverse_outcome(evidence, policy),
+            findings_by_severity=counts,
+        )
+    override = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type='adverse_review.override' "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.candidate_sha')=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.contract_hash')=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.policy_digest')=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id, candidate_sha, digest, policy.digest()),
+    ).fetchone()
+    override_used = override is not None
+    summary.update(
+        status="overridden" if override_used else "passed" if decision.allowed else "blocked",
+        reasons=list(decision.reasons),
+        override_used=override_used,
+    )
+    return summary
+
+
+def _e2e_summary(
+    store: Store,
+    project: Path,
+    task_id: str,
+    candidate_sha: str | None,
+) -> dict[str, Any]:
+    """Latest exact-candidate browser/API evaluation without reading artifact contents."""
+    try:
+        services = discover_validation_services(project)
+    except ValidationServiceError as exc:
+        return {
+            "required": None,
+            "status": "config-invalid",
+            "candidate_sha": candidate_sha,
+            "reason": str(exc)[:300],
+            "configured_services": [],
+            "evaluations": [],
+            "artifact_paths": [],
+        }
+    configured = [
+        {"name": service.name, "kind": service.kind}
+        for service in services.services
+        if service.kind in {"browser", "api"}
+    ]
+    required = bool(configured)
+    summary: dict[str, Any] = {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "candidate_sha": candidate_sha,
+        "service_fingerprint": services.fingerprint,
+        "configured_services": configured,
+        "evaluations": [],
+        "artifact_root": None,
+        "artifact_paths": [],
+        "first_actionable_error": None,
+        "reason": "no exact-candidate E2E evaluation evidence is recorded" if required else "no browser or API evaluation service is configured",
+    }
+    if candidate_sha is None:
+        return summary
+    row = store.conn.execute(
+        "SELECT status, payload, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id, candidate_sha, EvidenceKind.VALIDATION),
+    ).fetchone()
+    if row is None:
+        return summary
+    payload = _loads(row["payload"])
+    raw_evaluations = payload.get("e2e_evaluations")
+    if not isinstance(raw_evaluations, list):
+        single = payload.get("e2e_evidence")
+        raw_evaluations = [single] if isinstance(single, dict) else []
+    evaluations: list[dict[str, Any]] = []
+    artifacts: list[str] = []
+    fingerprints: set[str] = set()
+    failed_commands: set[tuple[str, ...]] = set()
+    for item in raw_evaluations[:16]:
+        if not isinstance(item, dict) or item.get("candidate_sha") != candidate_sha:
+            continue
+        command = item.get("command") if isinstance(item.get("command"), list) else []
+        result = str(item.get("result") or "UNKNOWN")[:20]
+        if result == "FAIL":
+            failed_commands.add(tuple(str(part) for part in command))
+        fingerprint = str(item.get("service_fingerprint") or "")[:64]
+        if fingerprint:
+            fingerprints.add(fingerprint)
+        refs = item.get("artifacts") if isinstance(item.get("artifacts"), list) else []
+        paths = [
+            str(ref.get("path"))[:500]
+            for ref in refs
+            if isinstance(ref, dict) and isinstance(ref.get("path"), str)
+        ][:32]
+        artifacts.extend(paths)
+        evaluations.append(
+            {
+                "kind": str(item.get("kind") or "unknown")[:40],
+                "result": result,
+                "command": [str(part)[:200] for part in command[:32]],
+                "artifact_paths": paths,
+            }
+        )
+    root = payload.get("e2e_artifact_root")
+    if isinstance(root, str):
+        try:
+            summary["artifact_root"] = Path(root).resolve().relative_to(project.resolve()).as_posix()
+        except (OSError, ValueError):
+            summary["artifact_root"] = None
+    first_error = None
+    for finding in payload.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        command = finding.get("command") if isinstance(finding.get("command"), list) else []
+        message = str(finding.get("message") or "")
+        if (
+            finding.get("code") == "invalid_e2e_evidence"
+            or "e2e" in message.casefold()
+            or tuple(str(part) for part in command) in failed_commands
+        ):
+            first_error = {
+                key: str(finding[key])[:600]
+                for key in ("code", "message", "failure_kind", "stderr")
+                if finding.get(key) is not None
+            }
+            break
+    results = {item["result"] for item in evaluations}
+    stale = bool(fingerprints and fingerprints != {services.fingerprint})
+    summary.update(
+        at=row["created_at"],
+        validation_status=str(row["status"]),
+        evaluations=evaluations,
+        artifact_paths=artifacts[:32],
+        first_actionable_error=first_error,
+        status=(
+            "stale"
+            if stale
+            else "failed"
+            if "FAIL" in results or (required and not evaluations and str(row["status"]) == str(EvidenceStatus.FAILED))
+            else "passed"
+            if evaluations and results <= {"PASS"}
+            else summary["status"]
+        ),
+        reason=(
+            "service configuration changed after the recorded evaluation"
+            if stale
+            else (first_error or {}).get("message")
+            if first_error
+            else None
+            if evaluations
+            else summary["reason"]
+        ),
+    )
+    return summary
+
+
 def _recommend(report: dict[str, Any], task_id: str, ref: str | None) -> tuple[str, str]:
     contract, diagnosis = report["contract"], report["diagnosis"]
     if report["active_claim"] or report["active_executions"]:
@@ -1041,6 +1372,37 @@ def format_doctor(report: dict[str, Any]) -> str:
         recovery = tool_failure.get("recovery") or {}
         if recovery.get("action"):
             lines.append(f"    recovery: {recovery['action']}" + (f" ({recovery['execution_status']})" if recovery.get("execution_status") else ""))
+    research = report.get("research") or {}
+    lines.append(
+        f"  research: {research.get('status', 'unknown')}"
+        + (f" by {research['researcher']}" if research.get("researcher") else "")
+        + (f"; findings={research['finding_count']}" if research.get("observed") else "")
+        + (f"; reason={research['reason']}" if research.get("reason") else "")
+    )
+    planning = report.get("planning") or {}
+    lines.append(
+        f"  planning: {planning.get('status', 'unknown')}"
+        + (f"; next={planning['next_action']}" if planning.get("next_action") else "")
+        + (f"; reason={planning['reason']}" if planning.get("reason") else "")
+    )
+    adverse = report.get("adverse_review") or {}
+    adverse_counts = ",".join(
+        f"{severity}:{count}" for severity, count in sorted((adverse.get("findings_by_severity") or {}).items())
+    )
+    lines.append(
+        f"  adverse review: {adverse.get('status', 'unknown')}"
+        + (f" by {adverse['provider']}" if adverse.get("provider") else "")
+        + (f"; verdict={adverse['verdict']}" if adverse.get("verdict") else "")
+        + (f"; findings={adverse_counts}" if adverse_counts else "")
+        + ("; override=yes" if adverse.get("override_used") else "")
+    )
+    e2e = report.get("e2e") or {}
+    lines.append(
+        f"  e2e: {e2e.get('status', 'unknown')}"
+        + (f"; evaluations={len(e2e['evaluations'])}" if e2e.get("evaluations") else "")
+        + (f"; artifacts={len(e2e['artifact_paths'])}" if e2e.get("artifact_paths") else "")
+        + (f"; reason={e2e['reason']}" if e2e.get("reason") else "")
+    )
     d = report["diagnosis"]
     lines.append(f"  diagnosis: {d['category']} at {d['stage']}: {d['summary']}" if d else "  diagnosis: none")
     if report.get("block"):
