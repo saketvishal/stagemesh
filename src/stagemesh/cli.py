@@ -52,6 +52,7 @@ from .capability_contracts import (
     task_capability_preflight,
 )
 from .capability_discovery import discover_capabilities, plan_discovered_registration
+from .capability_vendor import plan_capability_vendor, vendor_capability
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
@@ -3627,6 +3628,17 @@ def command_capabilities(args: argparse.Namespace) -> int:
             update=args.update,
         )
         return _print_capability_change(payload, args.json, plan=args.plan)
+    if action == "vendor":
+        operation = plan_capability_vendor if args.plan else vendor_capability
+        payload = operation(
+            project,
+            capability_id=args.capability_id,
+            kind=args.kind,
+            source=Path(args.source),
+            providers=args.provider,
+            stages=args.stage,
+        )
+        return _print_capability_vendor(payload, args.json, plan=args.plan)
     if action in {"enable", "disable"}:
         enabled = action == "enable"
         operation = plan_capability_enabled if args.plan else set_capability_enabled
@@ -3857,6 +3869,33 @@ def _print_capability_change(payload: dict[str, object], json_output: bool, *, p
         print("writes: none; provider calls: 0; network calls: 0; package installs: 0")
     else:
         print(f"registry: {payload['registry']}; changed={str(payload['changed']).lower()}")
+    return 0
+
+
+def _print_capability_vendor(payload: dict[str, object], json_output: bool, *, plan: bool) -> int:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    lifecycle = payload["lifecycle"]
+    assert isinstance(lifecycle, dict)
+    mode = "plan (read-only)" if plan else "applied"
+    print(f"capability vendor {mode}: {payload['entry']['id']} -> {payload['destination']}")
+    print(
+        f"vendored={str(lifecycle['vendored']).lower()} "
+        f"registered={str(lifecycle['registered']).lower()} "
+        f"enabled={str(lifecycle['enabled']).lower()} "
+        f"available={str(lifecycle['available']).lower()} "
+        f"attached={str(lifecycle['attached']).lower()} "
+        f"loaded={str(lifecycle['loaded']).lower()} "
+        f"invoked={str(lifecycle['invoked']).lower()}"
+    )
+    if plan:
+        print(
+            "writes: none; provider calls: 0; network calls: 0; package installs: 0; "
+            "subprocess calls: 0; user-home writes: 0"
+        )
+    else:
+        print("registered disabled; explicit enable and task selection are still required")
     return 0
 
 
@@ -5171,6 +5210,26 @@ def build_parser() -> argparse.ArgumentParser:
     capability_register.add_argument("--plan", action="store_true", help="Validate and preview without writing")
     capability_register.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     capability_register.set_defaults(func=command_capabilities)
+    capability_vendor = capability_sub.add_parser(
+        "vendor",
+        help="Copy one reviewed local source into the project and register it disabled",
+    )
+    capability_vendor.add_argument("capability_id")
+    capability_vendor.add_argument(
+        "--kind", required=True, choices=("skill", "mcp", "claude-plugin")
+    )
+    capability_vendor.add_argument(
+        "--source", required=True, help="Explicit local SKILL.md, MCP manifest, or plugin directory"
+    )
+    capability_vendor.add_argument("--provider", action="append", required=True)
+    capability_vendor.add_argument(
+        "--stage", action="append", required=True, choices=("IMPLEMENT", "REVIEW")
+    )
+    capability_vendor.add_argument(
+        "--plan", action="store_true", help="Validate and preview without writing"
+    )
+    capability_vendor.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_vendor.set_defaults(func=command_capabilities)
     for name in ("enable", "disable"):
         capability_state = capability_sub.add_parser(
             name,

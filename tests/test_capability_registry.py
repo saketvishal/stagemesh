@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import stagemesh.capability_vendor as capability_vendor_module
 import stagemesh.providers as providers_module
 from stagemesh.agent_skills import skill_prompt
 from stagemesh.capabilities import (
@@ -25,6 +26,7 @@ from stagemesh.capabilities import (
     task_capability_summary,
 )
 from stagemesh.capability_discovery import discover_capabilities
+from stagemesh.capability_vendor import vendor_capability
 from stagemesh.capacity import CapacityKind
 from stagemesh.cli import main
 from stagemesh.contracts import ChangeContract, canonical_contract_json, parse_contract
@@ -2676,3 +2678,300 @@ def test_historical_capability_evidence_does_not_satisfy_changed_content(
     assert fresh["invocation"] == "loaded"
     assert fresh["evidence_matches_current"] is True
     store.close()
+
+
+def test_capability_vendor_plan_is_read_only_and_reports_distinct_lifecycle_states(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "reviewed" / "SKILL.md"
+    source.parent.mkdir()
+    source.write_text("# Reviewed guidance\n", encoding="utf-8")
+
+    code = main(
+        [
+            "--project",
+            str(project),
+            "capabilities",
+            "vendor",
+            "reviewed-guidance",
+            "--kind",
+            "skill",
+            "--source",
+            str(source),
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+            "--plan",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0 and payload["operation"] == "vendor-local-capability"
+    assert payload["lifecycle"] == {
+        "vendored": False,
+        "registered": False,
+        "enabled": False,
+        "runtime_installed": True,
+        "available": False,
+        "attached": False,
+        "loaded": False,
+        "invoked": False,
+    }
+    assert payload["post_apply"]["registered"] is True
+    assert payload["post_apply"]["enabled"] is False
+    assert payload["source"]["tree_sha256"] == payload["receipt"]["source_tree_sha256"]
+    assert payload["writes"] == []
+    assert payload["network_calls"] == payload["package_installs"] == 0
+    assert payload["provider_calls"] == payload["subprocess_calls"] == 0
+    assert payload["user_home_writes"] == 0
+    assert not (project / ".stagemesh").exists()
+
+
+def test_capability_vendor_apply_copies_registers_and_pins_disabled_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "reviewed" / "SKILL.md"
+    source.parent.mkdir()
+    source.write_bytes(b"# Reviewed guidance\n")
+
+    code = main(
+        [
+            "--project",
+            str(project),
+            "capabilities",
+            "vendor",
+            "reviewed-guidance",
+            "--kind",
+            "skill",
+            "--source",
+            str(source),
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    target = project / ".stagemesh" / "vendor" / "capabilities" / "reviewed-guidance"
+    registry = json.loads((project / ".stagemesh" / "capabilities.json").read_text())
+    receipt = json.loads((target / ".stagemesh-vendor.json").read_text())
+    assert code == 0 and (target / "SKILL.md").read_bytes() == source.read_bytes()
+    assert payload["lifecycle"]["vendored"] is True
+    assert payload["lifecycle"]["registered"] is True
+    assert payload["lifecycle"]["enabled"] is False
+    assert payload["lifecycle"]["available"] is True
+    assert payload["lifecycle"]["attached"] is False
+    assert payload["lifecycle"]["loaded"] is False
+    assert payload["lifecycle"]["invoked"] is False
+    assert registry["capabilities"][0]["source"].endswith("reviewed-guidance/SKILL.md")
+    assert registry["capabilities"][0]["enabled"] is False
+    assert registry["capabilities"][0]["content_sha256"] == hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+    assert receipt["provenance"] == "operator-supplied-local-source"
+    assert "reviewed" not in json.dumps(receipt).replace("reviewed-guidance", "")
+
+
+def test_capability_vendor_rejects_unsupported_plugin_files_and_existing_targets(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Review\n", encoding="utf-8")
+    (plugin / "README.md").write_text("not imported", encoding="utf-8")
+
+    with pytest.raises(CapabilityRegistryError, match="unsupported file"):
+        vendor_capability(
+            project,
+            capability_id="review-plugin",
+            kind="claude-plugin",
+            source=plugin,
+            providers=["claude"],
+            stages=["REVIEW"],
+        )
+    assert not (project / ".stagemesh").exists()
+
+    (plugin / "README.md").unlink()
+    vendor_root = project / ".stagemesh" / "vendor" / "capabilities"
+    vendor_root.mkdir(parents=True)
+    lock = vendor_root / ".review-plugin.vendor.lock"
+    lock.write_text("other operation", encoding="utf-8")
+    with pytest.raises(CapabilityRegistryError, match="cannot vendor capability"):
+        vendor_capability(
+            project,
+            capability_id="review-plugin",
+            kind="claude-plugin",
+            source=plugin,
+            providers=["claude"],
+            stages=["REVIEW"],
+        )
+    assert lock.read_text(encoding="utf-8") == "other operation"
+    lock.unlink()
+
+    target = vendor_root / "review-plugin"
+    target.mkdir(parents=True)
+    marker = target / "marker.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    with pytest.raises(CapabilityRegistryError, match="already exists"):
+        vendor_capability(
+            project,
+            capability_id="review-plugin",
+            kind="claude-plugin",
+            source=plugin,
+            providers=["claude"],
+            stages=["REVIEW"],
+        )
+    assert marker.read_text(encoding="utf-8") == "preserve"
+    assert not (project / ".stagemesh" / "capabilities.json").exists()
+
+
+def test_capability_vendor_accepts_bounded_skills_only_claude_plugin(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "review-plugin"}), encoding="utf-8")
+    skill = plugin / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Review\n", encoding="utf-8")
+
+    payload = vendor_capability(
+        project,
+        capability_id="review-plugin",
+        kind="claude-plugin",
+        source=plugin,
+        providers=["claude"],
+        stages=["REVIEW"],
+    )
+
+    target = project / ".stagemesh" / "vendor" / "capabilities" / "review-plugin"
+    assert (target / ".claude-plugin" / "plugin.json").is_file()
+    assert (target / "skills" / "review" / "SKILL.md").is_file()
+    assert (target / ".stagemesh-vendor.json").is_file()
+    assert payload["inventory"]["configuration_valid"] is True
+    assert payload["lifecycle"]["available"] is True
+    assert payload["lifecycle"]["enabled"] is False
+
+
+def test_capability_vendor_refuses_source_and_destination_symlinks(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "SKILL.md"
+    source.write_text("# Reviewed\n", encoding="utf-8")
+    source_link = tmp_path / "linked" / "SKILL.md"
+    source_link.parent.mkdir()
+    try:
+        source_link.symlink_to(source)
+    except OSError:
+        pytest.skip("symlinks are not available")
+
+    with pytest.raises(CapabilityRegistryError, match="must not be a symlink"):
+        vendor_capability(
+            project,
+            capability_id="reviewed",
+            kind="skill",
+            source=source_link,
+            providers=["codex"],
+            stages=["IMPLEMENT"],
+        )
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    metadata = project / ".stagemesh"
+    metadata.mkdir()
+    (metadata / "vendor").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(CapabilityRegistryError, match="inside the project|symlink directory"):
+        vendor_capability(
+            project,
+            capability_id="reviewed",
+            kind="skill",
+            source=source,
+            providers=["codex"],
+            stages=["IMPLEMENT"],
+        )
+    assert list(outside.iterdir()) == []
+
+
+def test_capability_vendor_mcp_reports_runtime_separately_without_starting_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    manifest = tmp_path / "reviewed.mcp.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "transport": "stdio",
+                "server_name": "reviewed",
+                "command": sys.executable,
+                "args": ["-m", "reviewed_server"],
+                "cwd": ".",
+                "allowed_tools": ["inspect"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "--project",
+            str(project),
+            "capabilities",
+            "vendor",
+            "reviewed-mcp",
+            "--kind",
+            "mcp",
+            "--source",
+            str(manifest),
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0 and payload["lifecycle"]["runtime_installed"] is True
+    assert payload["lifecycle"]["available"] is True
+    assert payload["lifecycle"]["enabled"] is False
+    assert payload["subprocess_calls"] == 0 and payload["provider_calls"] == 0
+    assert payload["lifecycle"]["invoked"] is False
+
+
+def test_capability_vendor_rolls_back_copy_when_registration_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "SKILL.md"
+    source.write_text("# Reviewed\n", encoding="utf-8")
+
+    def fail_registration(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise CapabilityRegistryError("simulated registry refusal")
+
+    monkeypatch.setattr(capability_vendor_module, "register_capability", fail_registration)
+    with pytest.raises(CapabilityRegistryError, match="simulated registry refusal"):
+        vendor_capability(
+            project,
+            capability_id="reviewed",
+            kind="skill",
+            source=source,
+            providers=["codex"],
+            stages=["IMPLEMENT"],
+        )
+    assert not (project / ".stagemesh" / "vendor" / "capabilities" / "reviewed").exists()
+    assert not (project / ".stagemesh" / "capabilities.json").exists()

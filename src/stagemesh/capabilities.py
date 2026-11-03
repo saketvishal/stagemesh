@@ -396,6 +396,32 @@ def plan_capability_registration(
     return plan
 
 
+def validate_capability_declaration(
+    project: Path,
+    *,
+    capability_id: str,
+    kind: str,
+    source: str,
+    providers: list[str],
+    stages: list[str],
+    permissions: list[str],
+) -> dict[str, object]:
+    """Validate policy fields for a future project-local source without reading it."""
+    item = _definition(
+        Path(project).resolve(),
+        {
+            "id": capability_id,
+            "kind": kind,
+            "source": source,
+            "enabled": False,
+            "providers": providers,
+            "stages": stages,
+            "permissions": permissions,
+        },
+    )
+    return _definition_payload(item)
+
+
 def register_capability(
     project: Path,
     *,

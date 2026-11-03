@@ -93,6 +93,28 @@ launches, package installs, database creation, or user-home lookup. The plan req
 defaults the candidate to disabled. Discovery never applies its plan; actual registration remains the separate `capabilities register`
 operation below.
 
+An operator can instead copy one explicitly reviewed local source into the isolated project and register it in one bounded operation:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities vendor reviewed-guidance `
+  --kind skill --source C:\reviewed\guidance\SKILL.md `
+  --provider codex --provider claude --stage IMPLEMENT --stage REVIEW `
+  --plan --json
+```
+
+Remove `--plan` to copy into `.stagemesh/vendor/capabilities/<id>` and atomically register the copied source. The declaration is always
+disabled; enablement and task selection remain separate opt-ins. Vendoring accepts a standalone `SKILL.md`, one bounded StageMesh MCP
+manifest, or a skills-only Claude plugin containing only `.claude-plugin/plugin.json` and `skills/<name>/SKILL.md`. It refuses source or
+destination symlinks, traversal, overwrite, unsupported plugin files, more than 128 entries, a file over 256 KiB, or more than 2 MiB of
+accepted plugin content. A deterministic receipt records relative filenames, byte counts, and SHA-256 digests without storing the source
+absolute path or file contents. A failed registration removes the staged destination.
+
+This is a local copy/vendor operation, not a network, marketplace, package-manager, or executable runtime install. Its report keeps
+`vendored`, `registered`, `enabled`, `runtime_installed`, `available`, `attached`, `loaded`, and `invoked` separate and reports zero
+provider, network, subprocess, package-install, database, and user-home write calls. MCP vendoring can confirm that the declared command
+is currently on `PATH`, but it does not start the server. Standalone skill vendoring intentionally accepts only one `SKILL.md`; packages
+whose instructions depend on extra reference or script files must remain explicitly project-vendored and use discovery/registration.
+
 ```powershell
 stagemesh --project C:\path\to\project capabilities register domain-review `
   --kind skill `
@@ -282,7 +304,8 @@ is a capability policy violation and the candidate is rejected.
 
 ## Not implemented
 
-- No network or global installer, marketplace client, plugin hook runner, or arbitrary setup command.
+- No network or global installer, marketplace client, plugin hook runner, or arbitrary setup command. The local vendor command copies only
+  reviewed bounded sources into the current project.
 - No provider-neutral MCP process sandbox, credential broker, HTTP/network transport, or MCP adapter outside Codex.
 - No executable Claude plugin activation, marketplace installation, or translation to Codex/Grok.
 - No ambient user-home discovery. Project registry state is read from the isolated checkout only.
