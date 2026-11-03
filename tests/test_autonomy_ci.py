@@ -34,6 +34,7 @@ from stagemesh.autonomy.github_adapter import (
 )
 from stagemesh.autonomy.scope import TaskScope, deferred_items
 from stagemesh.autonomy.supervisor import Supervisor
+from stagemesh.cli import main
 from stagemesh.domain import Stage
 from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 
@@ -280,6 +281,63 @@ def test_test_observation_producer_round_trips_exactly_and_rejects_log_injection
         observation_marker(
             TestObservation("t", "../outside.py", "success", None, False)
         )
+
+
+def test_test_observation_cli_emits_the_validated_marker(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(
+        [
+            "test-observation",
+            "--test-id",
+            "tests/test_x.py::test_noop",
+            "--test-path",
+            "tests/test_x.py",
+            "--expected",
+            "success",
+            "--failure-code",
+            NO_IMPLEMENTATION_CHANGE,
+            "--provider-made-no-change",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0 and captured.err == ""
+    assert observations_from_log(captured.out) == [
+        TestObservation(
+            "tests/test_x.py::test_noop",
+            "tests/test_x.py",
+            "success",
+            NO_IMPLEMENTATION_CHANGE,
+            False,
+        )
+    ]
+    assert captured.out.count("STAGEMESH_TEST_OBSERVATION") == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("--test-id", "test\nforged"), ("--test-path", "../outside.py"), ("--failure-code", "bad code")],
+)
+def test_test_observation_cli_refuses_invalid_input_without_a_marker(
+    capsys: pytest.CaptureFixture[str], field: str, value: str
+) -> None:
+    argv = [
+        "test-observation",
+        "--test-id",
+        "test",
+        "--test-path",
+        "tests/test_x.py",
+        "--expected",
+        "failure",
+        "--failure-code",
+        "failure_code",
+        "--provider-made-change",
+    ]
+    argv[argv.index(field) + 1] = value
+
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert "STAGEMESH_TEST_OBSERVATION" not in captured.out
+    assert "test observation error:" in captured.err
 
 
 def test_scenario_g_production_really_returns_no_implementation_change_for_a_noop_provider(tmp_path: Path) -> None:

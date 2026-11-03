@@ -1503,14 +1503,118 @@ def _stopped_config(project: Path):
         return None
 
 
+def command_test_observation(args: argparse.Namespace) -> int:
+    """Emit the one validated marker format consumed by CI diagnosis."""
+    from .autonomy.ci_diagnosis import TestObservation, emit_test_observation
+
+    try:
+        emit_test_observation(
+            TestObservation(
+                test_id=args.test_id,
+                test_path=args.test_path,
+                expected=args.expected,
+                observed_failure_code=args.failure_code,
+                provider_made_change=args.provider_made_change,
+            )
+        )
+    except ValueError as exc:
+        print(f"test observation error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _resolved_driver_install_config(project: Path, args: argparse.Namespace):
+    """Resolve legacy defaults, an explicit project profile, then explicit CLI overrides."""
+    from . import continuous_driver
+    from .run_window import parse_duration
+
+    profile = None
+    if args.use_project_config:
+        profile = load_config(project).driver
+        if profile is None:
+            raise continuous_driver.DriverConfigError(
+                "--use-project-config requires a driver object in .stagemesh/config.json"
+            )
+    defaults = profile or SimpleNamespace(
+        interval_seconds=600,
+        window_seconds=2700,
+        concurrency=2,
+        max_tasks=10,
+        max_steps_per_task=8,
+        max_consecutive_failures=3,
+        auto_merge_ff=False,
+        strict_live=False,
+        integration="pr",
+    )
+    interval = defaults.interval_seconds if args.interval is None else int(parse_duration(args.interval))
+    window = defaults.window_seconds if args.window_duration is None else int(parse_duration(args.window_duration))
+    return continuous_driver.DriverConfig(
+        project=str(project),
+        state="paused",
+        interval_seconds=interval,
+        window_seconds=window,
+        concurrency=defaults.concurrency if args.concurrency is None else args.concurrency,
+        max_tasks=defaults.max_tasks if args.max_tasks is None else args.max_tasks,
+        max_steps_per_task=(
+            defaults.max_steps_per_task if args.max_steps_per_task is None else args.max_steps_per_task
+        ),
+        max_consecutive_failures=(
+            defaults.max_consecutive_failures
+            if args.max_consecutive_failures is None
+            else args.max_consecutive_failures
+        ),
+        auto_merge_ff=defaults.auto_merge_ff if args.auto_merge_ff is None else args.auto_merge_ff,
+        strict_live=defaults.strict_live if args.strict_live is None else args.strict_live,
+        integration=defaults.integration if args.integration is None else args.integration,
+    ).validate(project)
+
+
+def _driver_install_plan(project: Path, config: object) -> dict[str, object]:
+    from dataclasses import asdict
+
+    from . import continuous_driver
+    from .driver_scheduler import driver_command
+
+    return {
+        "planned": True,
+        "config": asdict(config),
+        "scheduler": {
+            "command": driver_command(project),
+            "interval_seconds": config.interval_seconds,
+            "execution_limit_seconds": continuous_driver.scheduler_limit_seconds(config),
+        },
+        "writes": [],
+        "provider_calls": 0,
+    }
+
+
 def _command_driver(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
     from . import continuous_driver
     from .driver_scheduler import DriverSchedulerError, default_driver_scheduler, driver_command
-    from .run_window import parse_duration
 
     project = Path(args.project).resolve()
+    prepared = None
+    if args.driver_command == "install":
+        try:
+            prepared = _resolved_driver_install_config(project, args)
+        except (continuous_driver.DriverConfigError, ConfigValidationError, ValueError) as exc:
+            print(f"driver error: {exc}", file=sys.stderr)
+            return 2
+        if args.plan:
+            payload = _driver_install_plan(project, prepared)
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+            else:
+                print("local continuous driver install plan (read-only)")
+                print("command: " + " ".join(str(part) for part in payload["scheduler"]["command"]))
+                print(
+                    f"interval: {payload['scheduler']['interval_seconds']}s; "
+                    f"window: {payload['config']['window_seconds']}s; "
+                    f"tasks/concurrency: {payload['config']['max_tasks']}/{payload['config']['concurrency']}"
+                )
+            return 0
     store = Store(db_path(project))
     store.migrate()
     scheduler = default_driver_scheduler(project)
@@ -1534,19 +1638,7 @@ def _command_driver(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            prepared = continuous_driver.DriverConfig(
-                project=str(project),
-                state="paused",
-                interval_seconds=int(parse_duration(args.interval)),
-                window_seconds=int(parse_duration(args.window_duration)),
-                concurrency=args.concurrency,
-                max_tasks=args.max_tasks,
-                max_steps_per_task=args.max_steps_per_task,
-                max_consecutive_failures=args.max_consecutive_failures,
-                auto_merge_ff=args.auto_merge_ff,
-                strict_live=args.strict_live,
-                integration=args.integration,
-            ).validate(project)
+            assert prepared is not None
             try:
                 previous = continuous_driver.load_config(project)
             except continuous_driver.DriverConfigError:
@@ -4512,22 +4604,49 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Required acknowledgement that later scheduled ticks may invoke the already configured provider CLIs",
     )
-    driver_install.add_argument("--interval", default="10m", help="Scheduler interval (default 10m)")
-    driver_install.add_argument("--window-duration", default="45m", help="Bound for each run-window tick (default 45m)")
-    driver_install.add_argument("--concurrency", type=int, default=2)
-    driver_install.add_argument("--max-tasks", type=int, default=10)
-    driver_install.add_argument("--max-steps-per-task", type=int, default=8)
-    driver_install.add_argument("--max-consecutive-failures", type=int, default=3)
-    driver_install.add_argument("--auto-merge-ff", action="store_true", help="Explicitly authorize the existing guarded merge policy")
-    driver_install.add_argument("--strict-live", action="store_true")
+    driver_install.add_argument(
+        "--use-project-config",
+        action="store_true",
+        help="Resolve install defaults from the driver object in .stagemesh/config.json",
+    )
+    driver_install.add_argument(
+        "--plan",
+        action="store_true",
+        help="Read-only preview of the resolved config and scheduler command; creates no runtime state or schedule",
+    )
+    driver_install.add_argument("--interval", default=None, help="Scheduler interval (legacy default 10m)")
+    driver_install.add_argument("--window-duration", default=None, help="Bound for each run-window tick (legacy default 45m)")
+    driver_install.add_argument("--concurrency", type=int, default=None)
+    driver_install.add_argument("--max-tasks", type=int, default=None)
+    driver_install.add_argument("--max-steps-per-task", type=int, default=None)
+    driver_install.add_argument("--max-consecutive-failures", type=int, default=None)
+    driver_install.add_argument(
+        "--auto-merge-ff",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Explicitly authorize (or override project authorization for) the existing guarded merge policy",
+    )
+    driver_install.add_argument("--strict-live", action=argparse.BooleanOptionalAction, default=None)
     driver_install.add_argument(
         "--integration",
         choices=("pr", "local"),
-        default="pr",
+        default=None,
         help="'pr' (default) opens PRs; 'local' integrates into the project's local base branch and is for disposable acceptance projects only",
     )
     driver_install.add_argument("--json", action="store_true")
     driver_install.set_defaults(func=command_driver)
+    observation = sub.add_parser(
+        "test-observation",
+        help="Emit one validated STAGEMESH_TEST_OBSERVATION line for CI/test harness diagnosis",
+    )
+    observation.add_argument("--test-id", required=True)
+    observation.add_argument("--test-path", required=True, help="Project-relative test file path")
+    observation.add_argument("--expected", required=True, choices=("success", "failure"))
+    observation.add_argument("--failure-code")
+    changed = observation.add_mutually_exclusive_group(required=True)
+    changed.add_argument("--provider-made-change", dest="provider_made_change", action="store_true")
+    changed.add_argument("--provider-made-no-change", dest="provider_made_change", action="store_false")
+    observation.set_defaults(func=command_test_observation)
     for name, help_text in (
         ("status", "Show durable state, scheduler presence, interrupted ticks and the last outcome"),
         ("pause", "Pause new admissions; active work drains under existing queue policy"),

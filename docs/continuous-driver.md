@@ -16,10 +16,41 @@ not run a development window immediately:
 stagemesh --project C:\path\to\project driver install --acknowledge-provider-use
 ```
 
+Preview the exact resolved configuration and scheduler command first. The preview does not create the SQLite ledger, driver record,
+schedule, or a provider call, and therefore needs no provider-use acknowledgement:
+
+```powershell
+stagemesh --project C:\path\to\project driver install --plan --json
+```
+
 The default schedule wakes every 10 minutes. Task Scheduler cadence must be an exact whole number of minutes. Each tick is bounded to
 a 45-minute `run-window`, concurrency 2, 10 tasks, 8 steps per task and three consecutive failed ticks. Override those limits only on
 the install command. The schedule runs at limited privilege, stores no credentials and calls the same Python interpreter and exact
 StageMesh source checkout that installed it.
+
+Projects may keep reusable install defaults in `.stagemesh/config.json`. Reading this object never installs or enables the driver;
+the operator must explicitly add `--use-project-config` to the preview or install command. Install flags override profile values.
+
+```json
+{
+  "driver": {
+    "interval": "10m",
+    "window_duration": "45m",
+    "concurrency": 2,
+    "max_tasks": 10,
+    "max_steps_per_task": 8,
+    "max_consecutive_failures": 3,
+    "auto_merge_ff": false,
+    "strict_live": false,
+    "integration": "pr"
+  }
+}
+```
+
+Use `driver install --plan --use-project-config --json` to inspect the resolved profile, then add
+`--acknowledge-provider-use` for the actual installation. Unknown keys, invalid types and non-minute scheduler intervals fail before
+any runtime state or schedule is created. The mutable installed state remains in `.stagemesh/continuous-driver.json`; StageMesh never
+rewrites the project config.
 
 Automatic landing remains separately gated. The driver defaults to PR-only mode. `--auto-merge-ff` is an explicit install-time choice
 and still uses `run-window`'s exact-candidate, hosted-check, branch-policy and Git-lease gates. It never authorizes a protected merge,
