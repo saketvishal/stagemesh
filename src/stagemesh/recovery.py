@@ -47,6 +47,7 @@ from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
 from .operator_actions import OperatorActionError, _operator, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
+from .planning_execution import planning_execution_receipts
 from .redaction import redact_mapping
 from .remediation import latest_candidate_findings
 from .review import adverse_gate, adverse_outcome
@@ -1098,6 +1099,7 @@ def _planning_summary(store: Store, project: Path, task_id: str) -> dict[str, An
     challenge_required = config.require_plan_challenge
     spec_payload, approval = load_planning_artifacts(project, task_id)
     challenge_payload = load_planning_challenge(project, task_id)
+    execution_receipts = planning_execution_receipts(store, task_id)
     summary: dict[str, Any] = {
         "required": required,
         "challenge_required": challenge_required,
@@ -1108,6 +1110,8 @@ def _planning_summary(store: Store, project: Path, task_id: str) -> dict[str, An
         "spec_present": spec_payload is not None,
         "approval_present": approval is not None,
         "challenge_present": challenge_path.is_file(),
+        "planner_execution": execution_receipts["planner"],
+        "challenger_execution": execution_receipts["challenger"],
         "next_action": None,
         "reason": "" if required else "the approved-spec gate is disabled",
         "approved_scope": [],
