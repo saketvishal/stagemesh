@@ -50,6 +50,12 @@ def plan_capability_vendor(
     destination = VENDOR_ROOT / capability_id
     relative_source = _registered_source(destination, kind)
     permissions = ["workspace-read", "subprocess"] if kind == "mcp" else ["workspace-read"]
+    if any(item.id == capability_id for item in load_registry(root)):
+        raise CapabilityRegistryError(f"capability is already registered: {capability_id}")
+    target = root / destination
+    _validate_destination(root, target)
+    rows = _file_rows(files)
+    source_tree_sha256 = _tree_digest(rows)
     entry = validate_capability_declaration(
         root,
         capability_id=capability_id,
@@ -58,13 +64,8 @@ def plan_capability_vendor(
         providers=providers,
         stages=stages,
         permissions=permissions,
+        source_tree_sha256=source_tree_sha256,
     )
-    if any(item.id == capability_id for item in load_registry(root)):
-        raise CapabilityRegistryError(f"capability is already registered: {capability_id}")
-    target = root / destination
-    _validate_destination(root, target)
-    rows = _file_rows(files)
-    source_tree_sha256 = _tree_digest(rows)
     receipt = {
         "format_version": 1,
         "capability_id": capability_id,
@@ -183,6 +184,7 @@ def vendor_capability(
                 ),
                 enabled=False,
                 update=False,
+                source_tree_sha256=str(plan["source"]["tree_sha256"]),
             )
         except Exception:
             _remove_exact_target(root, target)
@@ -232,11 +234,21 @@ def _validated_source(
     if source.is_symlink() or not path.exists():
         raise CapabilityRegistryError("vendor source must exist and must not be a symlink")
     if kind == "skill":
-        if not path.is_file() or path.name != "SKILL.md":
-            raise CapabilityRegistryError("skill vendor source must be one standalone SKILL.md file")
-        data = _read_bounded(path, MAX_SINGLE_FILE_BYTES)
-        digest = hashlib.sha256(data).hexdigest()
-        return [(Path("SKILL.md"), data)], path.name, True, digest
+        if path.is_file() and path.name == "SKILL.md":
+            data = _read_bounded(path, MAX_SINGLE_FILE_BYTES)
+            return (
+                [(Path("SKILL.md"), data)],
+                path.name,
+                True,
+                hashlib.sha256(data).hexdigest(),
+            )
+        if path.is_dir() and (path / "SKILL.md").is_file():
+            files = _skill_package_files(path)
+            skill_data = next(data for relative, data in files if relative == Path("SKILL.md"))
+            return files, path.name, True, hashlib.sha256(skill_data).hexdigest()
+        raise CapabilityRegistryError(
+            "skill vendor source must be a SKILL.md file or a directory containing SKILL.md"
+        )
     if kind == "mcp":
         if not path.is_file():
             raise CapabilityRegistryError("MCP vendor source must be one manifest file")
@@ -287,6 +299,41 @@ def _plugin_files(root: Path) -> list[tuple[Path, bytes]]:
                 f"skills-only Claude plugin vendor refuses unsupported file: {relative.as_posix()}"
             )
         data = _read_bounded(item, MAX_SINGLE_FILE_BYTES)
+        total += len(data)
+        if total > MAX_VENDOR_BYTES:
+            raise CapabilityRegistryError(f"vendor source exceeds {MAX_VENDOR_BYTES} bytes")
+        accepted.append((relative, data))
+    return accepted
+
+
+def _skill_package_files(root: Path) -> list[tuple[Path, bytes]]:
+    accepted: list[tuple[Path, bytes]] = []
+    entries = 0
+    total = 0
+    for item in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix()):
+        entries += 1
+        if entries > MAX_VENDOR_FILES:
+            raise CapabilityRegistryError(f"vendor source exceeds {MAX_VENDOR_FILES} entries")
+        relative = item.relative_to(root)
+        if item.is_symlink():
+            raise CapabilityRegistryError(f"vendor source refuses symlink: {relative.as_posix()}")
+        if item.is_dir():
+            continue
+        if not item.is_file() or relative.as_posix() == RECEIPT_NAME:
+            raise CapabilityRegistryError(
+                f"skill package vendor refuses unsupported file: {relative.as_posix()}"
+            )
+        data = _read_bounded(item, MAX_SINGLE_FILE_BYTES)
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise CapabilityRegistryError(
+                f"skill package files must be UTF-8 text: {relative.as_posix()}"
+            ) from exc
+        if "\x00" in text:
+            raise CapabilityRegistryError(
+                f"skill package files must not contain NUL bytes: {relative.as_posix()}"
+            )
         total += len(data)
         if total > MAX_VENDOR_BYTES:
             raise CapabilityRegistryError(f"vendor source exceeds {MAX_VENDOR_BYTES} bytes")

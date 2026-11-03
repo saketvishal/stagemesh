@@ -49,6 +49,7 @@ class CapabilityDefinition:
     stages: tuple[str, ...]
     permissions: tuple[str, ...]
     content_sha256: str | None = None
+    source_tree_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,11 +59,12 @@ class CapabilityAttachment:
     source: str
     permissions: tuple[str, ...]
     content_sha256: str
+    source_tree_sha256: str | None = None
     kind: str = "skill"
     runtime: dict[str, object] | None = None
 
     def audit_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "capability_id": self.id,
             "kind": self.kind,
             "origin": "project-registry",
@@ -83,6 +85,9 @@ class CapabilityAttachment:
                 else {}
             ),
         }
+        if self.source_tree_sha256 is not None:
+            payload["source_tree_sha256"] = self.source_tree_sha256
+        return payload
 
 
 def load_registry(project: Path) -> tuple[CapabilityDefinition, ...]:
@@ -405,6 +410,7 @@ def validate_capability_declaration(
     providers: list[str],
     stages: list[str],
     permissions: list[str],
+    source_tree_sha256: str | None = None,
 ) -> dict[str, object]:
     """Validate policy fields for a future project-local source without reading it."""
     item = _definition(
@@ -417,6 +423,11 @@ def validate_capability_declaration(
             "providers": providers,
             "stages": stages,
             "permissions": permissions,
+            **(
+                {"source_tree_sha256": source_tree_sha256}
+                if source_tree_sha256 is not None
+                else {}
+            ),
         },
     )
     return _definition_payload(item)
@@ -433,6 +444,7 @@ def register_capability(
     permissions: list[str],
     enabled: bool = False,
     update: bool = False,
+    source_tree_sha256: str | None = None,
 ) -> dict[str, object]:
     """Atomically register one already-present project capability."""
     plan, payload = _registration_change(
@@ -445,6 +457,7 @@ def register_capability(
         permissions=permissions,
         enabled=enabled,
         update=update,
+        source_tree_sha256=source_tree_sha256,
     )
     if plan["changed"]:
         _write_registry(Path(project).resolve(), payload)
@@ -537,6 +550,13 @@ def resolve_attachments(
         target = _source_path(root, item.source)
         if not _installed(item, target):
             raise CapabilityRegistryError(f"requested capability is not installed: {capability_id}")
+        if item.source_tree_sha256 is not None:
+            observed_tree, tree_error = _observed_vendor_tree(item, target)
+            if observed_tree != item.source_tree_sha256:
+                detail = tree_error or f"observed {observed_tree}"
+                raise CapabilityRegistryError(
+                    f"requested capability source tree drifted: {capability_id}; {detail}"
+                )
         runtime = None
         if item.kind == "mcp":
             if provider != "codex":
@@ -583,6 +603,7 @@ def resolve_attachments(
                 source=item.source,
                 permissions=item.permissions,
                 content_sha256=observed_digest,
+                source_tree_sha256=item.source_tree_sha256,
                 kind=item.kind,
                 runtime=runtime,
             )
@@ -714,6 +735,7 @@ def task_usage_from_connection(
                     "providers": set(),
                     "stages": set(),
                     "content_sha256s": set(),
+                    "source_tree_sha256s": set(),
                     "last_observed_at": None,
                 },
             )
@@ -730,6 +752,14 @@ def task_usage_from_connection(
                 and re.fullmatch(r"[0-9a-f]{64}", content_sha256)
             ):
                 item["content_sha256s"].add(content_sha256)  # type: ignore[union-attr]
+            source_tree_sha256 = payload.get("source_tree_sha256")
+            if (
+                isinstance(source_tree_sha256, str)
+                and re.fullmatch(r"[0-9a-f]{64}", source_tree_sha256)
+            ):
+                item["source_tree_sha256s"].add(  # type: ignore[union-attr]
+                    source_tree_sha256
+                )
             item["last_observed_at"] = float(created_at)
     projected: dict[str, dict[str, object]] = {}
     for capability_id, item in usage.items():
@@ -756,6 +786,9 @@ def task_usage_from_connection(
             "providers": sorted(item["providers"]),  # type: ignore[arg-type]
             "stages": sorted(item["stages"]),  # type: ignore[arg-type]
             "content_sha256s": sorted(item["content_sha256s"]),  # type: ignore[arg-type]
+            "source_tree_sha256s": sorted(  # type: ignore[arg-type]
+                item["source_tree_sha256s"]
+            ),
             "last_observed_at": item["last_observed_at"],
         }
     return task_exists, projected
@@ -797,10 +830,21 @@ def task_capability_summary(
         else:
             current_digest = row["observed_content_sha256"]
             evidence_digests = usage["content_sha256s"]
+            current_tree_digest = row["observed_source_tree_sha256"]
+            evidence_tree_digests = usage["source_tree_sha256s"]
+            tree_evidence_matches = (
+                True
+                if row["source_tree_sha256"] is None
+                else bool(evidence_tree_digests)
+                and isinstance(current_tree_digest, str)
+                and current_tree_digest in evidence_tree_digests
+            )
             evidence_matches_current = (
                 None
                 if not evidence_digests
-                else isinstance(current_digest, str) and current_digest in evidence_digests
+                else isinstance(current_digest, str)
+                and current_digest in evidence_digests
+                and tree_evidence_matches
             )
             invocation = usage["status"]
             if invocation in {"loaded", "invoked"} and evidence_matches_current is not True:
@@ -824,6 +868,8 @@ def task_capability_summary(
                         "permissions",
                         "content_sha256",
                         "observed_content_sha256",
+                        "source_tree_sha256",
+                        "observed_source_tree_sha256",
                         "integrity",
                     )
                 },
@@ -859,6 +905,7 @@ def _empty_usage() -> dict[str, object]:
         "providers": [],
         "stages": [],
         "content_sha256s": [],
+        "source_tree_sha256s": [],
         "last_observed_at": None,
     }
 
@@ -878,6 +925,8 @@ def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:
     configuration_error = None
     runtime_installed = installed
     observed_content_sha256 = None
+    observed_source_tree_sha256 = None
+    source_tree_error = None
     if installed and item.kind == "mcp":
         try:
             config = load_mcp_manifest(target, root)
@@ -901,11 +950,15 @@ def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:
             configuration_valid = False
             runtime_installed = False
             configuration_error = str(exc)
+    if installed and item.source_tree_sha256 is not None:
+        observed_source_tree_sha256, source_tree_error = _observed_vendor_tree(item, target)
     integrity = (
         "unavailable"
         if observed_content_sha256 is None
-        else "unpinned"
-        if item.content_sha256 is None
+        else "drifted"
+        if item.source_tree_sha256 is not None
+        and item.source_tree_sha256 != observed_source_tree_sha256
+        else "unpinned" if item.content_sha256 is None
         else "verified"
         if item.content_sha256 == observed_content_sha256
         else "drifted"
@@ -936,6 +989,9 @@ def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:
         "permissions": list(item.permissions),
         "content_sha256": item.content_sha256,
         "observed_content_sha256": observed_content_sha256,
+        "source_tree_sha256": item.source_tree_sha256,
+        "observed_source_tree_sha256": observed_source_tree_sha256,
+        "source_tree_error": source_tree_error,
         "integrity": integrity,
         "invocation": "not-observed",
     }
@@ -953,6 +1009,8 @@ def _definition_payload(item: CapabilityDefinition) -> dict[str, object]:
     }
     if item.content_sha256 is not None:
         payload["content_sha256"] = item.content_sha256
+    if item.source_tree_sha256 is not None:
+        payload["source_tree_sha256"] = item.source_tree_sha256
     return payload
 
 
@@ -967,6 +1025,7 @@ def _registration_change(
     permissions: list[str],
     enabled: bool,
     update: bool,
+    source_tree_sha256: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     root = Path(project).resolve()
     existing = load_registry(root)
@@ -988,6 +1047,11 @@ def _registration_change(
         "providers": providers,
         "stages": stages,
         "permissions": permissions,
+        **(
+            {"source_tree_sha256": source_tree_sha256}
+            if source_tree_sha256 is not None
+            else {}
+        ),
     }
     item = _definition(root, raw)
     row = _inventory_row(root, item)
@@ -1205,7 +1269,7 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
         raise CapabilityRegistryError("each capability must be an object")
     allowed = {
         "id", "kind", "source", "enabled", "providers", "stages", "permissions",
-        "content_sha256",
+        "content_sha256", "source_tree_sha256",
     }
     if set(raw) - allowed:
         raise CapabilityRegistryError("capability contains unsupported fields")
@@ -1270,6 +1334,14 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
         raise CapabilityRegistryError(
             f"capability {capability_id} content_sha256 must be a lowercase SHA-256 digest"
         )
+    source_tree_sha256 = raw.get("source_tree_sha256")
+    if source_tree_sha256 is not None and (
+        not isinstance(source_tree_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", source_tree_sha256)
+    ):
+        raise CapabilityRegistryError(
+            f"capability {capability_id} source_tree_sha256 must be a lowercase SHA-256 digest"
+        )
     return CapabilityDefinition(
         id=capability_id,
         kind=kind,
@@ -1279,6 +1351,7 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
         stages=stages,
         permissions=permissions,
         content_sha256=content_sha256,
+        source_tree_sha256=source_tree_sha256,
     )
 
 
@@ -1317,3 +1390,110 @@ def _installed(item: CapabilityDefinition, target: Path) -> bool:
     if item.kind == "claude-plugin":
         return target.is_dir()
     return target.exists()
+
+
+def _observed_vendor_tree(
+    item: CapabilityDefinition, target: Path
+) -> tuple[str | None, str | None]:
+    """Verify a bounded vendoring receipt and every copied file without trusting it."""
+    base = target if item.kind == "claude-plugin" else target.parent
+    receipt = base / ".stagemesh-vendor.json"
+    try:
+        if receipt.is_symlink() or not receipt.is_file():
+            raise ValueError("vendored capability receipt is missing or unsafe")
+        if receipt.stat().st_size > 256 * 1024:
+            raise ValueError("vendored capability receipt exceeds 262144 bytes")
+        payload = json.loads(receipt.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict) or set(payload) != {
+            "format_version",
+            "capability_id",
+            "kind",
+            "provenance",
+            "source_name",
+            "source_tree_sha256",
+            "files",
+        }:
+            raise ValueError("vendored capability receipt has an unsupported shape")
+        if (
+            payload.get("format_version") != 1
+            or payload.get("capability_id") != item.id
+            or payload.get("kind") != item.kind
+            or payload.get("provenance") != "operator-supplied-local-source"
+        ):
+            raise ValueError("vendored capability receipt identity does not match the registry")
+        rows = payload.get("files")
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 128:
+            raise ValueError("vendored capability receipt must list 1 to 128 files")
+        expected: dict[str, tuple[int, str]] = {}
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {"path", "bytes", "sha256"}:
+                raise ValueError("vendored capability receipt contains an invalid file row")
+            value = row.get("path")
+            relative = Path(value) if isinstance(value, str) else Path()
+            if (
+                not isinstance(value, str)
+                or not value
+                or "\\" in value
+                or relative.is_absolute()
+                or relative.drive
+                or ".." in relative.parts
+                or value == ".stagemesh-vendor.json"
+            ):
+                raise ValueError("vendored capability receipt contains an unsafe file path")
+            size = row.get("bytes")
+            sha256 = row.get("sha256")
+            if (
+                isinstance(size, bool)
+                or not isinstance(size, int)
+                or not 0 <= size <= 256 * 1024
+                or not isinstance(sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+                or value in expected
+            ):
+                raise ValueError("vendored capability receipt contains invalid file evidence")
+            expected[value] = (size, sha256)
+
+        actual: list[dict[str, object]] = []
+        total = 0
+        entries = 0
+        for path in sorted(base.rglob("*"), key=lambda value: value.relative_to(base).as_posix()):
+            relative = path.relative_to(base).as_posix()
+            if relative == ".stagemesh-vendor.json":
+                continue
+            entries += 1
+            if entries > 128:
+                raise ValueError("vendored capability tree exceeds 128 entries")
+            if path.is_symlink():
+                raise ValueError(f"vendored capability tree contains a symlink: {relative}")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise ValueError(f"vendored capability tree contains an unsupported entry: {relative}")
+            data = path.read_bytes()
+            total += len(data)
+            if len(data) > 256 * 1024 or total > 2 * 1024 * 1024:
+                raise ValueError("vendored capability tree exceeds its byte limits")
+            actual.append(
+                {
+                    "path": relative,
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
+        actual_by_path = {
+            str(row["path"]): (int(row["bytes"]), str(row["sha256"])) for row in actual
+        }
+        if actual_by_path != expected:
+            raise ValueError("vendored capability files do not match the receipt")
+        digest = hashlib.sha256()
+        for row in actual:
+            digest.update(str(row["path"]).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(row["sha256"]).encode("ascii"))
+            digest.update(b"\n")
+        observed = digest.hexdigest()
+        if payload.get("source_tree_sha256") != observed:
+            raise ValueError("vendored capability receipt tree digest does not match its files")
+        return observed, None
+    except (OSError, json.JSONDecodeError, UnicodeError, ValueError) as exc:
+        return None, str(exc)[:300]

@@ -103,8 +103,9 @@ stagemesh --project C:\path\to\project capabilities vendor reviewed-guidance `
 ```
 
 Remove `--plan` to copy into `.stagemesh/vendor/capabilities/<id>` and atomically register the copied source. The declaration is always
-disabled; enablement and task selection remain separate opt-ins. Vendoring accepts a standalone `SKILL.md`, one bounded StageMesh MCP
-manifest, or a skills-only Claude plugin containing only `.claude-plugin/plugin.json` and `skills/<name>/SKILL.md`. It refuses source or
+disabled; enablement and task selection remain separate opt-ins. Vendoring accepts a standalone `SKILL.md`, a bounded UTF-8 skill
+package directory containing `SKILL.md` plus reviewed reference/example files, one bounded StageMesh MCP manifest, or a skills-only
+Claude plugin containing only `.claude-plugin/plugin.json` and `skills/<name>/SKILL.md`. It refuses source or
 destination symlinks, traversal, overwrite, unsupported plugin files, more than 128 entries, a file over 256 KiB, or more than 2 MiB of
 accepted plugin content. A deterministic receipt records relative filenames, byte counts, and SHA-256 digests without storing the source
 absolute path or file contents. A failed registration removes the staged destination.
@@ -112,8 +113,11 @@ absolute path or file contents. A failed registration removes the staged destina
 This is a local copy/vendor operation, not a network, marketplace, package-manager, or executable runtime install. Its report keeps
 `vendored`, `registered`, `enabled`, `runtime_installed`, `available`, `attached`, `loaded`, and `invoked` separate and reports zero
 provider, network, subprocess, package-install, database, and user-home write calls. MCP vendoring can confirm that the declared command
-is currently on `PATH`, but it does not start the server. Standalone skill vendoring intentionally accepts only one `SKILL.md`; packages
-whose instructions depend on extra reference or script files must remain explicitly project-vendored and use discovery/registration.
+is currently on `PATH`, but it does not start the server. Skill-package files are copied as inert reviewed text; vendoring does not run a
+script or grant an additional permission. The registry pins both the exact `SKILL.md` bytes and the complete copied-tree digest. Missing,
+added, changed, linked, binary, oversized, or receipt-mismatched package content makes the capability drifted and unavailable before
+attachment. The frozen task capability policy and redacted attachment/load/invocation receipts also include that tree pin, so evidence
+from an older support-file tree cannot satisfy the current package identity.
 
 ```powershell
 stagemesh --project C:\path\to\project capabilities register domain-review `
@@ -139,7 +143,8 @@ stagemesh --project C:\path\to\project capabilities pin domain-review --plan --j
 stagemesh --project C:\path\to\project capabilities pin domain-review
 ```
 
-The pin uses exact `SKILL.md` bytes, the deterministic aggregate of accepted plugin skill components, or exact MCP manifest bytes. A
+The content pin uses exact `SKILL.md` bytes, the deterministic aggregate of accepted plugin skill components, or exact MCP manifest bytes.
+Locally vendored sources also carry the deterministic copied-tree pin described above. A
 matching pin reports `verified`; a changed source reports `drifted`, is not available/usable, and is rejected before provider or MCP
 launch. Pin refresh is never automatic: the operator must review the changed source and run the explicit command. Audit reports compare
 attachment/load/invocation evidence digests with current content, so historical evidence for older bytes cannot masquerade as current

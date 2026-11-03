@@ -22,6 +22,7 @@ from stagemesh.capabilities import (
     capability_policy_snapshot,
     inventory,
     resolve_attachments,
+    set_capability_enabled,
     skill_evidence_mode,
     task_capability_summary,
 )
@@ -1312,6 +1313,7 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
     assert rows["domain-review"]["usage"] == {
         "attached": 1,
         "content_sha256s": [current_digests["domain-review"]],
+        "source_tree_sha256s": [],
         "evidence_missing": 0,
         "invoked": 0,
         "last_observed_at": rows["domain-review"]["usage"]["last_observed_at"],
@@ -2902,6 +2904,121 @@ def test_capability_vendor_refuses_source_and_destination_symlinks(tmp_path: Pat
             stages=["IMPLEMENT"],
         )
     assert list(outside.iterdir()) == []
+
+
+def test_capability_vendor_copies_and_pins_bounded_skill_package(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    package = tmp_path / "systematic-debugging"
+    package.mkdir()
+    (package / "SKILL.md").write_text(
+        "# Debugging\n\nRead [root cause](root-cause.md).\n", encoding="utf-8"
+    )
+    (package / "root-cause.md").write_text("# Root cause tracing\n", encoding="utf-8")
+    examples = package / "examples"
+    examples.mkdir()
+    (examples / "find-polluter.sh").write_text("#!/bin/sh\necho example\n", encoding="utf-8")
+
+    payload = vendor_capability(
+        project,
+        capability_id="systematic-debugging",
+        kind="skill",
+        source=package,
+        providers=["codex", "claude", "grok"],
+        stages=["IMPLEMENT"],
+    )
+
+    target = project / ".stagemesh" / "vendor" / "capabilities" / "systematic-debugging"
+    row = inventory(project)[0]
+    frozen = json.loads(
+        capability_policy_snapshot(project, ["systematic-debugging"])["canonical_json"]
+    )["capabilities"][0]
+    assert (target / "root-cause.md").is_file()
+    assert (target / "examples" / "find-polluter.sh").is_file()
+    assert payload["source"]["file_count"] == 3
+    assert row["integrity"] == "verified"
+    assert row["source_tree_sha256"] == row["observed_source_tree_sha256"]
+    assert frozen["source_tree_sha256"] == row["source_tree_sha256"]
+
+
+def test_vendored_skill_package_drift_fails_closed_before_attachment(tmp_path: Path) -> None:
+    package = tmp_path / "source"
+    package.mkdir()
+    (package / "SKILL.md").write_text("# Skill\n\nRead reference.md.\n", encoding="utf-8")
+    (package / "reference.md").write_text("original\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    vendor_capability(
+        project,
+        capability_id="package-skill",
+        kind="skill",
+        source=package,
+        providers=["codex"],
+        stages=["IMPLEMENT"],
+    )
+    set_capability_enabled(project, "package-skill", True)
+    (attachment,) = resolve_attachments(
+        project, ["package-skill"], provider="codex", stage="IMPLEMENT"
+    )
+    assert attachment.audit_payload()["source_tree_sha256"] == inventory(project)[0][
+        "source_tree_sha256"
+    ]
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Use package", source_id="package-task")
+    store.add_audit_event(
+        "capability.loaded",
+        {
+            "task_id": task_id,
+            "provider": "codex",
+            "stage": "IMPLEMENT",
+            "capability_id": "package-skill",
+            "content_sha256": attachment.content_sha256,
+            "source_tree_sha256": attachment.source_tree_sha256,
+        },
+    )
+    current = task_capability_summary(
+        project, store.conn, task_id, requested=("package-skill",)
+    )["capabilities"][0]
+    assert current["evidence_matches_current"] is True
+
+    copied = project / ".stagemesh" / "vendor" / "capabilities" / "package-skill"
+    (copied / "reference.md").write_text("changed\n", encoding="utf-8")
+    row = inventory(project)[0]
+    assert row["integrity"] == "drifted"
+    assert row["available"] is False and row["usable"] is False
+    assert "do not match the receipt" in row["source_tree_error"]
+    stale = task_capability_summary(
+        project, store.conn, task_id, requested=("package-skill",)
+    )["capabilities"][0]
+    assert stale["invocation"] == "evidence-digest-mismatch"
+    assert stale["evidence_matches_current"] is False
+    with pytest.raises(CapabilityRegistryError, match="source tree drifted"):
+        resolve_attachments(
+            project, ["package-skill"], provider="codex", stage="IMPLEMENT"
+        )
+    store.close()
+
+
+def test_vendored_skill_package_refuses_binary_support_files(tmp_path: Path) -> None:
+    package = tmp_path / "source"
+    package.mkdir()
+    (package / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+    (package / "payload.bin").write_bytes(b"text\x00payload")
+    project = tmp_path / "project"
+    project.mkdir()
+
+    with pytest.raises(CapabilityRegistryError, match="NUL bytes"):
+        vendor_capability(
+            project,
+            capability_id="package-skill",
+            kind="skill",
+            source=package,
+            providers=["codex"],
+            stages=["IMPLEMENT"],
+        )
+    assert not (project / ".stagemesh").exists()
 
 
 def test_capability_vendor_mcp_reports_runtime_separately_without_starting_it(

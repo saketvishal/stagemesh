@@ -209,6 +209,9 @@ def loaded_receipts(
             "observed_before_first_recorded_mutation": True,
             "invocation": "observed-load",
         }
+        source_tree_sha256 = by_id[capability_id].get("source_tree_sha256")
+        if isinstance(source_tree_sha256, str) and source_tree_sha256:
+            receipt["source_tree_sha256"] = source_tree_sha256
         if receipt["kind"] == "claude-plugin":
             receipt["components"] = list(components.get(capability_id, ()))
         receipts.append(receipt)
@@ -321,8 +324,9 @@ def mcp_invocation_receipts(
     """Create redacted MCP invocation receipts without arguments, results, or paths."""
     by_id = {str(item.get("capability_id")): item for item in attachments}
     tools = dict(observation.tools)
-    return [
-        {
+    receipts: list[dict[str, object]] = []
+    for capability_id in observation.invoked:
+        receipt: dict[str, object] = {
             "capability_id": capability_id,
             "kind": "mcp",
             "content_sha256": str(by_id[capability_id].get("content_sha256") or ""),
@@ -330,8 +334,11 @@ def mcp_invocation_receipts(
             "tools": list(tools[capability_id]),
             "invocation": "observed",
         }
-        for capability_id in observation.invoked
-    ]
+        source_tree_sha256 = by_id[capability_id].get("source_tree_sha256")
+        if isinstance(source_tree_sha256, str) and source_tree_sha256:
+            receipt["source_tree_sha256"] = source_tree_sha256
+        receipts.append(receipt)
+    return receipts
 
 
 def _mcp_tool_call(item: dict[str, Any], servers: tuple[str, ...]) -> tuple[str, str] | None:

@@ -5219,7 +5219,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--kind", required=True, choices=("skill", "mcp", "claude-plugin")
     )
     capability_vendor.add_argument(
-        "--source", required=True, help="Explicit local SKILL.md, MCP manifest, or plugin directory"
+        "--source",
+        required=True,
+        help="Explicit local SKILL.md or skill directory, MCP manifest, or plugin directory",
     )
     capability_vendor.add_argument("--provider", action="append", required=True)
     capability_vendor.add_argument(
