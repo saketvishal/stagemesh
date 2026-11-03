@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import AutoPlanError, create_contract, outside_label_selector, refresh_stale_generated_contract
+from .auto_plan import (
+    AutoPlanError,
+    create_contract,
+    outside_label_selector,
+    refresh_stale_generated_contract,
+)
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_binding import contract_for_candidate
@@ -928,8 +933,8 @@ def run_ready(
         recovered.extend(_recover_dead(store, selected))  # this runner is about to drive it: an owner-less stage row is its own
         if store.get_task(selected)["status"] == TaskStatus.BLOCKED:
             from .block_kinds import classify_block
-            from .scheduling import _source_refusal_reason
             from .observability import _latest_blocked_reason
+            from .scheduling import _source_refusal_reason
 
             block_info = classify_block(store, selected)
             block_reason = block_info.reason if block_info else None

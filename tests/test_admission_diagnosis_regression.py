@@ -14,11 +14,8 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import sys
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from stagemesh.block_kinds import BlockKind, classify_block
 from stagemesh.cli import command_retry_task
@@ -26,9 +23,8 @@ from stagemesh.domain import TaskStatus
 from stagemesh.operator_actions import task_details
 from stagemesh.persistence import Store
 from stagemesh.recovery import task_doctor
-from stagemesh.run_ready import RunReadyRefusal, run_ready
+from stagemesh.run_ready import run_ready
 from stagemesh.task_sources import (
-    ConfiguredGitHubTaskSource,
     DiscoveredTask,
     sync_source,
 )
@@ -180,6 +176,34 @@ def test_command_retry_task_refuses_when_source_condition_unchanged(tmp_path: Pa
 
         # Task remains BLOCKED instead of looping to OPEN
         assert store.get_task(task_id)["status"] == TaskStatus.BLOCKED
+    finally:
+        store.close()
+
+
+def test_command_retry_task_fails_closed_when_source_refresh_errors(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = _store(tmp_path)
+    project = tmp_path
+    (project / ".stagemesh" / "config.json").write_text("{}", encoding="utf-8")
+    try:
+        task_id = store.upsert_task("Issue 423", source="github", source_id="423")
+        store.block_task(task_id)
+
+        def fail_sync(*_args, **_kwargs) -> None:
+            raise RuntimeError("SENSITIVE_MARKER")
+
+        monkeypatch.setattr("stagemesh.cli._sync_all_sources", fail_sync)
+
+        args = argparse.Namespace(project=str(project), task=task_id, json=False)
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            exit_code = command_retry_task(args)
+
+        assert exit_code == 2
+        assert store.get_task(task_id)["status"] == TaskStatus.BLOCKED
+        assert "source eligibility could not be refreshed (RuntimeError)" in stderr.getvalue()
+        assert "SENSITIVE_MARKER" not in stderr.getvalue()
     finally:
         store.close()
 

@@ -30,15 +30,20 @@ from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .blocked_recovery import can_auto_retry
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
-from .capabilities import CapabilityRegistryError
+from .capabilities import CapabilityRegistryError, skill_evidence_mode
 from .capabilities import inventory as capability_inventory
-from .capabilities import skill_evidence_mode
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
-from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, StageMeshConfig, TaskSelectionConfig, load_config
+from .config import (
+    BALANCED_PROVIDER_POOLS,
+    ConfigValidationError,
+    StageMeshConfig,
+    TaskSelectionConfig,
+    load_config,
+)
 from .config_migration import (
     config_path_for,
     plan_provider_stage_command_migration,
@@ -70,8 +75,8 @@ from .operator import operator_report
 from .operator_actions import (
     OperatorActionError,
     adopt_candidate,
-    recover_stale,
     recover_implementation_identity,
+    recover_stale,
     release_unknown_execution,
     task_details,
 )
@@ -1814,7 +1819,7 @@ def _selection_policy(config: StageMeshConfig, args: argparse.Namespace) -> Task
 
 
 def _prepare_selection_scope(store, project, config, args, *, task_id=None):
-    from .selection_scope import ScopeError, attach, refresh, resolve_scope, preview
+    from .selection_scope import ScopeError, attach, preview, refresh, resolve_scope
 
     try:
         if (getattr(args, "label", None) is not None or getattr(args, "resume_scope", None)) and (
@@ -2149,8 +2154,14 @@ def command_retry_task(args: argparse.Namespace) -> int:
         return 2
     try:
         _sync_all_sources(store, project, config, args.task)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - a stale eligibility snapshot must never authorize retry.
+        print(
+            f"retry refused: source eligibility could not be refreshed ({type(exc).__name__}); "
+            f"task {args.task} remains blocked",
+            file=sys.stderr,
+        )
+        store.close()
+        return 2
     task = store.get_task(args.task)
     if task is None:
         print(f"task does not exist: {args.task}", file=sys.stderr)
