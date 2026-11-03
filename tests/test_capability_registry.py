@@ -20,6 +20,7 @@ from stagemesh.capabilities import (
     inventory,
     resolve_attachments,
     skill_evidence_mode,
+    task_capability_summary,
 )
 from stagemesh.capability_discovery import discover_capabilities
 from stagemesh.capacity import CapacityKind
@@ -465,7 +466,6 @@ def test_inventory_distinguishes_declared_enabled_installed_adapter_and_invocati
             ),
         ],
     )
-
     rows = {row["id"]: row for row in inventory(tmp_path)}
 
     assert rows["domain-review"]["declared"] is True
@@ -1202,6 +1202,10 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
             ),
         ],
     )
+    current_digests = {
+        str(row["id"]): str(row["observed_content_sha256"])
+        for row in inventory(tmp_path)
+    }
     database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
     store = Store(database)
     store.migrate()
@@ -1217,7 +1221,7 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
                 "kind": "skill",
                 "origin": "project-registry",
                 "source": "agent-skills/domain-review/SKILL.md",
-                "content_sha256": "a" * 64,
+                    "content_sha256": current_digests["domain-review"],
                 "permissions": ["workspace-read"],
                 "selection": "contract",
                 "status": "attached",
@@ -1245,7 +1249,7 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
                 "kind": "mcp",
                 "origin": "project-registry",
                 "source": ".stagemesh/mcp/serena.json",
-                "content_sha256": "b" * 64,
+                "content_sha256": current_digests["serena"],
                 "permissions": ["workspace-read", "subprocess"],
                 "selection": "contract",
                 "status": "configured",
@@ -1274,6 +1278,7 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
     assert rows["domain-review"]["invocation"] == "loaded"
     assert rows["domain-review"]["usage"] == {
         "attached": 1,
+        "content_sha256s": [current_digests["domain-review"]],
         "evidence_missing": 0,
         "invoked": 0,
         "last_observed_at": rows["domain-review"]["usage"]["last_observed_at"],
@@ -1504,6 +1509,7 @@ def test_discovery_lists_multiple_vendored_skills_and_previews_registration_with
         ]
     ) == 0
     plan = json.loads(capsys.readouterr().out)
+    assert len(plan["entry"].pop("content_sha256")) == 64
     assert plan["entry"] == {
         "enabled": False,
         "id": "writing-plans",
@@ -1797,6 +1803,7 @@ def test_task_capability_preflight_reuses_provider_and_stage_compatibility(
     assert capability["installed"] is True
     assert capability["available"] is True
     assert capability["enabled"] is True
+    assert capability["integrity"] == "unpinned"
     assert capability["eligible_routes"] == [
         {"provider": "test", "stage": "IMPLEMENT"},
         {"provider": "test", "stage": "REVIEW"},
@@ -2087,3 +2094,273 @@ def test_capability_preflight_fails_closed_when_observed_events_are_unsupported(
     ]
     assert all("observed skill loading is unsupported" in reason for reason in reasons)
     assert report["provider_calls"] == 0 and report["writes"] == []
+
+
+def test_capability_registration_pins_each_supported_source_kind(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _claude_plugin(tmp_path)
+    _mcp_manifest(tmp_path)
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        json.dumps({"format_version": 1, "capabilities": []}), encoding="utf-8"
+    )
+    commands = (
+        (
+            "domain-review",
+            "skill",
+            "agent-skills/domain-review/SKILL.md",
+            "codex",
+            "IMPLEMENT",
+        ),
+        (
+            "review-kit",
+            "claude-plugin",
+            ".claude/plugins/review-kit",
+            "claude",
+            "REVIEW",
+        ),
+        (
+            "serena",
+            "mcp",
+            ".stagemesh/mcp/serena.json",
+            "codex",
+            "IMPLEMENT",
+        ),
+    )
+    for capability_id, kind, source, provider, stage in commands:
+        assert main(
+            [
+                "--project",
+                str(tmp_path),
+                "capabilities",
+                "register",
+                capability_id,
+                "--kind",
+                kind,
+                "--source",
+                source,
+                "--provider",
+                provider,
+                "--stage",
+                stage,
+                "--json",
+            ]
+        ) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert len(result["entry"]["content_sha256"]) == 64
+        assert result["inventory"]["integrity"] == "verified"
+
+    persisted = json.loads(registry.read_text(encoding="utf-8"))
+    assert all(len(item["content_sha256"]) == 64 for item in persisted["capabilities"])
+    assert all(row["integrity"] == "verified" for row in inventory(tmp_path))
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+
+def test_legacy_capability_pin_plan_apply_and_noop_are_explicit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _skill(tmp_path)
+    _registry(tmp_path, [_entry("domain-review")])
+    registry = tmp_path / ".stagemesh" / "capabilities.json"
+    before = registry.read_bytes()
+    legacy = inventory(tmp_path)[0]
+    assert legacy["integrity"] == "unpinned"
+    assert legacy["available"] is True and legacy["usable"] is True
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "pin",
+            "domain-review",
+            "--plan",
+            "--json",
+        ]
+    ) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["changed"] is True and plan["writes"] == []
+    assert plan["previous_content_sha256"] is None
+    assert plan["inventory"]["integrity"] == "verified"
+    assert registry.read_bytes() == before
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "pin",
+            "domain-review",
+            "--json",
+        ]
+    ) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["written"] is True and applied["inventory"]["integrity"] == "verified"
+    modified = registry.stat().st_mtime_ns
+    pinned = registry.read_bytes()
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "pin",
+            "domain-review",
+            "--json",
+        ]
+    ) == 0
+    noop = json.loads(capsys.readouterr().out)
+    assert noop["changed"] is False and noop["written"] is False
+    assert registry.read_bytes() == pinned and registry.stat().st_mtime_ns == modified
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
+
+
+def test_pinned_capability_drift_is_unavailable_and_refused_before_attachment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skill = _skill(tmp_path)
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "register",
+            "domain-review",
+            "--kind",
+            "skill",
+            "--source",
+            "agent-skills/domain-review/SKILL.md",
+            "--provider",
+            "codex",
+            "--stage",
+            "IMPLEMENT",
+            "--enable",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nChanged guidance.\n", encoding="utf-8")
+
+    row = inventory(tmp_path)[0]
+    assert row["integrity"] == "drifted"
+    assert row["available"] is False and row["usable"] is False
+    assert row["content_sha256"] != row["observed_content_sha256"]
+    with pytest.raises(CapabilityRegistryError, match="source digest drifted"):
+        resolve_attachments(
+            tmp_path, ("domain-review",), provider="codex", stage="IMPLEMENT"
+        )
+
+
+def test_pinned_plugin_and_mcp_drift_fail_closed(tmp_path: Path) -> None:
+    plugin = _claude_plugin(tmp_path)
+    manifest = _mcp_manifest(tmp_path)
+    _registry(
+        tmp_path,
+        [
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+                stages=["REVIEW"],
+            ),
+            _entry(
+                "serena",
+                kind="mcp",
+                source=".stagemesh/mcp/serena.json",
+                providers=["codex"],
+                stages=["IMPLEMENT"],
+                permissions=["workspace-read", "subprocess"],
+            ),
+        ],
+    )
+    for capability_id in ("review-kit", "serena"):
+        assert main(
+            ["--project", str(tmp_path), "capabilities", "pin", capability_id]
+        ) == 0
+
+    plugin_skill = plugin / "skills" / "review" / "SKILL.md"
+    plugin_skill.write_text(
+        plugin_skill.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8"
+    )
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+    )
+    rows = {row["id"]: row for row in inventory(tmp_path)}
+    assert rows["review-kit"]["integrity"] == "drifted"
+    assert rows["serena"]["integrity"] == "drifted"
+    with pytest.raises(CapabilityRegistryError, match="source digest drifted"):
+        resolve_attachments(
+            tmp_path, ("review-kit",), provider="claude", stage="REVIEW"
+        )
+    with pytest.raises(CapabilityRegistryError, match="source digest drifted"):
+        resolve_attachments(
+            tmp_path, ("serena",), provider="codex", stage="IMPLEMENT"
+        )
+
+
+def test_malformed_capability_digest_fails_closed(tmp_path: Path) -> None:
+    _skill(tmp_path)
+    entry = _entry("domain-review")
+    entry["content_sha256"] = "NOT-A-DIGEST"
+    _registry(tmp_path, [entry])
+
+    with pytest.raises(CapabilityRegistryError, match="lowercase SHA-256"):
+        inventory(tmp_path)
+
+
+def test_historical_capability_evidence_does_not_satisfy_changed_content(
+    tmp_path: Path,
+) -> None:
+    _skill(tmp_path)
+    _registry(tmp_path, [_entry("domain-review")])
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "capabilities",
+            "pin",
+            "domain-review",
+        ]
+    ) == 0
+    current = str(inventory(tmp_path)[0]["observed_content_sha256"])
+    old = "b" * 64 if current != "b" * 64 else "c" * 64
+    store = Store(tmp_path / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Use guidance", source_id="task-1")
+    store.add_audit_event(
+        "capability.loaded",
+        {
+            "task_id": task_id,
+            "provider": "codex",
+            "stage": "IMPLEMENT",
+            "capability_id": "domain-review",
+            "content_sha256": old,
+        },
+    )
+    stale = task_capability_summary(
+        tmp_path, store.conn, task_id, requested=("domain-review",)
+    )["capabilities"][0]
+    assert stale["integrity"] == "verified"
+    assert stale["invocation"] == "evidence-digest-mismatch"
+    assert stale["evidence_matches_current"] is False
+
+    store.add_audit_event(
+        "capability.loaded",
+        {
+            "task_id": task_id,
+            "provider": "codex",
+            "stage": "IMPLEMENT",
+            "capability_id": "domain-review",
+            "content_sha256": current,
+        },
+    )
+    fresh = task_capability_summary(
+        tmp_path, store.conn, task_id, requested=("domain-review",)
+    )["capabilities"][0]
+    assert fresh["invocation"] == "loaded"
+    assert fresh["evidence_matches_current"] is True
+    store.close()

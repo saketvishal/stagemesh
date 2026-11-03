@@ -34,10 +34,12 @@ from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
     CapabilityRegistryError,
     plan_capability_enabled,
+    plan_capability_pin,
     plan_capability_registration,
     plan_skill_evidence_mode,
     register_capability,
     set_capability_enabled,
+    set_capability_pin,
     set_skill_evidence_mode,
     skill_evidence_mode,
 )
@@ -3630,6 +3632,10 @@ def command_capabilities(args: argparse.Namespace) -> int:
         operation = plan_capability_enabled if args.plan else set_capability_enabled
         payload = operation(project, args.capability_id, enabled)
         return _print_capability_change(payload, args.json, plan=args.plan)
+    if action == "pin":
+        operation = plan_capability_pin if args.plan else set_capability_pin
+        payload = operation(project, args.capability_id)
+        return _print_capability_change(payload, args.json, plan=args.plan)
     if action == "policy":
         operation = plan_skill_evidence_mode if args.plan else set_skill_evidence_mode
         payload = operation(project, args.skill_evidence_mode)
@@ -3767,10 +3773,22 @@ def command_capabilities(args: argparse.Namespace) -> int:
                     "evidence_missing": 0,
                     "providers": [],
                     "stages": [],
+                    "content_sha256s": [],
                     "last_observed_at": None,
                 },
             )
-            row["invocation"] = usage["status"]
+            invocation = usage["status"]
+            current_digest = row.get("observed_content_sha256")
+            evidence_digests = usage.get("content_sha256s", [])
+            evidence_matches_current = (
+                None
+                if not evidence_digests
+                else isinstance(current_digest, str) and current_digest in evidence_digests
+            )
+            if invocation in {"loaded", "invoked"} and evidence_matches_current is not True:
+                invocation = "evidence-digest-mismatch"
+            row["invocation"] = invocation
+            row["evidence_matches_current"] = evidence_matches_current
             row["usage"] = usage
     payload = {
         "project": str(project),
@@ -3813,7 +3831,7 @@ def command_capabilities(args: argparse.Namespace) -> int:
             f"{row['id']} kind={row['kind']} enabled={str(row['enabled']).lower()} "
             f"installed={str(row['installed']).lower()} adapter={str(row['adapter_supported']).lower()} "
             f"available={str(row['available']).lower()} usable={str(row['usable']).lower()} "
-            f"invocation={row['invocation']}{counts}"
+            f"integrity={row['integrity']} invocation={row['invocation']}{counts}"
         )
     return 0
 
@@ -5159,6 +5177,14 @@ def build_parser() -> argparse.ArgumentParser:
         capability_state.add_argument("--plan", action="store_true", help="Validate and preview without writing")
         capability_state.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
         capability_state.set_defaults(func=command_capabilities)
+    capability_pin = capability_sub.add_parser(
+        "pin",
+        help="Preview or pin one capability to its current validated project-local content",
+    )
+    capability_pin.add_argument("capability_id")
+    capability_pin.add_argument("--plan", action="store_true", help="Validate and preview without writing")
+    capability_pin.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    capability_pin.set_defaults(func=command_capabilities)
     capability_policy = capability_sub.add_parser(
         "policy",
         help="Preview or set the project skill-load evidence policy without invoking providers",

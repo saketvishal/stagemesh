@@ -34,6 +34,7 @@ provider loading.
       "id": "domain-review",
       "kind": "skill",
       "source": "agent-skills/domain-review/SKILL.md",
+      "content_sha256": "<lowercase SHA-256 of the reviewed SKILL.md>",
       "enabled": true,
       "providers": ["codex", "claude", "grok", "agy"],
       "stages": ["IMPLEMENT", "REVIEW"],
@@ -107,6 +108,20 @@ Remove `--plan` to atomically write the disabled declaration. Add `--enable` onl
 available capability. Existing ids are rejected unless the complete replacement is supplied with `--update`; unrelated entries and
 `skill_evidence_mode` are preserved. Kind-specific least-privilege permissions are used unless `--permission` is supplied: skills and
 skills-only Claude plugins receive `workspace-read`, while the bounded MCP adapter requires `workspace-read` plus `subprocess`.
+
+New registration also pins the validated source content. Existing legacy declarations without a pin remain explicit as
+`integrity=unpinned`; they are not reported as integrity-verified. Preview or apply a deliberate pin/refresh with:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities pin domain-review --plan --json
+stagemesh --project C:\path\to\project capabilities pin domain-review
+```
+
+The pin uses exact `SKILL.md` bytes, the deterministic aggregate of accepted plugin skill components, or exact MCP manifest bytes. A
+matching pin reports `verified`; a changed source reports `drifted`, is not available/usable, and is rejected before provider or MCP
+launch. Pin refresh is never automatic: the operator must review the changed source and run the explicit command. Audit reports compare
+attachment/load/invocation evidence digests with current content, so historical evidence for older bytes cannot masquerade as current
+use. Pins and digests are safe bounded identity metadata; file contents and absolute paths are not persisted.
 
 Enable and disable remain separate explicit registry operations and also support read-only plans:
 

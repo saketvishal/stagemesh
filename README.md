@@ -112,7 +112,9 @@ isolated git worktree and the integration ref only advances after validation, in
 
 Provider registration is separate from worker capabilities. Projects can inventory local skills, MCP definitions, and Claude plugin
 packages in `.stagemesh/capabilities.json`; `stagemesh capabilities --json` reports declared, installed, enabled, adapter-supported,
-and usable states without installing or invoking anything. Read-only `SKILL.md` attachment, skills-only Claude plugin import, and
+usable, and content-integrity states without installing or invoking anything. New registration pins reviewed source content;
+`stagemesh capabilities pin <id> --plan --json` previews an explicit legacy pin or reviewed refresh, and dispatch refuses drifted pins.
+Read-only `SKILL.md` attachment, skills-only Claude plugin import, and
 bounded Codex stdio MCP have runtime adapters, and contracts opt in by id with `capability_refs`. The plugin importer never activates
 hooks, agents, commands, MCP, LSP, or other executable plugin components. Codex MCP disables ambient servers, restricts an
 already-installed server to declared read-only tools, and requires redacted invocation evidence. MCP for other providers and executable

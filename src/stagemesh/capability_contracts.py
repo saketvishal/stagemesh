@@ -364,6 +364,9 @@ def capability_preflight(
                 "available": row["available"],
                 "enabled": row["enabled"],
                 "usable": row["usable"],
+                "content_sha256": row["content_sha256"],
+                "observed_content_sha256": row["observed_content_sha256"],
+                "integrity": row["integrity"],
                 "requested_stages": list(item.stages),
                 "declared_providers": list(item.providers),
                 "eligible_routes": [

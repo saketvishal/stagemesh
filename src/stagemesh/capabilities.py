@@ -17,7 +17,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .claude_plugin_capabilities import ClaudePluginCapabilityError, load_claude_plugin
@@ -48,6 +48,7 @@ class CapabilityDefinition:
     providers: tuple[str, ...]
     stages: tuple[str, ...]
     permissions: tuple[str, ...]
+    content_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -230,6 +231,26 @@ def plan_capability_enabled(project: Path, capability_id: str, enabled: bool) ->
     return plan
 
 
+def plan_capability_pin(project: Path, capability_id: str) -> dict[str, object]:
+    """Preview pinning one declaration to its current validated source content."""
+    plan, _payload = _pin_change(project, capability_id)
+    return plan
+
+
+def set_capability_pin(project: Path, capability_id: str) -> dict[str, object]:
+    """Atomically pin one declaration to its current validated source content."""
+    plan, payload = _pin_change(project, capability_id)
+    if plan["changed"]:
+        _write_registry(Path(project).resolve(), payload)
+    return {
+        **plan,
+        "planned": False,
+        "applied": True,
+        "writes": list(plan["planned_writes"]) if plan["changed"] else [],
+        "written": bool(plan["changed"]),
+    }
+
+
 def set_capability_enabled(project: Path, capability_id: str, enabled: bool) -> dict[str, object]:
     """Atomically enable or disable one declaration without attaching or invoking it."""
     plan, payload = _enabled_change(project, capability_id, enabled)
@@ -313,17 +334,23 @@ def resolve_attachments(
                     f"requested capability {capability_id} has invalid Claude plugin configuration: {exc}"
                 ) from exc
             runtime = plugin.private_payload()
+        observed_digest = (
+            plugin.content_sha256
+            if item.kind == "claude-plugin"
+            else hashlib.sha256(target.read_bytes()).hexdigest()
+        )
+        if item.content_sha256 is not None and item.content_sha256 != observed_digest:
+            raise CapabilityRegistryError(
+                f"requested capability source digest drifted: {capability_id}; "
+                f"expected {item.content_sha256}, observed {observed_digest}"
+            )
         attachments.append(
             CapabilityAttachment(
                 id=item.id,
                 path=target,
                 source=item.source,
                 permissions=item.permissions,
-                content_sha256=(
-                    plugin.content_sha256
-                    if item.kind == "claude-plugin"
-                    else hashlib.sha256(target.read_bytes()).hexdigest()
-                ),
+                content_sha256=observed_digest,
                 kind=item.kind,
                 runtime=runtime,
             )
@@ -454,6 +481,7 @@ def task_usage_from_connection(
                     "evidence_missing": 0,
                     "providers": set(),
                     "stages": set(),
+                    "content_sha256s": set(),
                     "last_observed_at": None,
                 },
             )
@@ -464,6 +492,12 @@ def task_usage_from_connection(
                 item["providers"].add(provider)  # type: ignore[union-attr]
             if isinstance(stage, str) and stage:
                 item["stages"].add(stage)  # type: ignore[union-attr]
+            content_sha256 = payload.get("content_sha256")
+            if (
+                isinstance(content_sha256, str)
+                and re.fullmatch(r"[0-9a-f]{64}", content_sha256)
+            ):
+                item["content_sha256s"].add(content_sha256)  # type: ignore[union-attr]
             item["last_observed_at"] = float(created_at)
     projected: dict[str, dict[str, object]] = {}
     for capability_id, item in usage.items():
@@ -489,6 +523,7 @@ def task_usage_from_connection(
             "evidence_missing": int(item["evidence_missing"]),
             "providers": sorted(item["providers"]),  # type: ignore[arg-type]
             "stages": sorted(item["stages"]),  # type: ignore[arg-type]
+            "content_sha256s": sorted(item["content_sha256s"]),  # type: ignore[arg-type]
             "last_observed_at": item["last_observed_at"],
         }
     return task_exists, projected
@@ -528,6 +563,16 @@ def task_capability_summary(
                 "usage": usage,
             }
         else:
+            current_digest = row["observed_content_sha256"]
+            evidence_digests = usage["content_sha256s"]
+            evidence_matches_current = (
+                None
+                if not evidence_digests
+                else isinstance(current_digest, str) and current_digest in evidence_digests
+            )
+            invocation = usage["status"]
+            if invocation in {"loaded", "invoked"} and evidence_matches_current is not True:
+                invocation = "evidence-digest-mismatch"
             projected = {
                 **{
                     key: row[key]
@@ -545,11 +590,15 @@ def task_capability_summary(
                         "providers",
                         "stages",
                         "permissions",
+                        "content_sha256",
+                        "observed_content_sha256",
+                        "integrity",
                     )
                 },
                 "registered": True,
                 "requested": capability_id in requested_ids,
-                "invocation": usage["status"],
+                "invocation": invocation,
+                "evidence_matches_current": evidence_matches_current,
                 "usage": usage,
             }
         capabilities.append(projected)
@@ -574,6 +623,7 @@ def _empty_usage() -> dict[str, object]:
         "evidence_missing": 0,
         "providers": [],
         "stages": [],
+        "content_sha256s": [],
         "last_observed_at": None,
     }
 
@@ -592,6 +642,7 @@ def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:
     configuration_valid = installed
     configuration_error = None
     runtime_installed = installed
+    observed_content_sha256 = None
     if installed and item.kind == "mcp":
         try:
             config = load_mcp_manifest(target, root)
@@ -602,12 +653,35 @@ def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:
             configuration_error = str(exc)
     if installed and item.kind == "claude-plugin":
         try:
-            load_claude_plugin(target, root)
+            plugin = load_claude_plugin(target, root)
+            observed_content_sha256 = plugin.content_sha256
         except ClaudePluginCapabilityError as exc:
             configuration_valid = False
             runtime_installed = False
             configuration_error = str(exc)
-    available = installed and adapter_supported and configuration_valid and runtime_installed
+    if installed and item.kind != "claude-plugin":
+        try:
+            observed_content_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError as exc:
+            configuration_valid = False
+            runtime_installed = False
+            configuration_error = str(exc)
+    integrity = (
+        "unavailable"
+        if observed_content_sha256 is None
+        else "unpinned"
+        if item.content_sha256 is None
+        else "verified"
+        if item.content_sha256 == observed_content_sha256
+        else "drifted"
+    )
+    available = (
+        installed
+        and adapter_supported
+        and configuration_valid
+        and runtime_installed
+        and integrity != "drifted"
+    )
     return {
         "id": item.id,
         "kind": item.kind,
@@ -625,12 +699,15 @@ def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:
         "providers": list(item.providers),
         "stages": list(item.stages),
         "permissions": list(item.permissions),
+        "content_sha256": item.content_sha256,
+        "observed_content_sha256": observed_content_sha256,
+        "integrity": integrity,
         "invocation": "not-observed",
     }
 
 
 def _definition_payload(item: CapabilityDefinition) -> dict[str, object]:
-    return {
+    payload = {
         "id": item.id,
         "kind": item.kind,
         "source": item.source,
@@ -639,6 +716,9 @@ def _definition_payload(item: CapabilityDefinition) -> dict[str, object]:
         "stages": list(item.stages),
         "permissions": list(item.permissions),
     }
+    if item.content_sha256 is not None:
+        payload["content_sha256"] = item.content_sha256
+    return payload
 
 
 def _registration_change(
@@ -675,7 +755,6 @@ def _registration_change(
         "permissions": permissions,
     }
     item = _definition(root, raw)
-    entry = _definition_payload(item)
     row = _inventory_row(root, item)
     if not row["installed"]:
         raise CapabilityRegistryError(
@@ -685,6 +764,14 @@ def _registration_change(
         raise CapabilityRegistryError(
             f"capability {item.id} configuration is invalid: {row['configuration_error']}"
         )
+    observed_digest = row["observed_content_sha256"]
+    if not isinstance(observed_digest, str):
+        raise CapabilityRegistryError(
+            f"capability {item.id} source digest could not be computed"
+        )
+    item = replace(item, content_sha256=observed_digest)
+    entry = _definition_payload(item)
+    row = _inventory_row(root, item)
     if enabled and not row["available"]:
         raise CapabilityRegistryError(
             f"capability {item.id} cannot be enabled because it is not available for a declared provider"
@@ -708,6 +795,55 @@ def _registration_change(
         "provider_calls": 0,
         "network_calls": 0,
         "package_installs": 0,
+    }
+    return plan, next_payload
+
+
+def _pin_change(
+    project: Path, capability_id: str
+) -> tuple[dict[str, object], dict[str, object]]:
+    root = Path(project).resolve()
+    existing = load_registry(root)
+    payload = _registry_payload(root)
+    if payload is None:
+        raise CapabilityRegistryError(f"capability is not registered: {capability_id}")
+    entries = list(payload["capabilities"])
+    index = next((i for i, item in enumerate(existing) if item.id == capability_id), None)
+    if index is None:
+        raise CapabilityRegistryError(f"capability is not registered: {capability_id}")
+    item = existing[index]
+    row = _inventory_row(root, item)
+    if not row["installed"] or not row["configuration_valid"]:
+        raise CapabilityRegistryError(
+            f"capability {item.id} source is not available for pinning"
+        )
+    observed = row["observed_content_sha256"]
+    if not isinstance(observed, str):
+        raise CapabilityRegistryError(
+            f"capability {item.id} source digest could not be computed"
+        )
+    raw = dict(entries[index])
+    changed = raw.get("content_sha256") != observed
+    raw["content_sha256"] = observed
+    pinned = _definition(root, raw)
+    pinned_row = _inventory_row(root, pinned)
+    entries[index] = raw
+    next_payload = {**payload, "capabilities": entries}
+    plan = {
+        "planned": True,
+        "operation": "pin",
+        "changed": changed,
+        "registry": REGISTRY_PATH.as_posix(),
+        "entry": raw,
+        "inventory": pinned_row,
+        "previous_content_sha256": item.content_sha256,
+        "content_sha256": observed,
+        "planned_writes": [REGISTRY_PATH.as_posix()] if changed else [],
+        "writes": [],
+        "provider_calls": 0,
+        "network_calls": 0,
+        "package_installs": 0,
+        "database_writes": 0,
     }
     return plan, next_payload
 
@@ -832,7 +968,10 @@ def _write_registry(root: Path, payload: dict[str, object]) -> None:
 def _definition(root: Path, raw: object) -> CapabilityDefinition:
     if not isinstance(raw, dict):
         raise CapabilityRegistryError("each capability must be an object")
-    allowed = {"id", "kind", "source", "enabled", "providers", "stages", "permissions"}
+    allowed = {
+        "id", "kind", "source", "enabled", "providers", "stages", "permissions",
+        "content_sha256",
+    }
     if set(raw) - allowed:
         raise CapabilityRegistryError("capability contains unsupported fields")
     capability_id = raw.get("id")
@@ -888,6 +1027,14 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
         raise CapabilityRegistryError(
             f"claude-plugin capability {capability_id} may request only workspace-read"
         )
+    content_sha256 = raw.get("content_sha256")
+    if content_sha256 is not None and (
+        not isinstance(content_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", content_sha256)
+    ):
+        raise CapabilityRegistryError(
+            f"capability {capability_id} content_sha256 must be a lowercase SHA-256 digest"
+        )
     return CapabilityDefinition(
         id=capability_id,
         kind=kind,
@@ -896,6 +1043,7 @@ def _definition(root: Path, raw: object) -> CapabilityDefinition:
         providers=providers,
         stages=stages,
         permissions=permissions,
+        content_sha256=content_sha256,
     )
 
 
