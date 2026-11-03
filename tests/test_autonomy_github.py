@@ -179,6 +179,123 @@ def test_hosted_ci_reads_check_runs_including_pending_and_unknown_conclusions() 
     assert ci.run_for("0" * 40) is None
 
 
+def test_hosted_ci_enriches_failed_actions_check_with_bounded_redacted_job_log() -> None:
+    payload = {
+        "total_count": 1,
+        "check_runs": [
+            {
+                "id": 77,
+                "name": "unit",
+                "status": "completed",
+                "conclusion": "failure",
+                "output": {},
+                "app": {"slug": "github-actions"},
+                "check_suite": {"id": 9},
+            }
+        ],
+    }
+
+    class Transport(RecordedTransport):
+        def __init__(self):
+            super().__init__({("GET", _checks(MAIN)): (200, {}, payload)})
+            self.binary_calls = []
+
+        def request_bytes(self, method, path, *, max_bytes):
+            self.binary_calls.append((method, path, max_bytes))
+            log = (
+                "2026-11-02T12:00:00.000Z token=TEST_ONLY_NOT_A_CREDENTIAL\n"
+                "2026-11-02T12:00:01.000Z FAILED tests/test_widget.py::test_regression - AssertionError\n"
+            )
+            return 200, {}, log.encode()
+
+    transport = Transport()
+    run = GitHubHostedCI(OWNER, REPO, transport).run_for(MAIN)
+
+    assert run is not None
+    gate = run.gates["unit"]
+    assert gate.failing_tests == ("tests/test_widget.py::test_regression",)
+    assert "TEST_ONLY_NOT_A_CREDENTIAL" not in gate.log and "***REDACTED***" in gate.log
+    assert transport.binary_calls == [
+        ("GET", f"{ROOT}/actions/jobs/77/logs", 256 * 1024)
+    ]
+
+
+def test_hosted_ci_does_not_treat_third_party_check_ids_as_actions_job_ids() -> None:
+    payload = {
+        "check_runs": [
+            {
+                "id": 88,
+                "name": "external",
+                "status": "completed",
+                "conclusion": "failure",
+                "output": {},
+                "app": {"slug": "third-party-ci"},
+            }
+        ]
+    }
+
+    class Transport(RecordedTransport):
+        def request_bytes(self, *_args, **_kwargs):
+            pytest.fail("third-party check id was used as a GitHub Actions job id")
+
+    run = GitHubHostedCI(
+        OWNER,
+        REPO,
+        Transport({("GET", _checks(MAIN)): (200, {}, payload)}),
+    ).run_for(MAIN)
+
+    assert run is not None and run.gates["external"].log == ""
+
+
+def test_job_log_redirect_never_forwards_github_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import urllib.error
+    import urllib.request
+    from email.message import Message
+
+    from stagemesh.github import UrlLibGitHubTransport
+
+    redirected_headers: list[dict[str, str]] = []
+
+    class RedirectOpener:
+        def open(self, request, timeout):
+            assert request.get_header("Authorization") == "Bearer TEST_ONLY_NOT_A_CREDENTIAL"
+            headers = Message()
+            headers["Location"] = "https://logs.example.invalid/job.txt?signature=short-lived"
+            raise urllib.error.HTTPError(
+                request.full_url, 302, "Found", headers, io.BytesIO()
+            )
+
+    class Response:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"job log"
+
+    def redirected(request, timeout):
+        redirected_headers.append(dict(request.header_items()))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: RedirectOpener())
+    monkeypatch.setattr(urllib.request, "urlopen", redirected)
+
+    status, _headers, payload = UrlLibGitHubTransport("TEST_ONLY_NOT_A_CREDENTIAL").request_bytes(
+        "GET", f"{ROOT}/actions/jobs/77/logs", max_bytes=1024
+    )
+
+    assert status == 200 and payload == b"job log"
+    assert redirected_headers and "Authorization" not in redirected_headers[0]
+
+
 # --- the real base-CI-already-red incident, replayed from the recorded payload -----------------------------------------------------------------------
 
 

@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import inspect
 import json
-import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .audit import record_audit
+from .autonomy.destructive_git import execute_preserved_cleanup
 from .autonomy.gitfacts import GitFacts
 from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
@@ -22,7 +24,7 @@ from .contracts import candidate_workspace, run_gate
 from .domain import ExecutionKind, ExecutionStatus
 from .efficiency import record_provider_call, take_call_usage
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
-from .git import GitError, GitWorkspace
+from .git import GitError
 from .persistence import Store
 from .provider_acceptance import live_provider_readiness
 from .provider_cooldown import (
@@ -33,6 +35,7 @@ from .provider_cooldown import (
     cleared_at,
     no_progress_streak,
 )
+from .provider_events import CAPABILITY_EVIDENCE_MISSING, CAPABILITY_POLICY_VIOLATION
 from .providers import RuntimeCommandAdapter
 from .review import (
     INFRASTRUCTURE_FAILURE,
@@ -64,6 +67,9 @@ PROVIDER_WORKSPACE_INTEGRITY_EVENT = "provider.workspace_integrity_failure"
 ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS = "all_implementation_providers_no_progress"
 ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED = "all_implementation_providers_exhausted"
 ALL_IMPLEMENTATION_PROVIDERS_FAILED = "all_implementation_providers_failed"
+NO_COMPATIBLE_IMPLEMENTATION_PROVIDER = "no_compatible_implementation_provider"
+NO_PROVIDER_WITH_SKILL_EVIDENCE = "no_provider_with_required_skill_evidence"
+NO_PROVIDER_SATISFIED_CAPABILITY_POLICY = "no_provider_satisfied_capability_policy"
 POOL_EXHAUSTED_REASONS = (
     ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS,
     ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED,
@@ -767,7 +773,25 @@ class FallbackReviewAdapter:
                 take_call_usage()
                 started = time.monotonic()
                 try:
-                    response = adapter.review_candidate(prompt, project, candidate_sha)
+                    if isinstance(adapter, RuntimeCommandAdapter):
+                        try:
+                            parameters = inspect.signature(adapter.review_candidate).parameters
+                        except (TypeError, ValueError):
+                            parameters = {}
+                        if {"store", "task_id"} <= set(parameters):
+                            response = adapter.review_candidate(
+                                prompt,
+                                project,
+                                candidate_sha,
+                                store=self.store,
+                                task_id=self.task_id,
+                            )
+                        else:
+                            # Preserve the public three-argument protocol for monkeypatched,
+                            # subclassed, or older RuntimeCommandAdapter implementations.
+                            response = adapter.review_candidate(prompt, project, candidate_sha)
+                    else:  # test or externally supplied adapter retaining the public three-argument protocol
+                        response = adapter.review_candidate(prompt, project, candidate_sha)
                 except BaseException:
                     record_provider_call(self.store, task_id=self.task_id, purpose="review", provider=adapter.name,
                                          candidate_sha=candidate_sha, outcome="failed", reason="review_interrupted",
@@ -858,6 +882,9 @@ class PooledExecutor(Executor):
             )
         failures: list[str] = []
         no_progress: list[str] = []
+        incompatible: list[str] = []
+        evidence_failures: list[str] = []
+        policy_failures: list[str] = []
         reasons: list[str] = []
         walk: list[dict[str, str]] = []
         limiter = self.pool.limiter
@@ -926,6 +953,90 @@ class PooledExecutor(Executor):
                 )
                 log(f"  environment setup failed; provider not invoked: {result.failure_reason}")
                 return result
+            if (result.failure_reason or "").startswith("capability_unavailable:"):
+                reason = result.failure_reason or "capability_unavailable"
+                reasons.append(reason)
+                failures.append(f"{adapter.name}: {reason}")
+                incompatible.append(adapter.name)
+                walk.append(
+                    {
+                        "provider": adapter.name,
+                        "outcome": reason,
+                        "classification": "capability_compatibility",
+                    }
+                )
+                store.add_audit_event(
+                    "capability.provider_skipped",
+                    {
+                        "task_id": task_id,
+                        "stage": IMPLEMENT,
+                        "provider": adapter.name,
+                        "provider_invoked": False,
+                        "reason": reason,
+                    },
+                )
+                log(
+                    f"  provider {adapter.name} is incompatible with the requested capability; "
+                    "trying the next provider"
+                )
+                continue
+            if (result.failure_reason or "").startswith(CAPABILITY_EVIDENCE_MISSING + ":"):
+                reason = result.failure_reason or CAPABILITY_EVIDENCE_MISSING
+                reasons.append(reason)
+                failures.append(f"{adapter.name}: {reason}")
+                evidence_failures.append(adapter.name)
+                walk.append(
+                    {
+                        "provider": adapter.name,
+                        "outcome": reason,
+                        "classification": "capability_evidence",
+                    }
+                )
+                store.add_audit_event(
+                    "capability.provider_evidence_failed",
+                    {
+                        "task_id": task_id,
+                        "stage": IMPLEMENT,
+                        "provider": adapter.name,
+                        "reason": reason,
+                    },
+                )
+                try:
+                    _reset_worktree(store, project, task_id, claim_id)
+                except WorkspaceMutation:
+                    return ExecutionResult(
+                        ExecutionStatus.FAILED,
+                        failure_reason=EXTERNAL_WORKSPACE_MUTATION,
+                    )
+                log(
+                    f"  provider {adapter.name} did not supply required skill-load evidence; "
+                    "trying the next provider"
+                )
+                continue
+            if (result.failure_reason or "").startswith(CAPABILITY_POLICY_VIOLATION + ":"):
+                reason = result.failure_reason or CAPABILITY_POLICY_VIOLATION
+                reasons.append(reason)
+                failures.append(f"{adapter.name}: {reason}")
+                policy_failures.append(adapter.name)
+                walk.append(
+                    {
+                        "provider": adapter.name,
+                        "outcome": reason,
+                        "classification": "capability_policy",
+                    }
+                )
+                try:
+                    _reset_worktree(store, project, task_id, claim_id)
+                except WorkspaceMutation:
+                    return ExecutionResult(
+                        ExecutionStatus.FAILED,
+                        failure_reason=EXTERNAL_WORKSPACE_MUTATION,
+                    )
+                log(
+                    f"  provider {adapter.name} violated capability policy; "
+                    "trying the next provider"
+                )
+                continue
             if _is_workspace_mutation_reason(result.failure_reason):
                 reason = EXTERNAL_WORKSPACE_MUTATION
                 nxt = remaining[0].name if remaining else None
@@ -1025,6 +1136,35 @@ class PooledExecutor(Executor):
             log(f"  final implementation provider: {adapter.name} ({self.pool.kind(adapter.name)}); candidate {result.candidate_sha or '-'}; result {result.status}")
             return result
         ordered = [f"{item['provider']}: {item['outcome']}" for item in walk]
+        if incompatible and len(incompatible) == len(walk):
+            log("  REFUSED: no provider is compatible with the requested capabilities: " + "; ".join(ordered))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=NO_COMPATIBLE_IMPLEMENTATION_PROVIDER + ": " + "; ".join(ordered),
+                provider_attempts=walk,
+            )
+        if evidence_failures and len(evidence_failures) == len(walk):
+            log("  REFUSED: no provider supplied required skill-load evidence: " + "; ".join(ordered))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=NO_PROVIDER_WITH_SKILL_EVIDENCE + ": " + "; ".join(ordered),
+                provider_attempts=walk,
+            )
+        capability_failures = len(incompatible) + len(evidence_failures) + len(policy_failures)
+        if policy_failures and len(policy_failures) == len(walk):
+            log("  REFUSED: every provider violated capability policy: " + "; ".join(ordered))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=NO_PROVIDER_SATISFIED_CAPABILITY_POLICY + ": " + "; ".join(ordered),
+                provider_attempts=walk,
+            )
+        if capability_failures == len(walk) and capability_failures:
+            log("  REFUSED: no provider satisfied capability compatibility and evidence policy: " + "; ".join(ordered))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=NO_PROVIDER_SATISFIED_CAPABILITY_POLICY + ": " + "; ".join(ordered),
+                provider_attempts=walk,
+            )
         if no_progress and not failures:
             log("  REFUSED: every eligible implementation provider made no progress: " + "; ".join(ordered))
             return ExecutionResult(
@@ -1138,8 +1278,16 @@ def prove_task_already_satisfied(store: Store, project: Path, task_id: str) -> d
 def _reset_worktree(store: Store, project: Path, task_id: str, claim_id: str | None) -> None:
     """Discard a failed provider's partial edits so the next provider starts from the last commit, and seal that as the workspace state."""
     with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
-        for args in (["reset", "--hard", "HEAD"], ["clean", "-fdq"]):
-            subprocess.run(["git", *args], cwd=lease.path, capture_output=True, check=False)
+        result = execute_preserved_cleanup(
+            store,
+            project,
+            task_id,
+            lease.path,
+            "HEAD",
+            "discard a failed provider's partial edits only after preserving them",
+        )
+        if not result.completed:
+            raise GitError("failed provider worktree cleanup did not complete")
         lease.seal()
 
 
@@ -1158,8 +1306,15 @@ def _quarantine_mutated_worktree(store: Store, project: Path, task_id: str, prov
             GitFacts(project).ensure_ref(quarantine_ref, snapshot)
     remove_task_workspace(project, task_id)
     clean = prepare_task_workspace(project, task_id)
-    if baseline:
-        GitWorkspace(clean).run("reset", "--hard", baseline)
+    if baseline and not execute_preserved_cleanup(
+        store,
+        project,
+        task_id,
+        clean,
+        baseline,
+        "place a replacement worktree on the trusted task baseline",
+    ).completed:
+        raise GitError("replacement provider worktree could not be placed on the trusted baseline")
     record_audit(
         store,
         "provider.workspace_quarantined",

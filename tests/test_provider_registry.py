@@ -430,6 +430,42 @@ def test_cli_wiring_reports_the_policy_selected_provider(tmp_path: Path) -> None
     assert info["review_provider"] == "dynamic-pool:beta,gamma"
 
 
+def test_supervised_coordinator_wires_explicit_github_hosted_ci_without_calling_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STAGEMESH_GITHUB_TOKEN", "test-token")
+    _, (coord, _) = _wired(
+        tmp_path,
+        {
+            "autonomy": {"enabled": True},
+            "github": {"owner": "octo", "repo": "project", "token": "test-token"},
+        },
+        provider=None,
+    )
+
+    assert coord.guard is not None
+    assert coord.guard.hosted_ci.owner == "octo"
+    assert coord.guard.hosted_ci.repo == "project"
+    assert coord.guard.hosted_ci.transport.token == "test-token"
+
+
+def test_supervised_coordinator_does_not_enable_hosted_ci_without_explicit_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STAGEMESH_GITHUB_TOKEN", raising=False)
+    _, (coord, _) = _wired(
+        tmp_path,
+        {
+            "autonomy": {"enabled": True},
+            "github": {"owner": "octo", "repo": "project"},
+        },
+        provider=None,
+    )
+
+    assert coord.guard is not None
+    assert coord.guard.hosted_ci is None
+
+
 def test_cli_review_setup_ignores_implementation_provider_backoff(tmp_path: Path) -> None:
     rig = Rig(tmp_path, {"alpha": "ok", "beta": "ok", "gamma": "ok"})
     for provider in ("alpha", "beta", "gamma"):

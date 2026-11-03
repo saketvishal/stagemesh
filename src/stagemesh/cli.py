@@ -22,12 +22,17 @@ from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matri
 from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
 from .audit import AuditValidationError, export_audit_jsonl
 from .autonomy.cli import register_autonomy_commands
+from .autonomy.github_adapter import GitHubHostedCI
 from .autonomy.integration import SupervisedIntegrator
 from .autonomy.isolation import check_isolation
 from .autonomy.review_adapter import supervise_reviewer
 from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .blocked_recovery import can_auto_retry
+from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
+from .capabilities import CapabilityRegistryError
+from .capabilities import inventory as capability_inventory
+from .capabilities import skill_evidence_mode
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
@@ -626,6 +631,7 @@ def _build_coordinator(
                 integration_policy=autonomy.integration_policy(),
                 recovery_policy=autonomy.recovery_policy(),
                 max_reconstructs=autonomy.max_reconstructs,
+                hosted_ci=_github_hosted_ci(config),
             )
             if reviewer is not None:
                 supervise_reviewer(reviewer, guard)  # only blocking in-scope findings can fail a candidate
@@ -665,6 +671,18 @@ def _build_coordinator(
         **info_extra,
     }
     return coord, info
+
+
+def _github_hosted_ci(config: StageMeshConfig) -> GitHubHostedCI | None:
+    """Read-only hosted-CI observation for supervised runs, enabled only by explicit GitHub credentials."""
+    github = config.github
+    if not (github.owner and github.repo and github.token):
+        return None
+    return GitHubHostedCI(
+        github.owner,
+        github.repo,
+        UrlLibGitHubTransport(github.token),
+    )
 
 
 def _github_outbound(config, store: Store, *, dry_run: bool):
@@ -3422,6 +3440,35 @@ def command_capacity(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_capabilities(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    rows = capability_inventory(project)
+    payload = {
+        "project": str(project),
+        "registry": CAPABILITY_REGISTRY_PATH.as_posix(),
+        "skill_evidence_mode": skill_evidence_mode(project),
+        "capabilities": rows,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print(
+            f"No capabilities declared in {CAPABILITY_REGISTRY_PATH.as_posix()}; "
+            f"skill evidence mode={payload['skill_evidence_mode']}"
+        )
+        return 0
+    print(f"skill evidence mode={payload['skill_evidence_mode']}")
+    for row in rows:
+        print(
+            f"{row['id']} kind={row['kind']} enabled={str(row['enabled']).lower()} "
+            f"installed={str(row['installed']).lower()} adapter={str(row['adapter_supported']).lower()} "
+            f"available={str(row['available']).lower()} usable={str(row['usable']).lower()} "
+            f"invocation={row['invocation']}"
+        )
+    return 0
+
+
 def _provider_max_concurrency(config, provider: str) -> int:
     spec = config.provider_specs.get(provider)
     if spec is not None and spec.max_concurrency is not None:
@@ -4668,6 +4715,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
+    capabilities = sub.add_parser(
+        "capabilities",
+        help="Inspect project-local capability declarations without installing or invoking them",
+    )
+    capabilities.add_argument("--json", action="store_true")
+    capabilities.set_defaults(func=command_capabilities)
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")
@@ -4934,6 +4987,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except CapacityValidationError as exc:
         print(f"capacity error: {exc}", file=sys.stderr)
+        return 2
+    except CapabilityRegistryError as exc:
+        print(f"capability registry error: {exc}", file=sys.stderr)
         return 2
     except AuditValidationError as exc:
         print(f"audit error: {exc}", file=sys.stderr)

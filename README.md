@@ -80,7 +80,8 @@ and batch-clean blocked tasks when they accumulate or before a merge-readiness p
 StageMesh is being extended so a founder can give only `Implement objective X.` and have branches, CI, review cycles, stacked PRs,
 base movement and recovery handled by deterministic, typed, evidence-backed policy instead of operator instructions. The gate, the
 capabilities, the incident scenarios enforced by tests, the remaining gaps and the ten-task streak live in one canonical document:
-[docs/founder-hands-off.md](docs/founder-hands-off.md). The supervisor is opt-in per project (`.stagemesh/autonomy.json`) and is
+[docs/founder-hands-off.md](docs/founder-hands-off.md). The supervisor is opt-in per project (`autonomy` in `.stagemesh/config.json`;
+the legacy `.stagemesh/autonomy.json` remains supported) and is
 inspected with `stagemesh autonomy isolation | trace | streak | readiness`. For explicitly authorized Windows-local continuous
 operation, the reversible Task Scheduler supervisor is documented in [docs/continuous-driver.md](docs/continuous-driver.md); it wraps
 the existing bounded `run-window` path and is never installed implicitly.
@@ -108,6 +109,18 @@ independent reviewer exists StageMesh refuses and lists every provider with its 
 isolated git worktree and the integration ref only advances after validation, independent review and integration pass.
 
 ### Provider registry and selection policies
+
+Provider registration is separate from worker capabilities. Projects can inventory local skills, MCP definitions, and Claude plugin
+packages in `.stagemesh/capabilities.json`; `stagemesh capabilities --json` reports declared, installed, enabled, adapter-supported,
+and usable states without installing or invoking anything. Read-only `SKILL.md` attachment, skills-only Claude plugin import, and
+bounded Codex stdio MCP have runtime adapters, and contracts opt in by id with `capability_refs`. The plugin importer never activates
+hooks, agents, commands, MCP, LSP, or other executable plugin components. Codex MCP disables ambient servers, restricts an
+already-installed server to declared read-only tools, and requires redacted invocation evidence. MCP for other providers and executable
+plugin requests fail closed. See
+[docs/capabilities.md](docs/capabilities.md) for the schema and audit semantics.
+Projects may opt into `observed-load-required` skill evidence. Supported provider JSON streams then produce redacted
+`capability.loaded` receipts, and a provider that does not show every selected skill being read before its first recorded mutation is
+rejected without a quota cooldown. The default remains attachment-only and never overstates prompt delivery as model use.
 
 `codex`, `claude`, `grok` and `agy` are built-in registry entries; any other name can be added under `providers`, as a plain command string
 or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `priority` (lower first) and `weight`:

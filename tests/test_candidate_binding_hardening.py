@@ -195,7 +195,12 @@ def test_provider_merging_main_into_the_worktree_is_over_reported_and_fails_scop
 def test_provider_resetting_head_onto_main_cannot_hide_main_files(tmp_path: Path) -> None:
     rig, executor, _coord, original, _main, _rebased = _rebased_task(tmp_path)
     worktree = executor.worktrees[TASK]
-    GitWorkspace(worktree).run("reset", "--hard", _tip(rig))
+    GitWorkspace(worktree).run(
+        "reset",
+        "--hard",
+        _tip(rig),
+        destructive_reason="fixture moves the task worktree to the latest recorded candidate",
+    )
     sha = _commit_on(worktree, "out/A.txt", "rewritten\n")
     _candidate(rig, sha)
     bound = contract_for_candidate(rig.store, TASK, sha, rig.project)

@@ -25,6 +25,7 @@ from typing import Any
 
 from .audit import record_audit
 from .auto_plan import outside_label_selector
+from .autonomy.destructive_git import execute_preserved_cleanup
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .concurrency import IntegrationLockTimeout, ProviderLimiter, contract_conflict
 from .config import RuntimeConfig, TaskSelectionConfig, load_config
@@ -39,7 +40,6 @@ from .execution_ownership import (
     tree_cleanup_state,
     validation_tree_unresolved,
 )
-from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import ProviderLog
@@ -275,20 +275,24 @@ def recover_orphaned_claims(
             store, "recovery.parallel_claim_released", {"task_id": task_id, "claim_id": str(claim["id"]), "worker_id": str(claim["worker_id"])}
         )
         if project is not None:
-            discard_partial_edits(project, task_id)
+            discard_partial_edits(project, task_id, store)
         released.append({"task_id": task_id, "claim_id": str(claim["id"]), "worker_id": str(claim["worker_id"]), "action": "RELEASED"})
     return released
 
 
-def discard_partial_edits(project: Path, task_id: str) -> bool:
-    """Throw away uncommitted edits in the task worktree (a killed provider's half-finished work); commits are kept."""
+def discard_partial_edits(project: Path, task_id: str, store: Store) -> bool:
+    """Preserve and remove a killed provider's half-finished work; commits and exact dirty state remain recoverable."""
     path = task_workspace(project, task_id)
     if not (path / ".git").exists():
         return False
-    git = GitWorkspace(path)
-    git.run("reset", "--hard", "HEAD", check=False)
-    git.run("clean", "-fdq", check=False)
-    return True
+    return execute_preserved_cleanup(
+        store,
+        project,
+        task_id,
+        path,
+        "HEAD",
+        "discard a terminated parallel worker's partial edits only after preserving them",
+    ).completed
 
 
 def _kill_pid(pid: int, expected: ProcessIdentity) -> bool:
@@ -896,7 +900,7 @@ class ParallelRunner:
                 continue
             store.release_claim(str(claim["id"]))
         if not unresolved_execution and not protected_claims:
-            discard_partial_edits(self.project, task_id)
+            discard_partial_edits(self.project, task_id, store)
         record_audit(store, "task.abandoned", {"task_id": task_id, "reason": why})
 
     def _interrupt(self, summary: ParallelSummary) -> None:

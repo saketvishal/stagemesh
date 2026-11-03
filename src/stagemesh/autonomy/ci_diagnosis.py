@@ -14,10 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from pathlib import Path
+from typing import Protocol, TextIO
 
 from ..diagnosis import normalize
 from ..workspaces import NO_IMPLEMENTATION_CHANGE
@@ -214,7 +216,56 @@ class TestDefect:
     explanation: str
 
 
-_MARKER = re.compile(r"STAGEMESH_TEST_OBSERVATION\s+(\{.*\})")
+TEST_OBSERVATION_PREFIX = "STAGEMESH_TEST_OBSERVATION"
+_MARKER = re.compile(rf"{TEST_OBSERVATION_PREFIX}\s+(\{{.*\}})")
+_FAILURE_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$")
+
+
+def test_observation_marker(observation: TestObservation) -> str:
+    """Build one bounded, injection-safe marker for a test harness log."""
+    if not observation.test_id or len(observation.test_id) > 500 or any(
+        character in observation.test_id for character in "\r\n"
+    ):
+        raise ValueError("test observation test_id must be a non-empty single line")
+    test_path = Path(observation.test_path)
+    if (
+        not observation.test_path
+        or len(observation.test_path) > 500
+        or test_path.is_absolute()
+        or test_path.drive
+        or ".." in test_path.parts
+        or any(character in observation.test_path for character in "\r\n")
+    ):
+        raise ValueError("test observation test_path must be a project-relative path")
+    if observation.expected not in {"success", "failure"}:
+        raise ValueError("test observation expected must be success or failure")
+    if observation.observed_failure_code is not None and not _FAILURE_CODE.fullmatch(
+        observation.observed_failure_code
+    ):
+        raise ValueError("test observation failure code must be a portable identifier")
+    if not isinstance(observation.provider_made_change, bool):
+        raise ValueError("test observation provider_made_change must be a boolean")
+    payload = {
+        "test_id": observation.test_id,
+        "test_path": observation.test_path.replace("\\", "/"),
+        "expected": observation.expected,
+        "observed_failure_code": observation.observed_failure_code,
+        "provider_made_change": observation.provider_made_change,
+    }
+    return f"{TEST_OBSERVATION_PREFIX} {json.dumps(payload, sort_keys=True, separators=(',', ':'))}"
+
+
+def emit_test_observation(
+    observation: TestObservation,
+    *,
+    stream: TextIO | None = None,
+) -> str:
+    """Write a validated marker to a test log and return the exact emitted line."""
+    marker = test_observation_marker(observation)
+    destination = stream or sys.stdout
+    destination.write(marker + "\n")
+    destination.flush()
+    return marker
 
 
 def observations_from_log(log: str) -> list[TestObservation]:

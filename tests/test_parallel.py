@@ -252,7 +252,14 @@ def test_sweep_does_not_delete_legacy_global_worktrees(tmp_path: Path) -> None:
 
     assert sweep_task_worktrees(rig.project, rig.store) == []
     assert (old_worktree / ".git").exists()
-    GitWorkspace(rig.project).run("worktree", "remove", "--force", str(old_worktree), check=False)
+    GitWorkspace(rig.project).run(
+        "worktree",
+        "remove",
+        "--force",
+        str(old_worktree),
+        check=False,
+        destructive_reason="fixture removes the superseded task worktree",
+    )
 
 
 def test_sweep_removes_only_integrated_terminal_worktrees(tmp_path: Path) -> None:

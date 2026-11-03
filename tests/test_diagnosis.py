@@ -345,7 +345,14 @@ def test_provider_no_progress_from_failed_attempts_and_identical_trees(tmp_path:
     git = GitWorkspace(run_path)
     (run_path / "docs" / "a.md").write_text("same\n", encoding="utf-8")
     first = git.commit_all("one")
-    git.run("commit", "--amend", "-m", "two", "--allow-empty")  # a new commit with the identical tree
+    git.run(
+        "commit",
+        "--amend",
+        "-m",
+        "two",
+        "--allow-empty",
+        destructive_reason="test fixture creates a distinct commit with an identical tree",
+    )
     second = git.head()
     assert first != second
     for sha in (first, second):

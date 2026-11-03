@@ -11,15 +11,19 @@ import json
 import re
 from pathlib import Path
 
+from .capabilities import CapabilityRegistryError, resolve_attachments
+
 SKILL_ROOT = Path(__file__).resolve().parent / "skill_packs"
 _SKILL_FILES = {
     "frontend-design": "frontend-design/SKILL.md",
+    "receiving-code-review": "superpowers/receiving-code-review/SKILL.md",
     "systematic-debugging": "superpowers/systematic-debugging/SKILL.md",
     "test-driven-development": "superpowers/test-driven-development/SKILL.md",
     "verification-before-completion": "superpowers/verification-before-completion/SKILL.md",
 }
 _SUPPORT_FILES = {
     "frontend-design": ("frontend-design/LICENSE.txt",),
+    "receiving-code-review": ("superpowers/LICENSE.txt",),
     "systematic-debugging": (
         "superpowers/LICENSE.txt",
         "superpowers/systematic-debugging/root-cause-tracing.md",
@@ -122,7 +126,8 @@ _ADAPTER_POLICY = (
     "Redesign only the surfaces explicitly authorized by the task; a skill is not redesign permission.\n"
     "- StageMesh owns scheduling, workspaces, Git commits, independent review, and merging. "
     "Do not start additional agents, create worktrees, install global plugins, or run upstream "
-    "branch/commit/merge workflows. Supporting scripts are references, not installation steps.\n"
+    "branch/commit/merge workflows. Do not push, publish, post review replies, or contact external systems; "
+    "StageMesh owns delivery and review records. Supporting scripts are references, not installation steps.\n"
     "- Use focused tests for changed behavior and affected callers, plus required contract gates. "
     "This overrides upstream requests for a full project suite on every task. "
     "Do not repeat successful checks with unchanged inputs; broaden only for a failure, "
@@ -139,7 +144,7 @@ class SkillPackError(RuntimeError):
 
 def _task_text(title: str, contract: object | None) -> str:
     fields = [title, str(getattr(contract, "objective", ""))]
-    for attr in ("acceptance_criteria", "public_api", "spec_refs", "skill_refs"):
+    for attr in ("acceptance_criteria", "public_api", "spec_refs", "skill_refs", "capability_refs"):
         values = getattr(contract, attr, ())
         if isinstance(values, (tuple, list)):
             fields.extend(str(value) for value in values)
@@ -199,6 +204,8 @@ def select_skills(
     cosmetic = bool(words & _COSMETIC_WORDS) and not bool(words & _BEHAVIOR_WORDS)
     docs_only = _documentation_only(paths)
     skills: list[str] = []
+    if remediation:
+        skills.append("receiving-code-review")
     if is_frontend_task(title, contract):
         skills.append("frontend-design")
     if remediation or (words & _BUG_WORDS and not cosmetic and not docs_only):
@@ -302,14 +309,31 @@ def skill_prompt(
     remediation: bool = False,
     stage: str = "implementation",
     project: Path | None = None,
+    provider_name: str | None = None,
+    capability_audit: list[dict[str, object]] | None = None,
 ) -> str:
     selected = select_skills(title, contract, remediation=remediation, stage=stage)
     files = _resolve_resources(selected)
     project_files = _project_skills(title, contract, project)
+    requested = getattr(contract, "capability_refs", ())
+    registered = ()
+    if requested:
+        if project is None or provider_name is None:
+            raise CapabilityRegistryError(
+                "registered capabilities require a project workspace and provider identity"
+            )
+        registered = resolve_attachments(
+            project,
+            tuple(str(item) for item in requested),
+            provider=provider_name,
+            stage="REVIEW" if stage == "review" else "IMPLEMENT",
+        )
     lines = [
         "\n" + _ADAPTER_POLICY,
         (
-            "Read the selected full SKILL.md files below before starting this stage. "
+            "Read the selected full standalone SKILL.md files below before starting this stage. "
+            "For a registered Claude plugin package, select and read at least one listed component relevant to the bounded task; "
+            "do not load unrelated plugin skills. "
             "Use ordinary file-reading tools (or Python Path.read_text) if your provider has no native Skill tool. "
             "Read linked companion files when applying their technique. "
             "Apply them subject to the StageMesh adapter policy above; no network fetch is needed. "
@@ -328,4 +352,75 @@ def skill_prompt(
         f"- Project skill {name}: {json.dumps(str(path), ensure_ascii=False)}"
         for name, path in project_files.items()
     )
+    lines.extend(
+        f"- Registered skill {item.id}: {json.dumps(str(item.path), ensure_ascii=False)}"
+        for item in registered
+        if item.kind == "skill"
+    )
+    for item in registered:
+        if item.kind != "claude-plugin" or item.runtime is None:
+            continue
+        skills = item.runtime.get("skills", ())
+        if not isinstance(skills, list):
+            continue
+        for skill in skills:
+            if isinstance(skill, dict) and skill.get("name") and skill.get("path"):
+                lines.append(
+                    f"- Registered Claude plugin skill {item.id}/{skill['name']}: "
+                    f"{json.dumps(str(skill['path']), ensure_ascii=False)}"
+                )
+    for item in registered:
+        if item.kind != "mcp" or item.runtime is None:
+            continue
+        tools = ", ".join(str(tool) for tool in item.runtime.get("allowed_tools", ()))
+        lines.append(
+            f"- Registered MCP server {item.id}: use only when relevant, and only these tools: {tools}. "
+            "StageMesh requires observable tool-call evidence and does not grant other MCP tools."
+        )
+    if capability_audit is not None:
+        capability_audit.extend(
+            _skill_audit(
+                name, path, origin="bundled", source=_SKILL_FILES[name], selection="policy"
+            )
+            for name, path in files.items()
+        )
+        if project is not None:
+            explicit = {
+                str(item).replace("\\", "/") for item in getattr(contract, "skill_refs", ())
+            }
+            for name, path in project_files.items():
+                source = path.resolve().relative_to(project.resolve()).as_posix()
+                capability_audit.append(
+                    _skill_audit(
+                        name,
+                        path,
+                        origin="project-skill",
+                        source=source,
+                        selection="contract" if source in explicit else "policy",
+                    )
+                )
+        capability_audit.extend(item.audit_payload() for item in registered)
     return "\n".join(lines) + "\n\n"
+
+
+def _skill_audit(
+    name: str,
+    path: Path,
+    *,
+    origin: str,
+    source: str,
+    selection: str,
+) -> dict[str, object]:
+    return {
+        "capability_id": name,
+        "kind": "skill",
+        "origin": origin,
+        "source": source,
+        "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "permissions": ["workspace-read"],
+        "selection": selection,
+        "status": "attached",
+        "invocation": "unverified",
+        # Internal dispatch metadata. Audit persistence strips private keys.
+        "_path": str(path.resolve()),
+    }

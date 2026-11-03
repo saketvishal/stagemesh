@@ -90,7 +90,13 @@ def test_candidate_checkout_survives_unknown_cleanup(tmp_path):
         if held is not None and held.exists():
             parent = held.resolve().parent
             assert held.name == "checkout" and parent.name.startswith("stagemesh-candidate-")
-            git.run("worktree", "remove", "--force", str(held))
+            git.run(
+                "worktree",
+                "remove",
+                "--force",
+                str(held),
+                destructive_reason="test fixture releases its held validation worktree",
+            )
             shutil.rmtree(parent)
 
 
@@ -261,7 +267,13 @@ def test_retained_validation_refuses_restart_after_parent_death(tmp_path, monkey
         if checkout is not None and checkout.exists():
             parent = checkout.resolve().parent
             assert checkout.name == "checkout" and parent.name.startswith("stagemesh-candidate-")
-            GitWorkspace(project).run("worktree", "remove", "--force", str(checkout))
+            GitWorkspace(project).run(
+                "worktree",
+                "remove",
+                "--force",
+                str(checkout),
+                destructive_reason="test fixture removes its ephemeral validation worktree",
+            )
             shutil.rmtree(parent)
         temp = held.get("temp")
         if temp is not None and temp.exists():

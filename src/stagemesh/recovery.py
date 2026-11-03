@@ -15,6 +15,7 @@ from typing import Any
 
 from .audit import record_audit
 from .auto_plan import outside_label_selector
+from .autonomy.destructive_git import execute_preserved_cleanup
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
 from .contract_binding import contract_for_candidate
 from .contracts import (
@@ -437,6 +438,7 @@ def advance_baseline(
     latest = store.latest_candidate(task_id)
     ownership = load_ownership(store, task_id)
     old_head: str | None = None
+    snapshot: str | None = None
 
     def preserve(sha: str) -> str:
         ref_name = f"refs/stagemesh/preserved/{key}/{sha[:12]}"
@@ -460,8 +462,17 @@ def advance_baseline(
         if not has_worktree:
             worktree = prepare_task_workspace(project, task_id)  # a worktree for a task that never had one starts at the target
         work = GitFacts(worktree)
-        work.git.run("reset", "--hard", new_base)
-        work.git.run("clean", "-fdq", check=False)
+        cleanup = execute_preserved_cleanup(
+            store,
+            project,
+            task_id,
+            worktree,
+            new_base,
+            "advance an operator-authorized task baseline after preserving all superseded state",
+            snapshot=snapshot,
+        )
+        if not cleanup.completed:
+            raise GitError("preserved baseline cleanup did not complete")
     except GitError as exc:
         raise RecoveryRefusal("git_error", f"task {task_id}: git failed while preserving or resetting the worktree ({str(exc).strip()[:200]}); the ledger was not changed; preserved so far: {preserved}") from exc
     if work.resolve("HEAD") != new_base:
@@ -471,7 +482,14 @@ def advance_baseline(
     moved = record_supervised_move(project, task_id, previous, new_base, None if latest is None else str(latest["sha"]), require_same_dirty=False)
     if not moved:
         if old_head is not None:
-            work.git.run("reset", "--hard", old_head, check=False)
+            execute_preserved_cleanup(
+                store,
+                project,
+                task_id,
+                worktree,
+                old_head,
+                "roll back an unsafe baseline move after preserving the attempted state",
+            )
         raise RecoveryRefusal(
             "worktree_reset_unsafe",
             f"task {task_id}: the reset left files StageMesh cannot reseal (ignored paths or embedded repositories); tracked files were put back on {str(old_head)[:12]} and the ledger was not changed; uncommitted or untracked work is in the snapshot ref and can be restored with `git checkout <snapshot> -- .`; preserved: {preserved}",

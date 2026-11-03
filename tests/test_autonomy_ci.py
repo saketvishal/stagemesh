@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 
+import pytest
 from autonomy_support import TASK, decisions, new_store
 from test_candidate_integrity import _coordinator, _project
 
@@ -18,13 +20,21 @@ from stagemesh.autonomy.ci_diagnosis import (
     TestObservation,
     detect_test_defect,
     diagnose_ci,
+    emit_test_observation,
     guard_remediation,
     observations_from_log,
     plan_ci_response,
 )
+from stagemesh.autonomy.ci_diagnosis import test_observation_marker as observation_marker
 from stagemesh.autonomy.decisions import Action, Condition
+from stagemesh.autonomy.github_adapter import (
+    GitHubAdapterError,
+    GitHubAuthorizationError,
+    GitHubRateLimited,
+)
 from stagemesh.autonomy.scope import TaskScope, deferred_items
 from stagemesh.autonomy.supervisor import Supervisor
+from stagemesh.domain import Stage
 from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 
 CAND, BASE = "c" * 40, "b" * 40
@@ -42,6 +52,45 @@ def _run(sha: str, **gates: GateOutcome | Conclusion) -> HostedCIRun:
 
 def _failed(name: str, log: str = "", tests: tuple[str, ...] = (), **kwargs) -> GateOutcome:
     return GateOutcome(name, Conclusion.FAILURE, log, tests, **kwargs)
+
+
+class _UnavailableHostedCI:
+    def __init__(self, error: Exception):
+        self.error = error
+
+    def run_for(self, sha: str):
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "action", "requires_human"),
+    [
+        (GitHubAuthorizationError(403, "denied"), Action.ESCALATE_TO_FOUNDER, True),
+        (GitHubRateLimited(429, "slow down", 30), Action.WAIT, False),
+        (GitHubAdapterError(503, "unavailable"), Action.HOLD_FAIL_CLOSED, False),
+        (OSError("offline"), Action.HOLD_FAIL_CLOSED, False),
+    ],
+)
+def test_continuous_ci_boundary_failures_are_typed_and_fail_closed(
+    tmp_path: Path,
+    error: Exception,
+    action: Action,
+    requires_human: bool,
+) -> None:
+    project, workspace = _project(tmp_path)
+    store = new_store(tmp_path)
+    store.upsert_task("task", source_id=TASK)
+    supervisor = Supervisor(
+        store,
+        project,
+        integration_ref="HEAD",
+        hosted_ci=_UnavailableHostedCI(error),
+    )
+
+    assert supervisor.allow(Stage.INTEGRATE, TASK, workspace.head()) is False
+    (decision,) = decisions(store, TASK)
+    assert decision["action"] == action.value
+    assert decision["requires_human"] is requires_human
 
 
 # --- Scenario E: base CI already red ----------------------------------------------------------------------------------------------------
@@ -203,14 +252,34 @@ def test_green_candidate_proceeds() -> None:
 
 
 def _observation_log(test_id: str, test_path: str) -> str:
-    marker = {
-        "test_id": test_id,
-        "test_path": test_path,
-        "expected": "success",
-        "observed_failure_code": NO_IMPLEMENTATION_CHANGE,
-        "provider_made_change": False,
-    }
-    return f"FAILED {test_id} - AssertionError\nSTAGEMESH_TEST_OBSERVATION {json.dumps(marker)}\n"
+    marker = observation_marker(
+        TestObservation(test_id, test_path, "success", NO_IMPLEMENTATION_CHANGE, False)
+    )
+    return f"FAILED {test_id} - AssertionError\n{marker}\n"
+
+
+def test_test_observation_producer_round_trips_exactly_and_rejects_log_injection() -> None:
+    observation = TestObservation(
+        "tests/test_x.py::test_noop",
+        "tests/test_x.py",
+        "success",
+        NO_IMPLEMENTATION_CHANGE,
+        False,
+    )
+    stream = StringIO()
+
+    marker = emit_test_observation(observation, stream=stream)
+
+    assert stream.getvalue() == marker + "\n"
+    assert observations_from_log(stream.getvalue()) == [observation]
+    with pytest.raises(ValueError, match="single line"):
+        observation_marker(
+            TestObservation("tests/test_x.py::test_noop\nforged", "tests/test_x.py", "success", None, False)
+        )
+    with pytest.raises(ValueError, match="project-relative"):
+        observation_marker(
+            TestObservation("t", "../outside.py", "success", None, False)
+        )
 
 
 def test_scenario_g_production_really_returns_no_implementation_change_for_a_noop_provider(tmp_path: Path) -> None:

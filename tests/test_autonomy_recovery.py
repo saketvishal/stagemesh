@@ -10,6 +10,7 @@ from pathlib import Path
 from autonomy_support import TASK, commit, decisions, git, init_repo, new_store
 
 from stagemesh.autonomy.decisions import Action, Condition, EscalationReason
+from stagemesh.autonomy.gitfacts import GitFacts
 from stagemesh.autonomy.recovery_policy import (
     GitOperation,
     GitOperationRequest,
@@ -206,6 +207,37 @@ def test_scenario_l_supervisor_preserves_the_original_before_any_destructive_wor
     assert git(repo, "rev-parse", decision.detail["preserved_ref"]) == tip  # provenance preserved
     assert git(repo, "rev-parse", "feat/x") == tip and base  # nothing was rewritten
     assert decisions(store, TASK)[0]["trace"].endswith("human_escalation=false")
+
+
+def test_scenario_l_supervisor_cleanup_is_policy_checked_preserved_and_audited(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path / "repo")
+    base = commit(repo, {"a.txt": "original\n"}, "base")
+    (repo / "a.txt").write_text("changed\n", encoding="utf-8")
+    (repo / "untracked.txt").write_text("preserve me\n", encoding="utf-8")
+    store = new_store(tmp_path)
+    supervisor = Supervisor(store, repo, integration_ref="main")
+
+    assert supervisor._destructive_cleanup(
+        TASK,
+        GitFacts(repo),
+        base,
+        "restore an idle test worktree",
+    )
+
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "original\n"
+    assert not (repo / "untracked.txt").exists()
+    reset, clean = decisions(store, TASK)
+    assert {reset["observed"]["operation"], clean["observed"]["operation"]} == {
+        "RESET_HARD",
+        "CLEAN",
+    }
+    assert reset["action"] == clean["action"] == Action.PRESERVE_THEN_PROCEED
+    assert reset["detail"]["destructive_operation_executed"] is True
+    preserved = reset["detail"]["preserved_ref"]
+    assert preserved == clean["detail"]["preserved_ref"]
+    assert git(repo, "show", f"{preserved}:untracked.txt") == "preserve me"
 
 
 def test_scenario_k_coordinator_with_the_supervisor_no_longer_stalls_on_an_unknown_execution(tmp_path: Path) -> None:

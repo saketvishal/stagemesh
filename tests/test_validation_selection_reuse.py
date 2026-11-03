@@ -123,7 +123,14 @@ def test_prior_pass_is_reused_only_for_identical_complete_inputs(tmp_path: Path)
     assert counter.read_text() == "x"
 
     # Same tree under a new commit (message-only change): identical inputs, so the passed gate is reused and the reuse is reported.
-    git.run("commit", "-q", "--amend", "-m", "reworded candidate")
+    git.run(
+        "commit",
+        "-q",
+        "--amend",
+        "-m",
+        "reworded candidate",
+        destructive_reason="test fixture rewords the candidate to exercise validation selection reuse",
+    )
     second = git.head()
     assert second != first
     store.add_candidate(TASK, second, "p", durable_handoff=True)
@@ -184,7 +191,14 @@ def test_reuse_is_all_or_nothing_so_gates_that_depend_on_each_others_side_effect
 
     flag.write_text("ok", encoding="utf-8")  # the environment problem is fixed; the tree is unchanged
     git = GitWorkspace(project)
-    git.run("commit", "-q", "--amend", "-m", "same tree, new commit")
+    git.run(
+        "commit",
+        "-q",
+        "--amend",
+        "-m",
+        "same tree, new commit",
+        destructive_reason="test fixture replaces the candidate commit while preserving its tree",
+    )
     second = git.head()
     store.add_candidate(TASK, second, "p", durable_handoff=True)
     assert Validator().validate(store, TASK, second, project) is EvidenceStatus.PASSED
