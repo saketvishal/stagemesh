@@ -696,6 +696,25 @@ def test_runtime_activates_claude_plugin_skill_and_requires_load_evidence(
         assert result.status == "SUCCEEDED", result.failure_reason
         assert "--output-format" in captured[0] and "stream-json" in captured[0]
         assert captured[0][captured[0].index("--plugin-dir") + 1] == str(plugin.resolve())
+        activation_row = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='capability.activated' "
+            "AND payload LIKE '%review-kit%'"
+        ).fetchone()
+        activation_payload = json.loads(activation_row["payload"])
+        assert activation_payload == {
+            "activation": "skills-only-plugin-dir",
+            "activation_evidence": "process-started",
+            "capability_id": "review-kit",
+            "content_sha256": activation_payload["content_sha256"],
+            "kind": "claude-plugin",
+            "provider": "claude",
+            "stage": "IMPLEMENT",
+            "status": "activated",
+            "task_id": "task-1",
+        }
+        assert len(activation_payload["content_sha256"]) == 64
+        assert str(plugin.resolve()) not in activation_row["payload"]
+        assert "_path" not in activation_payload and "_plugin" not in activation_payload
         row = store.conn.execute(
             "SELECT payload FROM audit_events WHERE event_type='capability.loaded' "
             "AND payload LIKE '%review-kit%'"

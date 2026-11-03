@@ -310,8 +310,12 @@ penalize the provider for a compatibility mismatch.
 
 That is deliberately not an invocation claim. Default skill transport proves that the prompt contained a readable path; it does not
 prove the model opened or followed the file. The Codex and Claude MCP adapters use structured event streams for execution binding,
-allowlist enforcement, argument/result redaction, and verified invocation receipts. Self-reported prose is not sufficient. Claude
-`--plugin-dir` configuration proves bounded activation, not that Claude discovered, loaded, or followed a plugin skill.
+allowlist enforcement, argument/result redaction, and verified invocation receipts. Self-reported prose is not sufficient. After a
+Claude process successfully starts with an exact validated `--plugin-dir`, StageMesh records a privacy-bounded
+`capability.activated` receipt. It contains the capability id and integrity hashes plus the activation mode, provider, and stage; it
+does not contain the plugin path, prompt, command, provider output, or skill content. Activation proves only that the process started
+with the per-invocation flag, not that Claude discovered, loaded, followed, or correctly applied a plugin skill. Preflight and failed
+process construction never emit this receipt.
 
 With `observed-load-required`, successful normalized reads produce `capability.loaded` receipts containing only provider, stage,
 capability id, content hash, and ordering (plus execution identity when the stage owns one). Raw event streams, prompts, file contents,
@@ -320,11 +324,12 @@ provider without a provider cooldown. This proves an observable load, not that t
 and independent review remain authoritative.
 
 `stagemesh capabilities --task TASK_ID --json` reads those bounded receipts through SQLite read-only mode and reports counts and the
-latest status separately: `attached-unverified`, `loaded`, `invoked`, or `evidence-missing`. `stagemesh task-doctor` projects the same
+latest status separately: `attached-unverified`, `activated`, `loaded`, `invoked`, or `evidence-missing`. `stagemesh task-doctor` projects the same
 registered/requested/observed distinction, and run-window JSON reports include the bounded projection for every attempted task. A
 missing runtime database remains `history_available: false`;
-the inspection command does not create one. `loaded` means an exact skill read was observed. `invoked` is reserved for an allowlisted
-MCP tool call. Neither means that the capability was correctly applied.
+the inspection command does not create one. `activated` is reserved for a validated Claude plugin root present on a successfully
+started provider process. `loaded` means an exact skill read was observed. `invoked` is reserved for an allowlisted MCP tool call.
+None of these states means that the capability was correctly applied.
 
 A requested Codex or Claude MCP capability always requires at least one observed allowlisted tool call. StageMesh records
 `capability.invoked` with the capability id, manifest hash, and tool names only. Raw arguments, results, prompts, paths, and event

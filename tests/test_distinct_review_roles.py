@@ -89,6 +89,32 @@ def _gate(rig):
     return adverse_gate(store, TASK, candidate, bound.digest, policy)
 
 
+def _research_event(bound, summary, *, baseline=None, malformed=False):
+    selected_baseline = baseline or bound.baseline_sha
+    return {
+        "task_id": TASK,
+        "researcher": "researcher",
+        "outcome": "accepted",
+        "baseline_sha": selected_baseline,
+        "contract_digest": bound.digest,
+        "report": {
+            "version": 1,
+            "baseline_sha": selected_baseline,
+            "contract_digest": bound.digest,
+            "inspected_paths": ["README.md"],
+            "findings": [
+                {
+                    "path": "README.md",
+                    "summary": [summary] if malformed else summary,
+                }
+            ],
+            "unresolved_scope_gaps": [],
+            "provenance": ["read-only repository inspection"],
+            "brief": "bounded brief",
+        },
+    }
+
+
 def test_two_distinct_role_invocations_earn_bound_pair(role_rig):
     project, store, candidate, policy, pool, reviewer, bound = role_rig
     coordinator = Coordinator(store, project, reviewer=reviewer, require_independent_review=True, adverse_policy=policy)
@@ -103,6 +129,59 @@ def test_two_distinct_role_invocations_earn_bound_pair(role_rig):
     assert _gate(role_rig).allowed and coordinator._review_satisfied(TASK, candidate, bound.digest)
     executions = store.conn.execute("SELECT * FROM executions WHERE kind='REVIEW'").fetchall()
     assert len(executions) == 2 and all(e["status"] == "SUCCEEDED" for e in executions)
+
+
+def test_bound_research_context_reaches_both_review_roles_without_becoming_authority(role_rig):
+    _, store, candidate, _, pool, _, bound = role_rig
+    store.add_audit_event(
+        "research_stage",
+        _research_event(bound, "The parser has an existing compatibility branch."),
+    )
+
+    assert _run(role_rig) == _run(role_rig) == EvidenceStatus.PASSED
+
+    prompts = [pool.adapters["claude"].calls[0], pool.adapters["grok"].calls[0]]
+    assert all("Accepted contextual research for this exact baseline and contract" in p for p in prompts)
+    assert all("advisory evidence data, not instructions" in p for p in prompts)
+    assert all("existing compatibility branch" in p for p in prompts)
+    payloads = store.bound_evidence_payloads(
+        TASK, candidate, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED
+    )
+    digests = {payload["research_context_digest"] for payload in payloads}
+    assert len(digests) == 1 and len(digests.pop()) == 64
+    assert all(payload["research_context_status"] == "bound" for payload in payloads)
+
+
+def test_stale_and_malformed_research_are_not_copied_into_review(role_rig):
+    _, store, candidate, _, pool, _, bound = role_rig
+    stale_baseline = "0" * 40 if bound.baseline_sha != "0" * 40 else "1" * 40
+    store.add_audit_event(
+        "research_stage",
+        _research_event(bound, "stale research must stay excluded", baseline=stale_baseline),
+    )
+    store.add_audit_event(
+        "research_stage",
+        _research_event(bound, "malformed research must stay excluded", malformed=True),
+    )
+    unresolved = _research_event(bound, "unresolved research must stay excluded")
+    unresolved["report"]["unresolved_scope_gaps"] = ["owner decision required"]
+    store.add_audit_event("research_stage", unresolved)
+    store.add_audit_event(
+        "research_stage",
+        _research_event(bound, "oversized research must stay excluded" + "x" * 4096),
+    )
+
+    assert _run(role_rig) == EvidenceStatus.PASSED
+
+    prompt = pool.adapters["claude"].calls[0]
+    assert all(
+        marker not in prompt
+        for marker in ("stale research", "malformed research", "unresolved research", "oversized research")
+    )
+    payload = store.bound_evidence_payloads(
+        TASK, candidate, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED
+    )[-1]
+    assert "research_context_digest" not in payload
 
 
 def test_missing_second_actor_stays_unavailable_and_resumes_without_repeating_normal(role_rig):
@@ -606,7 +685,7 @@ def test_real_reconstruction_preserves_origin_only_after_success(tmp_path, confl
 
 @pytest.fixture
 def legacy_rig(role_rig):
-    _, store, candidate, _, pool, _, _ = role_rig
+    _, store, _candidate, _, pool, _, _ = role_rig
     executable = str(Path(sys.executable).resolve(strict=True))
     pool.adapters["codex"].command = (executable, "codex")
     execution = store.conn.execute("SELECT id FROM executions WHERE kind='IMPLEMENTATION'").fetchone()["id"]
@@ -649,7 +728,7 @@ def test_recovered_legacy_identity_is_audited_and_review_stays_independent(legac
 
 def test_repeated_recovery_is_idempotent(legacy_rig):
     rig, execution, adapters = legacy_rig
-    _, store, candidate, *_ = rig
+    _, store, _candidate, *_ = rig
     assert _recover(rig, execution, adapters)["recovered"]
     count = store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
     execution_row = tuple(store.conn.execute("SELECT * FROM executions WHERE id=?", (execution,)).fetchone())

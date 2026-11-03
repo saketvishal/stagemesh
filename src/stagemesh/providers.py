@@ -429,6 +429,9 @@ class RuntimeCommandAdapter:
                 pid=identity.pid, process_create_time=identity.create_time, boot_id=identity.boot_id,
                 executable=identity.executable,
             )
+            _record_capability_activations(
+                store, task_id, self.name, "IMPLEMENT", capability_audit
+            )
             lease.bind_execution(attempt_execution_id)
             attempt_call = CallRecorder(store, task_id, purpose, self.name)
             try:
@@ -943,6 +946,10 @@ class RuntimeCommandAdapter:
             except OSError:
                 cleanup_confirmed = True
                 raise
+            if store is not None and task_id is not None:
+                _record_capability_activations(
+                    store, task_id, self.name, "REVIEW", capability_audit
+                )
             note_review_identity(command_identity)
             stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
             cleanup_confirmed = True
@@ -1538,6 +1545,43 @@ def _record_capability_attachments(
                 **public,
             },
         )
+
+
+def _record_capability_activations(
+    store: Store,
+    task_id: str,
+    provider: str,
+    stage: str,
+    attachments: list[dict[str, object]],
+) -> None:
+    """Record a validated Claude plugin flag after the provider process starts.
+
+    Activation proves only that ``Popen`` returned for a command containing the
+    validated, per-invocation ``--plugin-dir`` route. It does not claim that
+    Claude discovered, read, followed, or correctly applied any plugin skill.
+    """
+    for attachment in attachments:
+        if attachment.get("kind") != "claude-plugin":
+            continue
+        runtime = attachment.get("_plugin")
+        activation = runtime.get("activation") if isinstance(runtime, dict) else None
+        if activation != "skills-only-plugin-dir":
+            continue
+        payload: dict[str, object] = {
+            "task_id": task_id,
+            "provider": provider,
+            "stage": stage,
+            "capability_id": attachment["capability_id"],
+            "kind": "claude-plugin",
+            "content_sha256": attachment["content_sha256"],
+            "activation": activation,
+            "activation_evidence": "process-started",
+            "status": "activated",
+        }
+        source_tree_sha256 = attachment.get("source_tree_sha256")
+        if isinstance(source_tree_sha256, str):
+            payload["source_tree_sha256"] = source_tree_sha256
+        store.add_audit_event("capability.activated", payload)
 
 
 def _frontend_design_prompt(title: str, contract: object | None) -> str:

@@ -160,6 +160,11 @@ the driver's stop-request boundary. Normal findings require remediation. Adverse
 require remediation; actionable advisory findings stay in evidence. Missing, malformed or incomplete verdicts never
 become advisory passes. Custom severity names remain supported by the policy.
 
+When implementation recorded an accepted contextual-research report for the exact frozen baseline and contract, both
+normal and adverse review receive the same bounded findings as explicitly advisory, untrusted data. StageMesh excludes
+stale, unresolved, malformed and oversized research instead of copying it into the review prompt, and records only a digest
+of the delivered context in review evidence. Research never widens the contract or substitutes for reviewer inspection.
+
 Both roles must execute under distinct providers and configured command identities, independently of the implementer.
 Selection uses only the existing authorized provider pool, excludes actual fallback actors and their command aliases,
 and holds when another qualified reviewer is unavailable. This does not register or authorize another provider.
