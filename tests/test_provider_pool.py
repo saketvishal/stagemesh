@@ -17,6 +17,7 @@ from stagemesh.execution import ExecutionResult
 from stagemesh.git import GitWorkspace
 from stagemesh.integration import Integrator
 from stagemesh.persistence import Store
+from stagemesh.provider_acceptance import LiveProviderSmokeResult, record_live_provider_acceptance
 from stagemesh.provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -25,7 +26,6 @@ from stagemesh.provider_pool import (
     ProviderPool,
     default_pools,
 )
-from stagemesh.provider_acceptance import LiveProviderSmokeResult, record_live_provider_acceptance
 from stagemesh.providers import RuntimeCommandAdapter
 from stagemesh.review import Reviewer
 from stagemesh.workspaces import task_workspace
@@ -743,9 +743,20 @@ def test_review_stage_preflight_ignores_implementation_cooldown(tmp_path: Path) 
     assert any(verdict.provider != "grok" and verdict.eligible for verdict in review)
 
 
-def test_malformed_review_output_does_not_cool_provider(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "malformed_review_output",
+        "capability_evidence_missing: review-skill",
+        "capability_policy_violation: unexpected tool",
+        "provider_event_response_missing",
+    ],
+)
+def test_review_output_and_capability_evidence_failures_do_not_cool_provider(
+    tmp_path: Path, reason: str
+) -> None:
     rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"})
-    rig.pool.record_failure(rig.store, REVIEW, TASK, "claude", "malformed_review_output")
+    rig.pool.record_failure(rig.store, REVIEW, TASK, "claude", reason)
 
     same = {v.provider: v for v in rig.pool.evaluate(rig.store, REVIEW, TASK, implementer="codex")}
     other = {v.provider: v for v in rig.pool.evaluate(rig.store, REVIEW, "OTHER-TASK", implementer="codex")}

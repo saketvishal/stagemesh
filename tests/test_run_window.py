@@ -12,6 +12,7 @@ from test_survivor_wave import Rig, make_store
 import stagemesh.cli as cli_module
 import stagemesh.run_window as rw
 from stagemesh import readiness
+from stagemesh.contract_binding import bind_task_contract
 from stagemesh.domain import ExecutionKind, Stage
 from stagemesh.runtime_freshness import RuntimeFreshness
 from stagemesh.survivor_wave import ORPHAN_EVENT, RepoState, RunResult
@@ -220,6 +221,87 @@ def test_a_window_runs_eligible_tasks_opens_prs_and_reports_everything(tmp_path:
     text = rw.format_window_report(report)
     for needle in ("run window", "preflight:", "what ran: 2 task(s)", "provider health:", "ledger:", "left behind: 0 running", "next:"):
         assert needle in text
+
+
+def test_window_report_includes_bounded_task_capability_evidence(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
+    contract_path = project / ".stagemesh" / "contracts" / "1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["capability_refs"] = ["domain-review"]
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    store.conn.execute("DELETE FROM task_contracts WHERE task_id='1'")
+    store.conn.commit()  # let admission freeze the modified fixture contract
+    bind_task_contract(store, project, "1", str(store.task_baseline("1")))
+    skill = project / "agent-skills" / "domain-review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Domain review\n", encoding="utf-8")
+    (project / ".stagemesh" / "capabilities.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "capabilities": [
+                    {
+                        "id": "domain-review",
+                        "kind": "skill",
+                        "source": "agent-skills/domain-review/SKILL.md",
+                        "enabled": True,
+                        "providers": ["codex"],
+                        "stages": ["IMPLEMENT"],
+                        "permissions": ["workspace-read"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def observed(rig: Rig, task_id: str) -> RunResult:
+        worker = rig.worker_store()
+        try:
+            worker.add_audit_event(
+                "capability.attached",
+                {
+                    "task_id": task_id,
+                    "provider": "codex",
+                    "stage": "IMPLEMENT",
+                    "capability_id": "domain-review",
+                    "raw_prompt": "must not appear",
+                },
+            )
+            worker.add_audit_event(
+                "capability.loaded",
+                {
+                    "task_id": task_id,
+                    "provider": "codex",
+                    "stage": "IMPLEMENT",
+                    "capability_id": "domain-review",
+                },
+            )
+        finally:
+            worker.close()
+        return rig.finish_done(task_id)
+
+    rig.behaviour["1"] = observed
+    report = rw.run_window(
+        store,
+        project,
+        config,
+        options,
+        hooks,
+        base_ref="refs/heads/main",
+        staging_ref="refs/heads/wave/staging",
+        **kwargs,
+    )
+
+    capability_report = report.capability_usage["1"]
+    assert capability_report["requested"] == ["domain-review"]
+    (row,) = capability_report["capabilities"]
+    assert row["registered"] is True and row["requested"] is True
+    assert row["usage"]["status"] == "loaded"
+    written = json.loads(options.report_path.read_text(encoding="utf-8"))
+    assert written["tasks"][0]["capabilities"] == capability_report
+    assert "raw_prompt" not in json.dumps(written["tasks"][0]["capabilities"])
+    assert "capabilities: 1 requested; 1 observed" in rw.format_window_report(report)
 
 
 def test_an_empty_backlog_is_a_clean_window_with_nothing_to_do(tmp_path: Path) -> None:

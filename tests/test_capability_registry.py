@@ -794,6 +794,137 @@ def test_runtime_review_receives_bound_review_capability_and_records_attachment(
         store.close()
 
 
+@pytest.mark.parametrize("case", ["success", "missing_read", "missing_response"])
+def test_observed_load_policy_enforces_review_skill_reads_and_records_redacted_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "StageMesh Test")
+    _skill(project)
+    _registry(
+        project,
+        [_entry("domain-review", providers=["codex"], stages=["REVIEW"])],
+    )
+    registry = project / ".stagemesh" / "capabilities.json"
+    registry_payload = json.loads(registry.read_text(encoding="utf-8"))
+    registry_payload["skill_evidence_mode"] = OBSERVED_LOAD_REQUIRED
+    registry.write_text(json.dumps(registry_payload), encoding="utf-8")
+    (project / "README.md").write_text("candidate\n", encoding="utf-8")
+    git.commit_all("candidate")
+    candidate = git.head()
+    contract = ChangeContract(
+        objective="Review the candidate",
+        allowed_files=("README.md",),
+        capability_refs=("domain-review",),
+    )
+    canonical = canonical_contract_json(contract)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Review the candidate", source_id="task-1")
+    store.add_candidate(task_id, candidate, "implementer", durable_handoff=True)
+    store.bind_contract(task_id, candidate, candidate, 1, digest, canonical)
+    seen_commands: list[list[str]] = []
+
+    def prepare_review(_source: Path, target: Path, _candidate: str) -> None:
+        shutil.copytree(project, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+
+    def popen(command: list[str], *_args: object, **_kwargs: object) -> SimpleNamespace:
+        seen_commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    def communicate(_proc: object, prompt: str, _timeout: float) -> tuple[str, str, bool]:
+        paths = [
+            json.loads(line.split(": ", 1)[1])
+            for line in prompt.splitlines()
+            if line.startswith(("- Skill ", "- Project skill ", "- Registered skill "))
+        ]
+        events = [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": ["Get-Content", path],
+                    },
+                }
+            )
+            for path in paths
+            if not (
+                case == "missing_read"
+                and str(path).replace("\\", "/").endswith(
+                    "agent-skills/domain-review/SKILL.md"
+                )
+            )
+        ]
+        if case != "missing_response":
+            events.append(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": '{"decision":"PASS"}',
+                        },
+                    },
+                )
+            )
+        return "\n".join(events), "", False
+
+    monkeypatch.setattr(providers_module, "_prepare_review_checkout", prepare_review)
+    monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
+    monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
+    monkeypatch.setattr(providers_module, "_authorization_refusal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(providers_module, "provider_environment", lambda *_args: {})
+    monkeypatch.setattr(providers_module.shutil, "which", lambda _command: "codex")
+    monkeypatch.setattr(providers_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(providers_module, "communicate_bounded", communicate)
+    try:
+        response = RuntimeCommandAdapter("codex", ("codex", "exec")).review_candidate(
+            "Review exactly this candidate.",
+            project,
+            candidate,
+            store=store,
+            task_id=task_id,
+        )
+
+        assert "--json" in seen_commands[0]
+        payload = json.loads(response)
+        if case == "missing_read":
+            assert payload["decision"] == "INFRASTRUCTURE_FAILURE"
+            assert payload["reason"].startswith("capability_evidence_missing:")
+            missing = store.conn.execute(
+                "SELECT payload FROM audit_events WHERE event_type='capability.evidence_missing' "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+            evidence = json.loads(missing["payload"])
+            assert evidence["stage"] == "REVIEW"
+            assert "domain-review" in evidence["missing_capabilities"]
+        elif case == "missing_response":
+            assert payload == {
+                "decision": "INFRASTRUCTURE_FAILURE",
+                "reason": "provider_event_response_missing",
+            }
+        else:
+            assert payload == {"decision": "PASS"}
+            loaded = store.conn.execute(
+                "SELECT payload FROM audit_events WHERE event_type='capability.loaded' "
+                "AND json_extract(payload, '$.capability_id')='domain-review'"
+            ).fetchone()
+            evidence = json.loads(loaded["payload"])
+            assert evidence["stage"] == "REVIEW"
+            assert evidence["invocation"] == "observed-load"
+            assert "_path" not in evidence and str(tmp_path) not in json.dumps(evidence)
+    finally:
+        store.close()
+
+
 def test_codex_mcp_is_configured_per_invocation_with_no_ambient_servers(tmp_path: Path) -> None:
     manifest = _mcp_manifest(tmp_path)
     _registry(

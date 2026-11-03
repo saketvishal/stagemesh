@@ -18,10 +18,10 @@ read-only Codex stdio MCP adapter. Executable Claude plugin components and MCP r
 remain inventory-only and fail closed.
 
 The registry may set `"skill_evidence_mode": "observed-load-required"`. In that opt-in mode, StageMesh enables the selected provider's
-JSON event stream and accepts an implementation result only when every selected implementation skill was observed being read before
-the first recorded mutation. The default is `attachment-required`, which proves verified prompt attachment but not provider loading.
-Review-stage skill attachment is supported, but review load enforcement is not yet implemented and is reported as
-`attached-unverified`, never `loaded`.
+JSON event stream and accepts an implementation result or review verdict only when every selected skill for that stage was observed
+being read before the first recorded mutation. Review JSONL output is projected through an allowlisted final-answer parser; an unknown
+event shape cannot be treated as a verdict. The default is `attachment-required`, which proves verified prompt attachment but not
+provider loading.
 
 ## Registry and opt-in
 
@@ -188,13 +188,16 @@ prove the model opened or followed the file. The Codex MCP adapter uses its stru
 enforcement, argument/result redaction, and verified invocation receipts. Self-reported prose is not sufficient. Executable plugin
 and other MCP adapters still need equivalent evidence.
 
-With `observed-load-required`, successful normalized reads produce `capability.loaded` receipts containing only provider, execution,
-capability id, content hash, and ordering. Raw event streams, prompts, file contents, and absolute paths are not persisted. Missing
-evidence rejects the result and moves to the next provider without a provider cooldown. This proves an observable load, not that the
-model followed the skill correctly; contract gates and independent review remain authoritative.
+With `observed-load-required`, successful normalized reads produce `capability.loaded` receipts containing only provider, stage,
+capability id, content hash, and ordering (plus execution identity when the stage owns one). Raw event streams, prompts, file contents,
+and absolute paths are not persisted. Missing evidence rejects the implementation result or review verdict and moves to the next
+provider without a provider cooldown. This proves an observable load, not that the model followed the skill correctly; contract gates
+and independent review remain authoritative.
 
 `stagemesh capabilities --task TASK_ID --json` reads those bounded receipts through SQLite read-only mode and reports counts and the
-latest status separately: `attached-unverified`, `loaded`, or `invoked`. A missing runtime database remains `history_available: false`;
+latest status separately: `attached-unverified`, `loaded`, `invoked`, or `evidence-missing`. `stagemesh task-doctor` projects the same
+registered/requested/observed distinction, and run-window JSON reports include the bounded projection for every attempted task. A
+missing runtime database remains `history_available: false`;
 the inspection command does not create one. `loaded` means an exact skill read was observed. `invoked` is reserved for an allowlisted
 MCP tool call. Neither means that the capability was correctly applied.
 
@@ -208,7 +211,6 @@ is a capability policy violation and the candidate is rejected.
 - No network or global installer, marketplace client, plugin hook runner, or arbitrary setup command.
 - No provider-neutral MCP process sandbox, credential broker, HTTP/network transport, or MCP adapter outside Codex.
 - No executable Claude plugin activation, marketplace installation, or translation to Codex/Grok.
-- No review-stage structured load receipt enforcement yet; review skill delivery remains `attached-unverified`.
 - No ambient user-home discovery. Project registry state is read from the isolated checkout only.
 
 Those boundaries keep an available plugin or server from silently becoming an authorized executable. Provider-specific adapters can

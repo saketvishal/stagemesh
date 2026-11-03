@@ -39,7 +39,7 @@ from stagemesh.recovery import (
     task_doctor,
 )
 from stagemesh.remediation import finding_identity, remediation_context
-from stagemesh.run_ready import RunSummary, drive_task, format_stop
+from stagemesh.run_ready import RunSummary, format_stop
 from stagemesh.validation import Validator
 from stagemesh.workspaces import prepare_task_workspace
 
@@ -842,6 +842,81 @@ def test_task_doctor_text_and_json_output(tmp_path: Path) -> None:
     assert "contract: digest" in text and "version 1" in text and "[outside_allowed_files]" in text
     assert "diagnosis: stale_baseline" in text and f"next: stagemesh rebaseline-task --task {TASK}" in text
     assert cli(project, "task-doctor", "--task", "nope")[0] == 2
+
+
+def test_task_doctor_distinguishes_requested_registered_and_observed_capabilities(
+    tmp_path: Path,
+) -> None:
+    contract = {
+        **DOCS_CONTRACT,
+        "capability_refs": ["domain-review", "removed-review"],
+    }
+    project, store = _setup(tmp_path, contract)
+    baseline = store.set_task_baseline(TASK, head(project))
+    bind_task_contract(store, project, TASK, baseline)
+    skill = project / "agent-skills" / "domain-review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Domain review\n", encoding="utf-8")
+    (project / ".stagemesh" / "capabilities.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "capabilities": [
+                    {
+                        "id": "domain-review",
+                        "kind": "skill",
+                        "source": "agent-skills/domain-review/SKILL.md",
+                        "enabled": True,
+                        "providers": ["codex"],
+                        "stages": ["IMPLEMENT", "REVIEW"],
+                        "permissions": ["workspace-read"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.add_audit_event(
+        "capability.attached",
+        {
+            "task_id": TASK,
+            "provider": "codex",
+            "stage": "IMPLEMENT",
+            "capability_id": "domain-review",
+        },
+    )
+    store.add_audit_event(
+        "capability.evidence_missing",
+        {
+            "task_id": TASK,
+            "provider": "codex",
+            "stage": "REVIEW",
+            "missing_capabilities": ["removed-review"],
+            "private_provider_output": "must not appear",
+        },
+    )
+    before = audit_count(store)
+
+    report = task_doctor(store, project, TASK)
+
+    assert audit_count(store) == before
+    capabilities = report["capabilities"]
+    assert capabilities["status"] == "available"
+    assert capabilities["requested"] == ["domain-review", "removed-review"]
+    assert capabilities["unregistered_requested"] == ["removed-review"]
+    rows = {row["id"]: row for row in capabilities["capabilities"]}
+    assert rows["domain-review"]["registered"] is True
+    assert "configuration_error" not in rows["domain-review"]
+    assert rows["domain-review"]["usage"]["status"] == "attached-unverified"
+    assert rows["removed-review"]["registered"] is False
+    assert rows["removed-review"]["usage"]["evidence_missing"] == 1
+    assert "private_provider_output" not in json.dumps(capabilities)
+    text = format_doctor(report)
+    capability_line = next(
+        line for line in text.splitlines() if line.strip().startswith("capabilities:")
+    )
+    assert "2 requested; 2 observed" in capability_line
+    assert "removed-review: UNREGISTERED; requested; usage=evidence-missing" in text
 
 
 def test_task_doctor_projects_latest_tool_failure_and_stops_generic_continue(tmp_path: Path) -> None:

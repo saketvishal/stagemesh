@@ -17,6 +17,7 @@ from .audit import record_audit
 from .auto_plan import outside_label_selector
 from .autonomy.destructive_git import execute_preserved_cleanup
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
+from .capabilities import CapabilityRegistryError, task_capability_summary
 from .config import AdverseReviewPolicy, ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
 from .contracts import (
@@ -867,6 +868,7 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
         "latest_integration": details["latest_integration"],
         "baseline": baseline,
         "contract": contract,
+        "capabilities": _capabilities_summary(store, project, task_id),
         "validation_failures": validation_failures,
         "review_findings": review_findings,
         "tool_failure": _latest_tool_failure(store, task_id),
@@ -893,6 +895,38 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
     }
     report["recommended_command"], report["recommendation_reason"] = _recommend(report, task_id, ref)
     return report
+
+
+def _capabilities_summary(store: Store, project: Path, task_id: str) -> dict[str, Any]:
+    """Read-only capability truth for task-doctor, without provider-private data."""
+    requested: tuple[str, ...] = ()
+    frozen = store.task_contract(task_id)
+    if frozen is not None:
+        try:
+            requested = bound_contract_from_record(dict(frozen)).contract.capability_refs
+        except (ContractError, TypeError, ValueError) as exc:
+            return {
+                "task_id": task_id,
+                "status": "unavailable",
+                "reason": f"invalid frozen contract: {exc}"[:300],
+                "requested": [],
+                "capabilities": [],
+            }
+    try:
+        return {
+            "status": "available",
+            **task_capability_summary(
+                project, store.conn, task_id, requested=requested
+            ),
+        }
+    except (CapabilityRegistryError, OSError) as exc:
+        return {
+            "task_id": task_id,
+            "status": "unavailable",
+            "reason": str(exc)[:300],
+            "requested": list(requested),
+            "capabilities": [],
+        }
 
 
 def _loads(raw: object) -> dict[str, Any]:
@@ -1353,6 +1387,38 @@ def format_doctor(report: dict[str, Any]) -> str:
     if c["file"]["path"]:
         match = {True: "matches", False: "DIFFERS from frozen", None: "not compared"}[c["file_matches_frozen"]]
         lines.append(f"  contract file: {c['file']['path']} ({match})" + (f" error: {c['file']['error']}" if c["file"]["error"] else ""))
+    capabilities = report.get("capabilities") or {}
+    if capabilities.get("status") != "available":
+        lines.append(
+            "  capabilities: unavailable"
+            + (f" ({capabilities['reason']})" if capabilities.get("reason") else "")
+        )
+    else:
+        rows = capabilities.get("capabilities") or []
+        requested = capabilities.get("requested") or []
+        observed = [
+            row for row in rows
+            if (row.get("usage") or {}).get("status") != "not-observed"
+        ]
+        lines.append(
+            f"  capabilities: {capabilities.get('registry_count', 0)} registered; "
+            f"{len(rows)} task-relevant; "
+            f"{len(requested)} requested; {len(observed)} observed"
+        )
+        for row in rows:
+            usage = row.get("usage") or {}
+            if not row.get("requested") and usage.get("status") == "not-observed":
+                continue
+            registration = "registered" if row.get("registered") else "UNREGISTERED"
+            lines.append(
+                f"    - {row['id']}: {registration}; "
+                f"{'requested; ' if row.get('requested') else ''}usage={usage.get('status', 'not-observed')}"
+                + (
+                    f"; evidence-missing={usage['evidence_missing']}"
+                    if usage.get("evidence_missing")
+                    else ""
+                )
+            )
     if report["validation_failures"]:
         lines.append("  latest validation failures:")
         lines.extend(f"    - [{f.get('code', '?')}] {f.get('message', '')}" for f in report["validation_failures"])

@@ -31,11 +31,17 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .auto_plan import outside_label_selector
 from .block_kinds import classify_block, reenter_blocked_task, reentry_refusal, runtime_fingerprint
+from .capabilities import CapabilityRegistryError, task_capability_summary
 from .concurrency import contract_conflict
 from .config import StageMeshConfig
-from .contracts import ContractError
+from .contracts import ContractError, bound_contract_from_record
+from .delivery_followup import register_pending_follow_ups, repository_of
+from .delivery_state import externally_blocked, record_external_block, record_landing_result
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
+from .efficiency import BudgetPolicy, check_window_budget
+from .follow_through import consolidate_blockers
 from .operator_actions import recover_stale
 from .persistence import Store
 from .queue_control import QueueStopControl
@@ -44,10 +50,6 @@ from .readiness import PrLister, build_readiness, gh_open_wave_prs
 from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .scheduling import Scheduler
-from .delivery_followup import register_pending_follow_ups, repository_of
-from .delivery_state import externally_blocked, record_external_block, record_landing_result
-from .efficiency import BudgetPolicy, check_window_budget
-from .follow_through import consolidate_blockers
 from .step_progress import made_progress, progress_state
 from .survivor_wave import (
     INTEGRATION_LOCAL,
@@ -66,7 +68,6 @@ from .survivor_wave import (
     skip_reason,
 )
 from .task_selection import contract_state
-from .auto_plan import outside_label_selector
 from .window_journal import record_finished, record_refused, record_started, record_task_context
 
 EXIT_OK, EXIT_STOPPED, EXIT_REFUSED, EXIT_REPORT = 0, 1, 2, 3
@@ -177,6 +178,7 @@ class WindowReport:
     ci_wait_seconds: float = 0.0
     duplicate_runs_avoided: int = 0
     batch_results: list[dict[str, Any]] = field(default_factory=list)
+    capability_usage: dict[str, dict[str, Any]] = field(default_factory=dict)
     next_command: str = ""
     scope: dict[str, Any] | None = None
 
@@ -282,7 +284,21 @@ class WindowReport:
             "landing_results": self.landing_results,
             "repo_before": self.initial_repo_state.to_dict() if self.initial_repo_state else (None if first is None or first.repo_before is None else first.repo_before.to_dict()),
             "repo_after": self.final_repo_state.to_dict() if self.final_repo_state else (None if last is None or last.repo_after is None else last.repo_after.to_dict()),
-            "tasks": [task.to_dict() for task in self.tasks],
+            "tasks": [
+                {
+                    **task.to_dict(),
+                    "capabilities": self.capability_usage.get(
+                        task.task_id,
+                        {
+                            "task_id": task.task_id,
+                            "status": "not-collected",
+                            "requested": [],
+                            "capabilities": [],
+                        },
+                    ),
+                }
+                for task in self.tasks
+            ],
             "open_wave_prs": self.open_wave_prs,
             "readiness": self.readiness,
             "report_error": self.report_error,
@@ -1037,7 +1053,11 @@ def run_window(
                 break
             if room - len(continuing) > 0 and not getattr(store, "selection_scope", None):
                 try:
-                    from .task_sources import LocalBacklogSource, sync_source, task_sources_from_config
+                    from .task_sources import (
+                        LocalBacklogSource,
+                        sync_source,
+                        task_sources_from_config,
+                    )
                     backlog = project / ".stagemesh" / "backlog.json"
                     if backlog.is_file():
                         sync_source(store, LocalBacklogSource(backlog).discover(), preserve_existing_dependencies=True)
@@ -1260,6 +1280,39 @@ def run_window(
     return _finish(store, project, config, report, list_prs, clock, journal=True)
 
 
+def _window_capability_summary(
+    store: Store, project: Path, task_id: str
+) -> dict[str, Any]:
+    requested: tuple[str, ...] = ()
+    frozen = store.task_contract(task_id)
+    if frozen is not None:
+        try:
+            requested = bound_contract_from_record(dict(frozen)).contract.capability_refs
+        except (ContractError, TypeError, ValueError) as exc:
+            return {
+                "task_id": task_id,
+                "status": "unavailable",
+                "reason": f"invalid frozen contract: {exc}"[:300],
+                "requested": [],
+                "capabilities": [],
+            }
+    try:
+        return {
+            "status": "available",
+            **task_capability_summary(
+                project, store.conn, task_id, requested=requested
+            ),
+        }
+    except (CapabilityRegistryError, OSError) as exc:
+        return {
+            "task_id": task_id,
+            "status": "unavailable",
+            "reason": str(exc)[:300],
+            "requested": list(requested),
+            "capabilities": [],
+        }
+
+
 def _finish(
     store: Store,
     project: Path,
@@ -1288,6 +1341,10 @@ def _finish(
     report.open_wave_prs = [
         {**pr, "opened_this_window": pr.get("url") in mine} for pr in prs  # already in stack (merge) order
     ]
+    report.capability_usage = {
+        task.task_id: _window_capability_summary(store, project, task.task_id)
+        for task in report.tasks
+    }
     report.next_command = next_command(report)
     from .selection_scope import preview
     report.scope = preview(store, project, replace(config.task_selection, required_label=report.options.required_label))
@@ -1345,6 +1402,21 @@ def format_window_report(report: WindowReport) -> str:
     for task in report.tasks:
         landing = {"pr_opened": " -> PR opened", "locally_integrated": " -> integrated locally", "staged_not_published": " -> staged, no PR", "pr_failed": " -> PR NOT opened", "fast_forward_merged": " -> fast-forward merged"}.get(task.landing or "", "")
         lines.append(f"  {task.task_id}: {task.outcome}{landing} - {task.title}")
+        capability_report = report.capability_usage.get(task.task_id) or {}
+        if capability_report.get("status") == "available":
+            capability_rows = capability_report.get("capabilities") or []
+            requested = capability_report.get("requested") or []
+            observed = [
+                row
+                for row in capability_rows
+                if (row.get("usage") or {}).get("status") != "not-observed"
+            ]
+            if requested or observed:
+                lines.append(
+                    f"      capabilities: {len(requested)} requested; {len(observed)} observed"
+                )
+        elif capability_report:
+            lines.append("      capabilities: unavailable")
         if task.reason and task.outcome not in ("done",):
             lines.append(f"      why: {task.reason}")
         if task.pr_url:

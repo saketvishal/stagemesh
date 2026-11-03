@@ -85,6 +85,63 @@ def event_stream_command(command: tuple[str, ...] | list[str]) -> list[str]:
     )
 
 
+def provider_event_response(stdout: str) -> str | None:
+    """Extract the last provider answer from supported JSONL event shapes.
+
+    The raw stream remains available to the evidence observers but is never
+    persisted by this projection. Unknown events cannot masquerade as a review
+    verdict: callers fail closed when this returns ``None``.
+    """
+    answer: str | None = None
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        candidate = _event_answer(event)
+        if candidate:
+            answer = candidate.strip()
+    return answer
+
+
+def _event_answer(event: object) -> str | None:
+    if not isinstance(event, dict):
+        return None
+    structured = event.get("structured_output")
+    if isinstance(structured, dict):
+        return json.dumps(structured, separators=(",", ":"))
+    event_type = str(event.get("type") or "").casefold().replace("-", "_")
+    if event_type == "item.completed":
+        item = event.get("item")
+        if isinstance(item, dict) and str(item.get("type") or "").casefold() in {
+            "agent_message",
+            "assistant_message",
+        }:
+            text = item.get("text")
+            return text if isinstance(text, str) else None
+    if event_type in {"result", "final", "completed"}:
+        result = event.get("result")
+        if isinstance(result, dict):
+            return json.dumps(result, separators=(",", ":"))
+        if isinstance(result, str):
+            return result
+    if event_type == "assistant":
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else event.get("content")
+        if isinstance(content, list):
+            parts = [
+                str(item["text"])
+                for item in content
+                if isinstance(item, dict)
+                and item.get("type") in {"text", "output_text"}
+                and isinstance(item.get("text"), str)
+            ]
+            return "".join(parts) or None
+    return None
+
+
 def validate_observable_attachments(attachments: Iterable[dict[str, object]]) -> None:
     """Require stable, unique ids so a load receipt cannot be credited to another resource."""
     _skill_target_groups(attachments)
