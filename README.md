@@ -119,8 +119,9 @@ already-installed server to declared read-only tools, and requires redacted invo
 plugin requests fail closed. See
 [docs/capabilities.md](docs/capabilities.md) for the schema and audit semantics.
 Projects may opt into `observed-load-required` skill evidence. Supported provider JSON streams then produce redacted
-`capability.loaded` receipts, and a provider that does not show every selected skill being read before its first recorded mutation is
-rejected without a quota cooldown. The default remains attachment-only and never overstates prompt delivery as model use.
+`capability.loaded` receipts for implementation and review, and a provider that does not show every selected skill being read before
+its first recorded mutation is rejected without a quota cooldown. Review streams must also contain a recognized final-answer event;
+unknown JSONL shapes fail closed. The default remains attachment-only and never overstates prompt delivery as model use.
 
 `codex`, `claude`, `grok` and `agy` are built-in registry entries; any other name can be added under `providers`, as a plain command string
 or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `priority` (lower first) and `weight`:

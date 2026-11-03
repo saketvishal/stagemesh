@@ -363,97 +363,194 @@ def task_usage(
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA query_only = ON")
-        tables = {
-            str(row["name"])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tasks','audit_events')"
-            )
-        }
-        if "audit_events" not in tables:
-            return True, False, {}
-        task_exists = bool(
-            "tasks" in tables
-            and connection.execute("SELECT 1 FROM tasks WHERE id=?", (task,)).fetchone()
-        )
-        rows = connection.execute(
-            "SELECT event_type, payload, created_at FROM audit_events "
-            "WHERE event_type IN ('capability.attached','capability.loaded','capability.invoked',"
-            "'capability.evidence_missing') "
-            "AND json_valid(payload) "
-            "AND json_extract(payload, '$.task_id')=? "
-            "ORDER BY created_at, rowid",
-            (task,),
-        )
-        usage: dict[str, dict[str, object]] = {}
-        for row in rows:
-            try:
-                payload = json.loads(str(row["payload"]))
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            event_type = str(row["event_type"])
-            ids: list[str] = []
-            if event_type == "capability.evidence_missing":
-                missing = payload.get("missing_capabilities")
-                if isinstance(missing, list):
-                    ids = [str(item) for item in missing if isinstance(item, str) and item]
-                field = "evidence_missing"
-            else:
-                capability_id = payload.get("capability_id")
-                if isinstance(capability_id, str) and capability_id:
-                    ids = [capability_id]
-                field = event_type.rsplit(".", 1)[-1]
-            for capability_id in ids:
-                item = usage.setdefault(
-                    capability_id,
-                    {
-                        "attached": 0,
-                        "loaded": 0,
-                        "invoked": 0,
-                        "evidence_missing": 0,
-                        "providers": set(),
-                        "stages": set(),
-                        "last_observed_at": None,
-                    },
-                )
-                item[field] = int(item[field]) + 1
-                provider = payload.get("provider")
-                stage = payload.get("stage")
-                if isinstance(provider, str) and provider:
-                    item["providers"].add(provider)  # type: ignore[union-attr]
-                if isinstance(stage, str) and stage:
-                    item["stages"].add(stage)  # type: ignore[union-attr]
-                item["last_observed_at"] = float(row["created_at"])
-        projected: dict[str, dict[str, object]] = {}
-        for capability_id, item in usage.items():
-            invoked = int(item["invoked"])
-            loaded = int(item["loaded"])
-            attached = int(item["attached"])
-            status = (
-                "invoked"
-                if invoked
-                else "loaded"
-                if loaded
-                else "attached-unverified"
-                if attached
-                else "not-observed"
-            )
-            projected[capability_id] = {
-                "status": status,
-                "attached": attached,
-                "loaded": loaded,
-                "invoked": invoked,
-                "evidence_missing": int(item["evidence_missing"]),
-                "providers": sorted(item["providers"]),  # type: ignore[arg-type]
-                "stages": sorted(item["stages"]),  # type: ignore[arg-type]
-                "last_observed_at": item["last_observed_at"],
-            }
+        task_exists, projected = task_usage_from_connection(connection, task)
         return True, task_exists, projected
     except sqlite3.DatabaseError as exc:
         raise CapabilityRegistryError(f"cannot read capability usage evidence: {exc}") from exc
     finally:
         connection.close()
+
+
+def task_usage_from_connection(
+    connection: sqlite3.Connection, task_id: str
+) -> tuple[bool, dict[str, dict[str, object]]]:
+    """Project privacy-bounded usage through an existing Store connection."""
+    task = str(task_id).strip()
+    if not task:
+        raise CapabilityRegistryError("capability usage task id must be non-empty")
+    tables = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tasks','audit_events')"
+        )
+    }
+    if "audit_events" not in tables:
+        return False, {}
+    task_exists = bool(
+        "tasks" in tables
+        and connection.execute("SELECT 1 FROM tasks WHERE id=?", (task,)).fetchone()
+    )
+    rows = connection.execute(
+        "SELECT event_type, payload, created_at FROM audit_events "
+        "WHERE event_type IN ('capability.attached','capability.loaded','capability.invoked',"
+        "'capability.evidence_missing') "
+        "AND json_valid(payload) "
+        "AND json_extract(payload, '$.task_id')=? "
+        "ORDER BY created_at, rowid",
+        (task,),
+    )
+    usage: dict[str, dict[str, object]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload"] if isinstance(row, sqlite3.Row) else row[1]))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event_type = str(row["event_type"] if isinstance(row, sqlite3.Row) else row[0])
+        created_at = row["created_at"] if isinstance(row, sqlite3.Row) else row[2]
+        ids: list[str] = []
+        if event_type == "capability.evidence_missing":
+            missing = payload.get("missing_capabilities")
+            if isinstance(missing, list):
+                ids = [str(item) for item in missing if isinstance(item, str) and item]
+            field = "evidence_missing"
+        else:
+            capability_id = payload.get("capability_id")
+            if isinstance(capability_id, str) and capability_id:
+                ids = [capability_id]
+            field = event_type.rsplit(".", 1)[-1]
+        for capability_id in ids:
+            item = usage.setdefault(
+                capability_id,
+                {
+                    "attached": 0,
+                    "loaded": 0,
+                    "invoked": 0,
+                    "evidence_missing": 0,
+                    "providers": set(),
+                    "stages": set(),
+                    "last_observed_at": None,
+                },
+            )
+            item[field] = int(item[field]) + 1
+            provider = payload.get("provider")
+            stage = payload.get("stage")
+            if isinstance(provider, str) and provider:
+                item["providers"].add(provider)  # type: ignore[union-attr]
+            if isinstance(stage, str) and stage:
+                item["stages"].add(stage)  # type: ignore[union-attr]
+            item["last_observed_at"] = float(created_at)
+    projected: dict[str, dict[str, object]] = {}
+    for capability_id, item in usage.items():
+        invoked = int(item["invoked"])
+        loaded = int(item["loaded"])
+        attached = int(item["attached"])
+        status = (
+            "invoked"
+            if invoked
+            else "loaded"
+            if loaded
+            else "attached-unverified"
+            if attached
+            else "evidence-missing"
+            if int(item["evidence_missing"])
+            else "not-observed"
+        )
+        projected[capability_id] = {
+            "status": status,
+            "attached": attached,
+            "loaded": loaded,
+            "invoked": invoked,
+            "evidence_missing": int(item["evidence_missing"]),
+            "providers": sorted(item["providers"]),  # type: ignore[arg-type]
+            "stages": sorted(item["stages"]),  # type: ignore[arg-type]
+            "last_observed_at": item["last_observed_at"],
+        }
+    return task_exists, projected
+
+
+def task_capability_summary(
+    project: Path,
+    connection: sqlite3.Connection,
+    task_id: str,
+    *,
+    requested: tuple[str, ...] | list[str] = (),
+) -> dict[str, object]:
+    """Combine registry state and durable observations for one task.
+
+    This is the canonical privacy-bounded projection used by operator reports.
+    It never reads prompts, provider output, tool arguments or result payloads.
+    Historical observations remain visible when a declaration was removed, and
+    requested-but-unregistered ids remain explicit instead of disappearing.
+    """
+    task_exists, observed = task_usage_from_connection(connection, task_id)
+    requested_ids = list(dict.fromkeys(str(item).strip() for item in requested if str(item).strip()))
+    rows = {str(row["id"]): row for row in inventory(project)}
+    capability_ids: list[str] = []
+    for capability_id in (*requested_ids, *observed):
+        if capability_id not in capability_ids:
+            capability_ids.append(capability_id)
+    capabilities: list[dict[str, object]] = []
+    for capability_id in capability_ids:
+        usage = observed.get(capability_id, _empty_usage())
+        row = rows.get(capability_id)
+        if row is None:
+            projected: dict[str, object] = {
+                "id": capability_id,
+                "registered": False,
+                "requested": capability_id in requested_ids,
+                "invocation": usage["status"],
+                "usage": usage,
+            }
+        else:
+            projected = {
+                **{
+                    key: row[key]
+                    for key in (
+                        "id",
+                        "kind",
+                        "source",
+                        "enabled",
+                        "installed",
+                        "adapter_supported",
+                        "supported_providers",
+                        "runtime_installed",
+                        "available",
+                        "usable",
+                        "providers",
+                        "stages",
+                        "permissions",
+                    )
+                },
+                "registered": True,
+                "requested": capability_id in requested_ids,
+                "invocation": usage["status"],
+                "usage": usage,
+            }
+        capabilities.append(projected)
+    return {
+        "task_id": str(task_id),
+        "history_available": True,
+        "task_exists": task_exists,
+        "registry_count": len(rows),
+        "requested": requested_ids,
+        "unregistered_requested": [item for item in requested_ids if item not in rows],
+        "capabilities": capabilities,
+    }
+
+
+def _empty_usage() -> dict[str, object]:
+    return {
+        "status": "not-observed",
+        "attached": 0,
+        "loaded": 0,
+        "invoked": 0,
+        "evidence_missing": 0,
+        "providers": [],
+        "stages": [],
+        "last_observed_at": None,
+    }
 
 
 def _inventory_row(root: Path, item: CapabilityDefinition) -> dict[str, object]:

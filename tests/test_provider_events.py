@@ -20,6 +20,7 @@ from stagemesh.provider_events import (
     mcp_invocation_receipts,
     observe_mcp_invocations,
     observe_skill_loads,
+    provider_event_response,
     validate_observable_attachments,
 )
 from stagemesh.provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderPool
@@ -43,6 +44,42 @@ def test_event_stream_command_is_provider_specific(
     assert expected[0] in configured
     if expected[1] is not None:
         assert configured[configured.index(expected[0]) + 1] == expected[1]
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": '{"decision":"PASS"}'},
+        },
+        {"type": "result", "result": '{"decision":"PASS"}'},
+        {"type": "result", "structured_output": {"decision": "PASS"}},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": '{"decision":"PASS"}'}
+                ]
+            },
+        },
+    ],
+)
+def test_provider_event_response_extracts_supported_final_answers(
+    event: dict[str, object],
+) -> None:
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "private"}),
+            json.dumps(event),
+        ]
+    )
+
+    assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
+def test_provider_event_response_fails_closed_on_unknown_or_malformed_events() -> None:
+    assert provider_event_response('{"type":"turn.completed"}\nnot-json') is None
 
 
 @pytest.mark.parametrize(

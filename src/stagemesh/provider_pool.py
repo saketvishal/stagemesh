@@ -190,7 +190,13 @@ def default_pools(
 
 
 def _failure_cooldown_seconds(reason: str, configured: float) -> float:
-    if _is_workspace_mutation_reason(reason) or reason == "malformed_review_output":
+    if (
+        _is_workspace_mutation_reason(reason)
+        or reason == "malformed_review_output"
+        or reason == "provider_event_response_missing"
+        or reason.startswith(CAPABILITY_EVIDENCE_MISSING + ":")
+        or reason.startswith(CAPABILITY_POLICY_VIOLATION + ":")
+    ):
         return 0.0
     if reason == "quota_rate_limit":
         return max(configured, DEFAULT_QUOTA_COOLDOWN_SECONDS)
