@@ -46,6 +46,7 @@ from stagemesh.provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderP
 from stagemesh.providers import (
     RuntimeCommandAdapter,
     _build_task_prompt,
+    _record_capability_activations,
     _record_capability_attachments,
 )
 
@@ -1105,6 +1106,34 @@ def test_claude_review_activates_validated_skills_only_plugin(
         assert payload["status"] == "attached"
         assert payload["invocation"] == "unverified"
         assert "_path" not in payload and "_plugin" not in payload
+
+        activated_row = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='capability.activated' "
+            "AND json_extract(payload, '$.capability_id')='review-kit'"
+        ).fetchone()
+        activated_payload = json.loads(activated_row["payload"])
+        assert activated_payload["status"] == "activated"
+        assert activated_payload["activation_evidence"] == "process-started"
+        assert activated_payload["activation"] == "skills-only-plugin-dir"
+        assert str(plugin.resolve()) not in activated_row["payload"]
+        assert "_path" not in activated_payload and "_plugin" not in activated_payload
+
+        def missing_provider(*_args: object, **_kwargs: object) -> None:
+            raise FileNotFoundError("claude is unavailable")
+
+        monkeypatch.setattr(providers_module.subprocess, "Popen", missing_provider)
+        failed = RuntimeCommandAdapter("claude", ("claude", "-p")).review_candidate(
+            "Review exactly this candidate.",
+            project,
+            candidate,
+            store=store,
+            task_id=task_id,
+        )
+        assert json.loads(failed)["reason"] == "provider_unavailable"
+        assert store.conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='capability.activated' "
+            "AND json_extract(payload, '$.capability_id')='review-kit'"
+        ).fetchone()[0] == 1
     finally:
         store.close()
 
@@ -1704,6 +1733,7 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
 ) -> None:
     _skill(tmp_path)
     _mcp_manifest(tmp_path)
+    _claude_plugin(tmp_path)
     _registry(
         tmp_path,
         [
@@ -1714,6 +1744,13 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
                 source=".stagemesh/mcp/serena.json",
                 providers=["codex"],
                 permissions=["workspace-read", "subprocess"],
+            ),
+            _entry(
+                "review-kit",
+                kind="claude-plugin",
+                source=".claude/plugins/review-kit",
+                providers=["claude"],
+                stages=["REVIEW"],
             ),
         ],
     )
@@ -1781,6 +1818,25 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
             "capability_id": "serena",
         },
     )
+    plugin_attachment = {
+        "capability_id": "review-kit",
+        "kind": "claude-plugin",
+        "origin": "project-registry",
+        "source": ".claude/plugins/review-kit",
+        "content_sha256": current_digests["review-kit"],
+        "permissions": ["workspace-read"],
+        "selection": "contract",
+        "status": "attached",
+        "invocation": "unverified",
+        "_path": str(tmp_path / ".claude" / "plugins" / "review-kit"),
+        "_plugin": {"activation": "skills-only-plugin-dir"},
+    }
+    _record_capability_attachments(
+        store, task_id, "claude", "REVIEW", [plugin_attachment]
+    )
+    _record_capability_activations(
+        store, task_id, "claude", "REVIEW", [plugin_attachment]
+    )
     store.close()
     before = database.stat().st_mtime_ns
 
@@ -1793,6 +1849,7 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
     assert rows["domain-review"]["invocation"] == "loaded"
     assert rows["domain-review"]["usage"] == {
         "attached": 1,
+        "activated": 0,
         "content_sha256s": [current_digests["domain-review"]],
         "source_tree_sha256s": [],
         "evidence_missing": 0,
@@ -1805,8 +1862,15 @@ def test_capabilities_cli_reports_task_scoped_durable_usage_read_only(
     }
     assert rows["serena"]["invocation"] == "invoked"
     assert rows["serena"]["usage"]["attached"] == 1
+    assert rows["serena"]["usage"]["activated"] == 0
     assert rows["serena"]["usage"]["loaded"] == 0
     assert rows["serena"]["usage"]["invoked"] == 1
+    assert rows["review-kit"]["invocation"] == "activated"
+    assert rows["review-kit"]["evidence_matches_current"] is True
+    assert rows["review-kit"]["usage"]["attached"] == 1
+    assert rows["review-kit"]["usage"]["activated"] == 1
+    assert rows["review-kit"]["usage"]["loaded"] == 0
+    assert rows["review-kit"]["usage"]["invoked"] == 0
     assert database.stat().st_mtime_ns == before
 
 
@@ -3201,6 +3265,7 @@ def test_capability_vendor_plan_is_read_only_and_reports_distinct_lifecycle_stat
         "runtime_installed": True,
         "available": False,
         "attached": False,
+        "activated": False,
         "loaded": False,
         "invoked": False,
     }
@@ -3252,6 +3317,7 @@ def test_capability_vendor_apply_copies_registers_and_pins_disabled_source(
     assert payload["lifecycle"]["enabled"] is False
     assert payload["lifecycle"]["available"] is True
     assert payload["lifecycle"]["attached"] is False
+    assert payload["lifecycle"]["activated"] is False
     assert payload["lifecycle"]["loaded"] is False
     assert payload["lifecycle"]["invoked"] is False
     assert registry["capabilities"][0]["source"].endswith("reviewed-guidance/SKILL.md")

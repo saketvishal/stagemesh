@@ -129,6 +129,7 @@ def plan_capability_vendor(
             ),
             "available": current_row["available"] if current_row is not None else False,
             "attached": False,
+            "activated": False,
             "loaded": False,
             "invoked": False,
         },
@@ -139,6 +140,7 @@ def plan_capability_vendor(
             "runtime_installed": runtime_installed,
             "available": predicted_available,
             "attached": False,
+            "activated": False,
             "loaded": False,
             "invoked": False,
         },
@@ -504,6 +506,7 @@ def _applied_lifecycle(row: dict[str, object]) -> dict[str, object]:
         "runtime_installed": row["runtime_installed"],
         "available": row["available"],
         "attached": False,
+        "activated": False,
         "loaded": False,
         "invoked": False,
     }

@@ -701,7 +701,7 @@ def task_usage_from_connection(
     )
     rows = connection.execute(
         "SELECT event_type, payload, created_at FROM audit_events "
-        "WHERE event_type IN ('capability.attached','capability.loaded','capability.invoked',"
+        "WHERE event_type IN ('capability.attached','capability.activated','capability.loaded','capability.invoked',"
         "'capability.evidence_missing') "
         "AND json_valid(payload) "
         "AND json_extract(payload, '$.task_id')=? "
@@ -734,6 +734,7 @@ def task_usage_from_connection(
                 capability_id,
                 {
                     "attached": 0,
+                    "activated": 0,
                     "loaded": 0,
                     "invoked": 0,
                     "evidence_missing": 0,
@@ -770,12 +771,15 @@ def task_usage_from_connection(
     for capability_id, item in usage.items():
         invoked = int(item["invoked"])
         loaded = int(item["loaded"])
+        activated = int(item["activated"])
         attached = int(item["attached"])
         status = (
             "invoked"
             if invoked
             else "loaded"
             if loaded
+            else "activated"
+            if activated
             else "attached-unverified"
             if attached
             else "evidence-missing"
@@ -785,6 +789,7 @@ def task_usage_from_connection(
         projected[capability_id] = {
             "status": status,
             "attached": attached,
+            "activated": activated,
             "loaded": loaded,
             "invoked": invoked,
             "evidence_missing": int(item["evidence_missing"]),
@@ -852,7 +857,7 @@ def task_capability_summary(
                 and tree_evidence_matches
             )
             invocation = usage["status"]
-            if invocation in {"loaded", "invoked"} and evidence_matches_current is not True:
+            if invocation in {"activated", "loaded", "invoked"} and evidence_matches_current is not True:
                 invocation = "evidence-digest-mismatch"
             projected = {
                 **{
@@ -904,6 +909,7 @@ def _empty_usage() -> dict[str, object]:
     return {
         "status": "not-observed",
         "attached": 0,
+        "activated": 0,
         "loaded": 0,
         "invoked": 0,
         "evidence_missing": 0,
