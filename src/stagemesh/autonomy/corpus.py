@@ -112,7 +112,10 @@ CAPABILITY_LEVELS: dict[str, tuple[int, str]] = {
     "4 History rewrite detection": (2, "retargeted replacement with equivalence proof and provenance, original preserved"),
     "5 PR dependency / stacked PR handling": (2, "run-window schedules eligible dependency work and delivery follow-through rechecks pending PRs"),
     "6 CI diagnosis (candidate vs base)": (2, "diagnosis gates integration and runs in `autonomy deliver` against hosted check runs"),
-    "7 Broken/fragile test detection": (1, "classification and remediation guard exist; no test harness emits observations yet"),
+    "7 Broken/fragile test detection": (
+        1,
+        "validated observation producer and remediation guard exist; project test harnesses must opt in to emitting markers",
+    ),
     "8 Independent review lifecycle": (2, "scope policy wraps the reviewer adapter in the CLI"),
     "9 Scope discipline": (2, "deferred-work ledger and scoped review; contract enforcement already existed"),
     "10 Merge policy and post-merge verification": (2, "`autonomy deliver` evaluates the policy and only merges when enabled and satisfied; verification precedes DONE"),

@@ -15,7 +15,6 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import os
-import shutil
 import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -105,13 +104,22 @@ def _words(token: str) -> list[str]:
     return _WORD.findall(token.lower())
 
 
-def _unattended_context_problem(name: str, argv: Sequence[str]) -> str | None:
+def _unattended_context_problem(
+    name: str,
+    argv: Sequence[str],
+    permitted_codex_config: frozenset[str] = frozenset(),
+) -> str | None:
     """Login probes use the CLI's default account context; explicit context switches cannot inherit that proof.
 
     Permit the few Codex configuration overrides supported by this unattended workflow. This deliberately does not try to
     interpret arbitrary profiles, settings files, or ambient CLI configuration. Never include argument values in a refusal.
     """
-    permitted_codex_overrides = {"model", "features.code_mode_host", "model_reasoning_effort"}
+    permitted_codex_overrides = {
+        "model",
+        "features.code_mode_host",
+        "model_reasoning_effort",
+        *permitted_codex_config,
+    }
     index = 1
     while index < len(argv):
         token = str(argv[index])
@@ -148,6 +156,7 @@ def denial(
     *,
     unattended: bool,
     project: Path | None = None,
+    permitted_codex_config: frozenset[str] = frozenset(),
 ) -> str | None:
     """Why this provider may not run, or None. `allowed` is None when the project has no allowlist."""
     if allowed is None:
@@ -159,7 +168,7 @@ def denial(
         if program != name:
             return f"command for '{name}' runs '{program or '(empty)'}', not the {name} CLI (substitution or wrapper)"
         if unattended:
-            problem = _unattended_context_problem(name, argv)
+            problem = _unattended_context_problem(name, argv, permitted_codex_config)
             if problem:
                 return problem
         problem = _path_problem(argv[0], project)
@@ -191,7 +200,14 @@ def read_allowlist(project: Path) -> tuple[str, ...] | None:
     return tuple(n.strip() for n in names)
 
 
-def refusal(project: Path, name: str, argv: Sequence[str], *, build_time_allowed: Sequence[str] | None = None) -> str | None:
+def refusal(
+    project: Path,
+    name: str,
+    argv: Sequence[str],
+    *,
+    build_time_allowed: Sequence[str] | None = None,
+    permitted_codex_config: frozenset[str] = frozenset(),
+) -> str | None:
     """The execution-boundary check: re-reads the project's own config so it holds however the adapter was built.
 
     `build_time_allowed` is the allowlist the adapter was built under: if the config becomes unreadable later, that list still binds.
@@ -199,18 +215,39 @@ def refusal(project: Path, name: str, argv: Sequence[str], *, build_time_allowed
     mode = unattended()
     pre = _PRE_AUTHORIZED.get()
     if pre is not None:
-        return denial(name, argv, set(pre), unattended=mode, project=Path(project))
+        return denial(
+            name,
+            argv,
+            set(pre),
+            unattended=mode,
+            project=Path(project),
+            permitted_codex_config=permitted_codex_config,
+        )
     try:
         allowed = read_allowlist(Path(project))
     except (OSError, ValueError) as exc:
         if build_time_allowed is not None:
-            return denial(name, argv, set(build_time_allowed), unattended=mode, project=Path(project)) or (
+            return denial(
+                name,
+                argv,
+                set(build_time_allowed),
+                unattended=mode,
+                project=Path(project),
+                permitted_codex_config=permitted_codex_config,
+            ) or (
                 f"project configuration could not be re-verified ({type(exc).__name__})"
             )
         return f"project configuration could not be verified ({type(exc).__name__})" if mode else None
     if allowed is None and build_time_allowed is not None:
         return "project provider authorization disappeared after this adapter was built; reload an explicitly authorized configuration"
-    return denial(name, argv, None if allowed is None else set(allowed), unattended=mode, project=Path(project))
+    return denial(
+        name,
+        argv,
+        None if allowed is None else set(allowed),
+        unattended=mode,
+        project=Path(project),
+        permitted_codex_config=permitted_codex_config,
+    )
 
 
 def pinned_model(argv: Sequence[str]) -> str | None:

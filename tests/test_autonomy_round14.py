@@ -6,8 +6,19 @@ import json
 import sys
 from pathlib import Path
 
-from autonomy_support import HUMAN, STAGEMESH, TASK, add_passing_evidence, commit, decisions, git, init_repo, new_store, seed_candidate
-from test_autonomy_lifecycle import REF, _coordinator, _project, _task_at_integrate
+from autonomy_support import (
+    HUMAN,
+    STAGEMESH,
+    TASK,
+    add_passing_evidence,
+    commit,
+    decisions,
+    git,
+    init_repo,
+    new_store,
+    seed_candidate,
+)
+from test_autonomy_lifecycle import REF, _coordinator, _project
 
 from stagemesh.autonomy import base_state as base
 from stagemesh.autonomy.ci_diagnosis import (
@@ -21,6 +32,7 @@ from stagemesh.autonomy.ci_diagnosis import (
     diagnose_ci,
     plan_ci_response,
 )
+from stagemesh.autonomy.ci_diagnosis import test_observation_marker as observation_marker
 from stagemesh.autonomy.decisions import Action, Condition
 from stagemesh.autonomy.gitfacts import GitFacts
 from stagemesh.autonomy.provenance import load_provenance
@@ -35,8 +47,10 @@ OWNER = "src/stagemesh/workspaces.py"
 
 
 def _marker_log(test_id: str, path: str) -> str:
-    marker = {"test_id": test_id, "test_path": path, "expected": "success", "observed_failure_code": NO_IMPLEMENTATION_CHANGE, "provider_made_change": False}
-    return f"FAILED {test_id}\nSTAGEMESH_TEST_OBSERVATION {json.dumps(marker)}\n"
+    marker = observation_marker(
+        TestObservation(test_id, path, "success", NO_IMPLEMENTATION_CHANGE, False)
+    )
+    return f"FAILED {test_id}\n{marker}\n"
 
 
 def _runs(test_id: str, path: str):
@@ -74,7 +88,6 @@ def test_the_supervisor_computes_the_changed_files_itself_from_git(tmp_path: Pat
     git(repo, "checkout", "-q", "main")
     store = new_store(tmp_path)
     store.upsert_task("t", source_id=TASK)
-    ci = FakeHostedCI([*_runs("t::noop", "tests/test_x.py")])
     for sha, expected in ((honest, "CI_BROKEN_FRAGILE_TEST"), (cheat, "CI_CANDIDATE_REGRESSION")):
         candidate_run = HostedCIRun(sha, {"unit": GateOutcome("unit", Conclusion.FAILURE, _marker_log("t::noop", "tests/test_x.py"), ("t::noop",))}, environment="x")
         base_run = HostedCIRun(base_sha, {"unit": GateOutcome("unit", Conclusion.SUCCESS)}, environment="x")

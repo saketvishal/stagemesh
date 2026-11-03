@@ -108,7 +108,7 @@ This discipline lives in `src/stagemesh/providers.py` so it applies to Codex, Cl
 
 StageMesh also selects [bundled agent skills](agent-skills.md) automatically from the task title, bound contract and remediation state.
 Frontend tasks receive Anthropic's full `frontend-design` skill alongside the compact frontend discipline. Superpowers supplies
-`systematic-debugging` for failures/remediation, `test-driven-development` for behavior changes, and `verification-before-completion`
+`receiving-code-review` and `systematic-debugging` for remediation, `test-driven-development` for behavior changes, and `verification-before-completion`
 for implementations and reviews. Documentation and simple copy/style tasks receive fewer skills. Generic backend paths such as
 `app/services/cache.py` do not trigger frontend guidance. No manual chat attachment or global plugin install is required.
 

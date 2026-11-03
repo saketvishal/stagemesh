@@ -108,7 +108,7 @@ def command_deliver(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     settings = load_settings(project / ".stagemesh")
     if not settings.enabled:
-        print("the supervisor is not enabled for this project (.stagemesh/autonomy.json)")
+        print("the supervisor is not enabled for this project (set autonomy.enabled in .stagemesh/config.json)")
         return 2
     isolation = check_isolation(project, check_running_code=True, expected_code_checkout=settings.code_checkout)
     if not isolation.isolated:

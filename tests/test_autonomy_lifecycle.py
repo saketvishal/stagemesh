@@ -103,7 +103,10 @@ def test_scenario_a_end_to_end_second_writer_commit_is_never_adopted_into_the_ca
     assert store.latest_candidate(TASK) is None
     (failure,) = [e for e in store.audit_events() if e["event_type"] == "task.implementation_unsuccessful"]
     assert "EXTERNAL_WORKSPACE_MUTATION" in json.loads(failure["payload"])["reason"]
-    (decision,) = decisions(store, TASK)
+    trace = decisions(store, TASK)
+    cleanup = [item for item in trace if item["condition"] == "DESTRUCTIVE_GIT_OPERATION_REQUESTED"]
+    assert {item["observed"]["operation"] for item in cleanup} == {"RESET_HARD", "CLEAN"}
+    (decision,) = [item for item in trace if item["condition"] == "EXTERNAL_WORKSPACE_MUTATION"]
     assert decision["condition"] == "EXTERNAL_WORKSPACE_MUTATION" and decision["requires_human"] is False
     ref = decision["detail"]["quarantine_refs"]["worktree_snapshot"]
     assert git(project, "log", "-1", "--format=%s", ref) == "second writer"  # preserved for inspection, not lost

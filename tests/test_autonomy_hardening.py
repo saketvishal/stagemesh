@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 from autonomy_support import HUMAN, STAGEMESH, TASK, add_passing_evidence, commit, decisions, git, init_repo, new_store, seed_candidate
 from test_autonomy_lifecycle import CONTRACT, REF, _coordinator, _project, _task_at_integrate
 
@@ -178,7 +179,13 @@ def test_end_to_end_a_second_writer_using_the_worktrees_own_git_identity_is_dete
     assert coordinator.tick() == 0
 
     assert store.latest_candidate(TASK) is None
-    assert [d["condition"] for d in decisions(store, TASK)] == ["EXTERNAL_WORKSPACE_MUTATION"]
+    trace = decisions(store, TASK)
+    assert trace[-1]["condition"] == "EXTERNAL_WORKSPACE_MUTATION"
+    assert {
+        decision["observed"]["operation"]
+        for decision in trace
+        if decision["condition"] == "DESTRUCTIVE_GIT_OPERATION_REQUESTED"
+    } == {"RESET_HARD", "CLEAN"}
 
 
 def test_a_candidate_stacked_on_an_unregistered_foreign_commit_is_tainted_and_loses_its_evidence(tmp_path: Path) -> None:
@@ -449,6 +456,62 @@ def test_the_global_environment_cannot_enable_the_supervisor(tmp_path: Path, mon
     assert load_settings(runtime).enabled is False  # a project that did not opt in is never supervised
     (runtime / "autonomy.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
     assert load_settings(runtime).enabled is True
+
+
+def test_normal_project_config_can_opt_in_and_ambiguous_dual_settings_fail_closed(
+    tmp_path: Path,
+) -> None:
+    from stagemesh.autonomy.wiring import load_settings
+
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "config.json").write_text(
+        json.dumps(
+            {
+                "routing": {"mode": "STAGED"},
+                "autonomy": {
+                    "enabled": True,
+                    "max_reconstructs": 2,
+                    "baseline_requires_detail": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(runtime)
+    assert settings.enabled is True and settings.max_reconstructs == 2
+
+    (runtime / "autonomy.json").write_text(
+        json.dumps({"enabled": True}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="both"):
+        load_settings(runtime)
+
+
+@pytest.mark.parametrize(
+    "autonomy",
+    [
+        True,
+        {"enabled": "true"},
+        {"enabled": True, "trusted_committer_emails": "a@example.test"},
+        {"enabled": True, "code_checkout": False},
+        {"enabled": True, "unknown_identity": False},
+    ],
+)
+def test_embedded_autonomy_settings_are_strictly_typed(
+    tmp_path: Path, autonomy: object
+) -> None:
+    from stagemesh.autonomy.wiring import load_settings
+
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "config.json").write_text(
+        json.dumps({"autonomy": autonomy}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError):
+        load_settings(runtime)
 
 
 # --- advisory-review round: list payloads, signatures, budgets, strict settings, pagination --------------------------------------------------------

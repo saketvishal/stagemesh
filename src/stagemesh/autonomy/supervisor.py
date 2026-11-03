@@ -66,8 +66,14 @@ from .dependencies import (
     evaluate_dependencies,
     load_pull_requests,
 )
+from .destructive_git import execute_preserved_cleanup
 from .gitfacts import GitFacts
-from .github_adapter import GitHubAuthorizationError, GitHubRateLimited, authorization_escalation
+from .github_adapter import (
+    GitHubAdapterError,
+    GitHubAuthorizationError,
+    GitHubRateLimited,
+    authorization_escalation,
+)
 from .merge_policy import (
     IntegrationPolicy,
     MergeFacts,
@@ -309,9 +315,13 @@ class Supervisor:
                 refs["worktree_snapshot"] = ref
             if restore:  # never reset a worktree an execution may still be writing to
                 work = GitFacts(worktree)
-                work.git.run("reset", "--hard", ownership.expected_head, check=False)
-                work.git.run("clean", "-fdq", check=False)
-                restored = work.resolve("HEAD") == ownership.expected_head
+                restored = self._destructive_cleanup(
+                    task_id,
+                    work,
+                    ownership.expected_head,
+                    "restore the quarantined worktree to its recorded owned state",
+                    snapshot=snapshot,
+                )
         for mutation in mutations:
             if mutation.kind == "CANDIDATE_REF_MOVED" and ownership.candidate_ref and ownership.expected_ref_tip and restore:
                 moved = self.facts.git.run("update-ref", ownership.candidate_ref, ownership.expected_ref_tip, mutation.observed, check=False)
@@ -364,8 +374,13 @@ class Supervisor:
         if not restore or baseline is None or not (worktree / ".git").exists():
             return None  # an execution may be writing there: the next hand-over performs the rebuild
         work = GitFacts(worktree)
-        work.git.run("reset", "--hard", baseline, check=False)
-        work.git.run("clean", "-fdq", check=False)
+        if not self._destructive_cleanup(
+            task_id,
+            work,
+            baseline,
+            "discard the tainted candidate only after preserving it and the worktree state",
+        ):
+            return None
         message = f"candidate {candidate[:7]} contained commits StageMesh did not make; rebuild the objective from the baseline {baseline[:7]}"
         self.store.upsert_finding(finding_identity(candidate, message), task_id, candidate, "error", message)
         self.store.add_task_remediation(task_id, "INTEGRATE", candidate)
@@ -533,8 +548,14 @@ class Supervisor:
         snapshot = work.snapshot_worktree(worktree, f"StageMesh: state of {task_id}'s worktree before it was reset onto {target[:7]}")
         if snapshot:  # preserved first: a reset never destroys anything nobody recorded
             self.facts.ensure_ref(f"refs/stagemesh/quarantine/{_task_key(task_id)}/{snapshot[:12]}", snapshot)
-        work.git.run("reset", "--hard", target, check=False)
-        work.git.run("clean", "-fdq", check=False)
+        if not self._destructive_cleanup(
+            task_id,
+            work,
+            target,
+            "move an idle task worktree to the replacement candidate after preserving its prior state",
+            snapshot=snapshot,
+        ):
+            return
         if work.resolve("HEAD") == target:
             previous = ownership.expected_head
             latest = self.store.latest_candidate(task_id)
@@ -1086,6 +1107,27 @@ class Supervisor:
             decision = replace(decision, detail={**decision.detail, "preserved_ref": ref})
         return self.record(decision)
 
+    def _destructive_cleanup(
+        self,
+        task_id: str,
+        work: GitFacts,
+        target: str,
+        reason: str,
+        *,
+        snapshot: str | None = None,
+    ) -> bool:
+        """Policy-check, preserve, execute, and audit a reset/clean pair used by supervisor recovery."""
+        return execute_preserved_cleanup(
+            self.store,
+            self.project,
+            task_id,
+            work.path,
+            target,
+            reason,
+            snapshot=snapshot,
+            recorder=self.record,
+        ).completed
+
     # --- coordinator guard ----------------------------------------------------------------------------------------------------------------
 
     def allow(self, stage: Stage, task_id: str, sha: str) -> bool:
@@ -1110,6 +1152,60 @@ class Supervisor:
                     )
                     return False
             return True
+        except GitHubAuthorizationError as error:
+            self.record(
+                AutonomyDecision(
+                    Condition.CI_GENUINE_UNKNOWN,
+                    POLICY,
+                    Action.ESCALATE_TO_FOUNDER,
+                    task_id,
+                    {"reason": "github_authorization_required", "github_status": str(error.status)},
+                    {"candidate": sha},
+                    {},
+                    authorization_escalation(
+                        error,
+                        "permission to read GitHub check runs for the candidate and integration base",
+                    ),
+                )
+            )
+            return False
+        except GitHubRateLimited as error:
+            self.record(
+                AutonomyDecision(
+                    Condition.CI_PENDING,
+                    POLICY,
+                    Action.WAIT,
+                    task_id,
+                    {"reason": "github_rate_limited"},
+                    {"candidate": sha},
+                    {"retry_after_seconds": error.retry_after},
+                )
+            )
+            return False
+        except GitHubAdapterError as error:
+            self.record(
+                AutonomyDecision(
+                    Condition.CI_GENUINE_UNKNOWN,
+                    POLICY,
+                    Action.HOLD_FAIL_CLOSED,
+                    task_id,
+                    {"reason": "github_ci_unavailable", "github_status": str(error.status)},
+                    {"candidate": sha},
+                )
+            )
+            return False
+        except OSError as error:
+            self.record(
+                AutonomyDecision(
+                    Condition.CI_GENUINE_UNKNOWN,
+                    POLICY,
+                    Action.HOLD_FAIL_CLOSED,
+                    task_id,
+                    {"reason": "github_ci_transport_unavailable", "error_type": type(error).__name__},
+                    {"candidate": sha},
+                )
+            )
+            return False
         except GitError:
             return False  # cannot observe the workspace: fail closed
 

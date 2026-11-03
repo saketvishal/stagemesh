@@ -5,6 +5,8 @@ not propagate it to a separate worker. After updating the installed StageMesh ru
 
 Installed projects can also own skills. A change contract may list complete, project-relative `SKILL.md` paths in `skill_refs`.
 StageMesh validates that each path stays inside the task checkout and fails closed when an explicitly required skill is missing.
+Projects that need named, provider-compatible opt-in can instead use the project capability registry and `capability_refs`; see
+[`capabilities.md`](capabilities.md). Registry attachment is audited separately from actual invocation.
 For frontend tasks, StageMesh automatically uses `agent-skills/genui-architect/SKILL.md` when the project provides it, with generated
 runtime mirror locations as fallbacks. Project skills are read from the task's isolated checkout and never expand its allowed files,
 acceptance criteria, or authority.
@@ -12,6 +14,7 @@ acceptance criteria, or authority.
 | Skill | Selection | Stage |
 | --- | --- | --- |
 | Anthropic `frontend-design` | UI file extensions, frontend JS/TS paths, or explicit UI intent; excludes documentation-only contracts | Implementation |
+| Superpowers `receiving-code-review` | Remediation attempts with recorded findings | Implementation |
 | Superpowers `systematic-debugging` | Bug/failure intent or a remediation attempt | Implementation |
 | Superpowers `test-driven-development` | Code/behavior changes; excludes simple copy/style and documentation-only tasks | Implementation |
 | Superpowers `verification-before-completion` | Every implementation and independent review | Both |
@@ -35,7 +38,7 @@ or replace enforced file scope, validation gates and independent review. Never r
 
 StageMesh retains scheduling, worker/worktree ownership, Git commits and merging. It does not load Superpowers' blanket
 `using-superpowers` bootstrap or its brainstorming, parallel-agent, worktree or branch-finishing workflows into bounded workers.
-Only the four engineering/design skills above are shipped. Native global plugins, hooks and automatic script execution are not installed.
+Only the five engineering/design skills above are shipped. Native global plugins, hooks and automatic script execution are not installed.
 
 The adapter explicitly overrides upstream full-suite-per-task instructions: run focused behavioral checks for changed surfaces and
 affected callers, plus all required contract gates. Broaden for a failure, new change or unresolved risk. Do not repeat successful
@@ -63,6 +66,6 @@ Git attributes preserve the resource bytes across Windows checkouts so newline c
 - Each resource's source URL and pinned Git blob SHA are in `src/stagemesh/skill_packs/manifest.json`; upstream `main` is not fetched during execution.
 
 To update a snapshot, review the upstream changes, update resource bytes and manifest together, retain the licenses, build the wheel,
-and run `tests/test_agent_skills.py` plus affected provider tests. The wheel consumer test loads all four skills in an isolated Python
+and run `tests/test_agent_skills.py` plus affected provider tests. The wheel consumer test loads all five skills in an isolated Python
 process from extracted installed files, without the source on its import path. Transport tests cover the configured provider prompt
 shapes. They verify selection and file delivery; they do not claim that a live model followed the instructions.

@@ -139,8 +139,11 @@ def test_scenario_a_second_writer_commit_is_detected_quarantined_and_never_adopt
     assert store.latest_candidate(TASK) is None
     # durable trace
     trace = decisions(store, TASK)
-    assert len(trace) == 1 and trace[0]["trace"].startswith("EXTERNAL_WORKSPACE_MUTATION ")
-    assert "action=FAIL_CLOSED_QUARANTINE" in trace[0]["trace"] and "human_escalation=false" in trace[0]["trace"]
+    cleanup = [item for item in trace if item["condition"] == "DESTRUCTIVE_GIT_OPERATION_REQUESTED"]
+    assert {item["observed"]["operation"] for item in cleanup} == {"RESET_HARD", "CLEAN"}
+    (mutation,) = [item for item in trace if item["condition"] == "EXTERNAL_WORKSPACE_MUTATION"]
+    assert mutation["trace"].startswith("EXTERNAL_WORKSPACE_MUTATION ")
+    assert "action=FAIL_CLOSED_QUARANTINE" in mutation["trace"] and "human_escalation=false" in mutation["trace"]
 
 
 def test_scenario_a_repeated_checks_do_not_flood_the_trace(tmp_path: Path) -> None:

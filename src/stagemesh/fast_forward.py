@@ -17,7 +17,7 @@ from .autonomy.review_policy import severity_blocks
 from .autonomy.supervisor import Supervisor
 from .concurrency import IntegrationLock
 from .contracts import ContractError, bound_contract_from_record
-from .git import GitWorkspace
+from .git import GitWorkspace, validate_destructive_reason
 from .queue_control import QueueStopControl
 from .review import independent_review_verified
 from .survivor_wave import is_task_pr_branch
@@ -372,9 +372,18 @@ class FastForwardPullRequests(GitHubPullRequests):
             # The literal lease is compare-and-swap, not permission to rewrite:
             # ancestry is proved above; hosted mode additionally requires server no-rewrite policy.
             # An intermediate ancestor pushed by another writer must refuse too.
-            pushed = self.bounded_git("push", "--atomic",
+            push_args = (
+                "push",
+                "--atomic",
                 f"--force-with-lease={base_ref}:{self.expected_base}",
-                self.remote_url, f"{expected_head_sha}:{base_ref}", check=False)
+                self.remote_url,
+                f"{expected_head_sha}:{base_ref}",
+            )
+            validate_destructive_reason(
+                push_args,
+                "ancestry-proven fast-forward compare-and-swap to the exact observed remote base",
+            )
+            pushed = self.bounded_git(*push_args, check=False)
             if pushed.returncode:
                 return MergeOutcome(False, reason="fast_forward_push_refused: " + pushed.stderr[-200:])
             if self.remote_tip(base_ref, after_landing=True) != expected_head_sha:

@@ -21,6 +21,7 @@ VERIFY = "verification-before-completion"
 DEBUG = "systematic-debugging"
 TDD = "test-driven-development"
 FRONTEND = "frontend-design"
+RECEIVE_REVIEW = "receiving-code-review"
 SOURCE = Path(__file__).resolve().parents[1]
 
 
@@ -90,7 +91,20 @@ def test_remediation_selects_debugging_even_without_a_bug_keyword() -> None:
 
     assert select_skills(
         "Complete parser", contract("Complete parser", "src/parser.py"), remediation=True
-    ) == (DEBUG, TDD, VERIFY)
+    ) == (RECEIVE_REVIEW, DEBUG, TDD, VERIFY)
+
+
+def test_remediation_skill_cannot_take_over_external_review_or_delivery() -> None:
+    from stagemesh.agent_skills import skill_prompt
+
+    prompt = skill_prompt(
+        "Complete parser",
+        contract("Complete parser", "src/parser.py"),
+        remediation=True,
+    )
+
+    assert tuple(resources(prompt)) == (RECEIVE_REVIEW, DEBUG, TDD, VERIFY)
+    assert "Do not push, publish, post review replies, or contact external systems" in prompt
 
 
 def test_review_receives_verification_only() -> None:
@@ -389,9 +403,9 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from stagemesh.agent_skills import skill_prompt
 from stagemesh.contracts import ChangeContract
-prompt = skill_prompt('Fix UI regression', ChangeContract(objective='Fix UI regression', allowed_files=('web/Page.tsx',)))
+prompt = skill_prompt('Fix UI regression', ChangeContract(objective='Fix UI regression', allowed_files=('web/Page.tsx',)), remediation=True)
 paths = [Path(json.loads(line.split(': ', 1)[1])) for line in prompt.splitlines() if line.startswith('- Skill ')]
-assert len(paths) == 4
+assert len(paths) == 5
 assert all(p.is_relative_to(Path(sys.argv[1])) and p.read_text(encoding='utf-8') for p in paths)
 print(json.dumps([p.parent.name for p in paths]))
 """
@@ -405,4 +419,4 @@ print(json.dumps([p.parent.name for p in paths]))
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout) == [FRONTEND, DEBUG, TDD, VERIFY]
+    assert json.loads(result.stdout) == [RECEIVE_REVIEW, FRONTEND, DEBUG, TDD, VERIFY]

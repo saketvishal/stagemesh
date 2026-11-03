@@ -257,7 +257,13 @@ def test_cancelled_unknown_cleanup_retains_paths_and_blocks_reopened_run(tmp_pat
             checkout, temp = [path.resolve() for path in held]
             assert checkout.name == "checkout" and checkout.parent.name.startswith("stagemesh-candidate-")
             assert temp.name.startswith("stagemesh-gate-")
-            GitWorkspace(project).run("worktree", "remove", "--force", str(checkout))
+            GitWorkspace(project).run(
+                "worktree",
+                "remove",
+                "--force",
+                str(checkout),
+                destructive_reason="test fixture removes its ephemeral validation worktree",
+            )
             shutil.rmtree(checkout.parent)
             shutil.rmtree(temp)
 

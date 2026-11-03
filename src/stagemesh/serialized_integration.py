@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .audit import record_audit
+from .autonomy.destructive_git import execute_preserved_cleanup
 from .concurrency import IntegrationLock
 from .contract_binding import contract_for_candidate
 from .contracts import ContractError, _matches, changed_files
@@ -123,8 +124,15 @@ class SerializedIntegrator(Integrator):
                 return False
             with owned_workspace(store, project, task_id, ExecutionKind.INTEGRATION) as lease:
                 git = GitWorkspace(lease.path)
-                git.run("reset", "--hard", "HEAD", check=False)
-                git.run("clean", "-fdq", check=False)
+                if not execute_preserved_cleanup(
+                    store,
+                    project,
+                    task_id,
+                    lease.path,
+                    "HEAD",
+                    "prepare a sealed candidate worktree for attribution repair",
+                ).completed:
+                    return False
                 git.run("checkout", "--detach", candidate_sha)
                 new_sha = reattribute_range(lease.path, bound.baseline_sha, candidate_sha)
                 if new_sha is None:
@@ -224,8 +232,15 @@ class SerializedIntegrator(Integrator):
                     worktree = lease.path
                     git = GitWorkspace(worktree)
                     try:
-                        git.run("reset", "--hard", "HEAD", check=False)
-                        git.run("clean", "-fdq", check=False)
+                        if not execute_preserved_cleanup(
+                            store,
+                            project,
+                            task_id,
+                            worktree,
+                            "HEAD",
+                            "prepare a sealed candidate worktree for reconstruction",
+                        ).completed:
+                            return False, "could not prepare the task worktree safely", [], "git_error"
                         git.run("checkout", "--detach", tip)
                         result = subprocess.run(
                             ["git", "-c", "core.longpaths=true", "apply", "--index", "--3way"],
@@ -238,18 +253,44 @@ class SerializedIntegrator(Integrator):
                             conflicts = [
                                 line for line in git.run("diff", "--name-only", "--diff-filter=U", check=False).stdout.splitlines() if line
                             ]
-                            git.run("reset", "--hard", tip, check=False)
+                            cleanup = execute_preserved_cleanup(
+                                store,
+                                project,
+                                task_id,
+                                worktree,
+                                tip,
+                                "restore the integration tip after a reconstruction patch failed",
+                            )
                             lease.seal(tip)
                             detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()[-1000:] or "patch did not apply"
+                            if not cleanup.completed:
+                                return False, detail + "; preserved cleanup also failed", conflicts[:10], "git_error"
                             return False, detail, conflicts[:10], "patch_conflict" if conflicts else "patch_failed"
                         reconstructed = git.commit_all(f"reconstruct {task_id} on current integration tip")
                     except (GitError, OSError) as exc:
-                        git.run("reset", "--hard", tip, check=False)
+                        cleanup = execute_preserved_cleanup(
+                            store,
+                            project,
+                            task_id,
+                            worktree,
+                            tip,
+                            "restore the integration tip after reconstruction raised an error",
+                        )
                         lease.seal(tip)
-                        return False, str(exc)[:300], [], "git_error"
+                        suffix = "" if cleanup.completed else "; preserved cleanup also failed"
+                        return False, (str(exc)[:300] + suffix), [], "git_error"
                     if reconstructed == tip:
-                        git.run("reset", "--hard", tip, check=False)
+                        cleanup = execute_preserved_cleanup(
+                            store,
+                            project,
+                            task_id,
+                            worktree,
+                            tip,
+                            "restore the integration tip after reconstruction produced no change",
+                        )
                         lease.seal(tip)
+                        if not cleanup.completed:
+                            return False, "empty reconstruction cleanup failed", changed[:10], "git_error"
                         return False, "reconstruction produced no change on the current integration tip", changed[:10], "empty_reconstruction"
                     _preserve_original(project, task_id, candidate_sha)
                     previous = store.latest_candidate(task_id)
@@ -299,15 +340,31 @@ class SerializedIntegrator(Integrator):
             with owned_workspace(store, project, task_id, ExecutionKind.INTEGRATION) as lease:
                 worktree = lease.path
                 git = GitWorkspace(worktree)
-                git.run("reset", "--hard", "HEAD", check=False)
-                git.run("clean", "-fdq", check=False)
+                if not execute_preserved_cleanup(
+                    store,
+                    project,
+                    task_id,
+                    worktree,
+                    "HEAD",
+                    "prepare a sealed candidate worktree for rebase",
+                ).completed:
+                    raise GitError("could not prepare the task worktree safely for rebase")
                 git.run("checkout", "--detach", candidate_sha)
-                result = git.run(*_rebase_args(git, tip, bound.baseline_sha, candidate_sha), check=False)
+                result = git.run(
+                    *_rebase_args(git, tip, bound.baseline_sha, candidate_sha),
+                    check=False,
+                    destructive_reason="replay only the task-owned candidate commits onto the observed integration tip",
+                )
                 if result.returncode != 0:
                     conflicts = [
                         line for line in git.run("diff", "--name-only", "--diff-filter=U", check=False).stdout.splitlines() if line
                     ]
-                    git.run("rebase", "--abort", check=False)
+                    git.run(
+                        "rebase",
+                        "--abort",
+                        check=False,
+                        destructive_reason="restore the sealed candidate after a failed task-owned rebase",
+                    )
                     git.run("checkout", "--detach", candidate_sha, check=False)
                     lease.seal(candidate_sha)
                     failure_code = REBASE_CONFLICT if conflicts else REBASE_UNAVAILABLE

@@ -103,7 +103,13 @@ def remove_task_workspace(project: Path, task_id: str) -> None:
         return
     with _WORKTREE_CREATION:
         try:
-            GitWorkspace(project).run("worktree", "remove", "--force", str(target))
+            GitWorkspace(project).run(
+                "worktree",
+                "remove",
+                "--force",
+                str(target),
+                destructive_reason="remove a StageMesh-owned task worktree after its state was proven removable or preserved",
+            )
         except GitError:
             shutil.rmtree(target, ignore_errors=True)
 

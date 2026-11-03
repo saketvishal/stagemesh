@@ -16,11 +16,15 @@ import re
 from urllib.parse import quote
 
 from ..github import GitHubTransport, parse_retry_after
+from ..redaction import redact_output
 from .ci_diagnosis import Conclusion, GateOutcome, HostedCIRun
 from .decisions import Escalation, EscalationReason
 from .dependencies import CIRollup, MergeOutcome, PRState, PullRequest
 
-_FAILED_TEST = re.compile(r"^[ \t]*FAILED\s+(\S+)", re.MULTILINE)
+_FAILED_TEST = re.compile(
+    r"^[ \t]*(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z[ \t]+)?FAILED\s+(\S+)",
+    re.MULTILINE,
+)
 _CONCLUSIONS = {
     "success": Conclusion.SUCCESS,
     "failure": Conclusion.FAILURE,
@@ -32,6 +36,8 @@ _CONCLUSIONS = {
     "startup_failure": Conclusion.FAILURE,
     "action_required": Conclusion.FAILURE,
 }
+_MAX_JOB_LOG_BYTES = 256 * 1024
+_MAX_JOB_LOG_CHARS = 64 * 1024
 
 
 class GitHubAdapterError(RuntimeError):
@@ -53,7 +59,10 @@ class GitHubRateLimited(GitHubAdapterError):
 def authorization_escalation(error: GitHubAuthorizationError, needed: str) -> Escalation:
     return Escalation(
         EscalationReason.EXTERNAL_SYSTEM_AUTHORIZATION_REQUIRED,
-        attempted=("used the configured GitHub credentials", f"retried after distinguishing {error.status} from a rate limit"),
+        attempted=(
+            "used the configured GitHub credentials",
+            f"classified GitHub status {error.status} separately from a rate limit",
+        ),
         why_undeterminable=f"GitHub refused the request ({error.status}); StageMesh cannot grant itself access",
         smallest_decision=f"Grant the StageMesh GitHub token {needed}, or confirm it should stay without that access?",
     )
@@ -196,7 +205,7 @@ def _worst_gate(outcomes: list[GateOutcome], severity: dict[Conclusion, int]) ->
 
 
 class GitHubHostedCI(GitHubClientBase):
-    """`HostedCI` over check runs. Check-run payloads carry no logs, so failure identity is gate-level unless output text lists tests."""
+    """`HostedCI` over check runs, enriched with bounded GitHub Actions job logs when available."""
 
     def run_for(self, sha: str) -> HostedCIRun | None:
         runs: list[dict] = []
@@ -230,7 +239,11 @@ class GitHubHostedCI(GitHubClientBase):
         for (_suite, name), attempts in suites.items():
             attempts.sort(key=lambda r: (str(r.get("started_at") or ""), int(r.get("id") or 0)), reverse=True)
             latest = self._gate(attempts[0])
-            earlier = tuple(self._gate(r).conclusion for r in attempts[1:] if r.get("status") == "completed")
+            earlier = tuple(
+                self._gate(r, include_job_log=False).conclusion
+                for r in attempts[1:]
+                if r.get("status") == "completed"
+            )
             per_name.setdefault(name, []).append(GateOutcome(latest.name, latest.conclusion, latest.log, latest.failing_tests, earlier, latest.ref))
         severity = {Conclusion.PENDING: 3, Conclusion.FAILURE: 2, Conclusion.TIMED_OUT: 2, Conclusion.CANCELLED: 2}
         gates: dict[str, GateOutcome] = {}
@@ -261,8 +274,7 @@ class GitHubHostedCI(GitHubClientBase):
             return CIRollup.FAILURE
         return CIRollup.SUCCESS if run.complete else CIRollup.PENDING
 
-    @staticmethod
-    def _gate(run: dict) -> GateOutcome:
+    def _gate(self, run: dict, *, include_job_log: bool = True) -> GateOutcome:
         name = str(run.get("name") or "unnamed")
         if run.get("status") != "completed":
             return GateOutcome(name, Conclusion.PENDING)
@@ -270,4 +282,29 @@ class GitHubHostedCI(GitHubClientBase):
         text = "\n".join(str(output.get(key) or "") for key in ("title", "summary", "text") if output.get(key))
         conclusion = _CONCLUSIONS.get(str(run.get("conclusion")), Conclusion.FAILURE)
         ref = str(run["id"]) if run.get("id") is not None else None
+        if include_job_log and conclusion.failed and ref:
+            job_log = self._job_log(run, ref)
+            if job_log:
+                text = "\n".join(item for item in (text, job_log) if item)
         return GateOutcome(name, conclusion, text, tuple(dict.fromkeys(_FAILED_TEST.findall(text))), ref=ref)
+
+    def _job_log(self, run: dict, ref: str) -> str:
+        app = run.get("app") or {}
+        slug = str(app.get("slug") or "").casefold() if isinstance(app, dict) else ""
+        name = str(app.get("name") or "").casefold() if isinstance(app, dict) else ""
+        if slug != "github-actions" and name != "github actions":
+            return ""
+        requester = getattr(self.transport, "request_bytes", None)
+        if not callable(requester):
+            return ""
+        status, _headers, raw = requester(
+            "GET",
+            f"{self._root}/actions/jobs/{quote(ref)}/logs",
+            max_bytes=_MAX_JOB_LOG_BYTES,
+        )
+        if status not in {200, 206} or not isinstance(raw, bytes):
+            return ""
+        cleaned = redact_output(raw.decode("utf-8", errors="replace")).replace("\x00", "")
+        if len(cleaned) > _MAX_JOB_LOG_CHARS:
+            cleaned = cleaned[-_MAX_JOB_LOG_CHARS:]
+        return cleaned

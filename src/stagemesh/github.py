@@ -8,6 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 
 class GitHubTransport(Protocol):
@@ -48,6 +49,66 @@ class UrlLibGitHubTransport:
             raw = exc.read().decode("utf-8")
             payload = _decode_json(raw, str(exc.reason))
             return exc.code, dict(exc.headers), payload
+
+    def request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        max_bytes: int,
+    ) -> tuple[int, dict[str, str], bytes]:
+        """Download bounded binary/text content without forwarding GitHub credentials on redirects."""
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
+        headers = {"Accept": "application/vnd.github+json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(
+            f"{self.api_root}{path}", headers=headers, method=method
+        )
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            with opener.open(request, timeout=20) as response:
+                return _bounded_response(response, max_bytes)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 302:
+                return exc.code, dict(exc.headers), b""
+            location = exc.headers.get("Location")
+            if not _safe_download_url(location):
+                return 502, {}, b""
+            # This request intentionally has no Authorization header. GitHub's signed URL is the authority.
+            redirected = urllib.request.Request(
+                str(location), headers={"Accept": "text/plain"}, method="GET"
+            )
+            try:
+                with urllib.request.urlopen(redirected, timeout=20) as response:
+                    return _bounded_response(response, max_bytes)
+            except urllib.error.HTTPError as redirected_error:
+                return redirected_error.code, dict(redirected_error.headers), b""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _bounded_response(response, max_bytes: int) -> tuple[int, dict[str, str], bytes]:  # noqa: ANN001
+    raw = response.read(max_bytes + 1)
+    headers = dict(response.headers)
+    if len(raw) > max_bytes:
+        headers["X-StageMesh-Truncated"] = "true"
+        return 206, headers, raw[:max_bytes]
+    return int(response.status), headers, raw
+
+
+def _safe_download_url(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
 
 
 class GitHubClient:

@@ -33,6 +33,58 @@ def _sets_identity_inline(args: tuple[str, ...]) -> bool:
     return any(a == "-c" and i + 1 < len(args) and args[i + 1].startswith(("user.name=", "user.email=")) for i, a in enumerate(args))
 
 
+def _has_short_option(args: tuple[str, ...], option: str) -> bool:
+    """Recognize a one-letter option even when Git permits it in a combined option group."""
+    for arg in args:
+        if arg == "--":
+            return False
+        if arg.startswith("-") and not arg.startswith("--") and option in arg[1:]:
+            return True
+    return False
+
+
+def destructive_operation(args: tuple[str, ...]) -> str | None:
+    """Name a command that can discard work or rewrite history; callers must supply an explicit reason."""
+    command = _subcommand(args)
+    if command == "reset" and "--hard" in args:
+        return "RESET_HARD"
+    if command == "clean" and ("--force" in args or _has_short_option(args, "f")):
+        return "CLEAN"
+    if command == "rebase":
+        return "REBASE_ABORT" if "--abort" in args else "HISTORY_REWRITE"
+    if command == "worktree" and "remove" in args and ("--force" in args or _has_short_option(args, "f")):
+        return "FORCED_WORKTREE_REMOVE"
+    if command == "push" and (
+        "--force" in args
+        or _has_short_option(args, "f")
+        or any(arg.startswith("--force-with-lease") for arg in args)
+    ):
+        return "FORCE_PUSH"
+    if command == "branch" and ("--delete" in args or _has_short_option(args, "d") or _has_short_option(args, "D")):
+        return "BRANCH_DELETE"
+    if command == "update-ref" and "-d" in args:
+        return "REF_DELETE"
+    if command == "commit" and "--amend" in args:
+        return "HISTORY_REWRITE"
+    if command == "filter-branch":
+        return "HISTORY_REWRITE"
+    return None
+
+
+def validate_destructive_reason(
+    args: tuple[str, ...], destructive_reason: str | None
+) -> str | None:
+    """Reject a destructive command without an explicit bounded reason and return its classification."""
+    destructive = destructive_operation(args)
+    if destructive is not None and destructive_reason is None:
+        raise GitValidationError(
+            f"destructive git operation {destructive} requires an explicit destructive_reason"
+        )
+    if destructive_reason is not None:
+        _validate_non_empty_string(destructive_reason, "destructive git reason", 500)
+    return destructive
+
+
 def _windows_longpaths(args: tuple[str, ...], windows: bool | None = None) -> list[str]:
     """Per-command `-c core.longpaths=true` on Windows: deep task-worktree paths otherwise make git fail with 'Filename too long'
     (for example `git rebase` reports `failed to stat '<sha>...<sha>'`). Nothing is written to any git config; a caller's own
@@ -71,7 +123,12 @@ class GitWorkspace:
         self.path = Path(path).resolve()
 
     def run(
-        self, *args: str, check: bool = True, env: dict[str, str] | None = None, encoding: str | None = None
+        self,
+        *args: str,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+        encoding: str | None = None,
+        destructive_reason: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if not args:
             raise GitValidationError("git command must include at least one argument")
@@ -79,6 +136,7 @@ class GitWorkspace:
             _validate_non_empty_string(arg, "git command argument", 1000)
             for arg in args
         )
+        validate_destructive_reason(validated_args, destructive_reason)
         if env:
             for key, value in env.items():
                 _validate_non_empty_string(key, "git environment key", 200)

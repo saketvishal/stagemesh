@@ -283,7 +283,15 @@ def _deliver_pass(
     elif remote_tip is not None:
         push = subprocess.CompletedProcess([], 1, "", "[rejected] already exists at a different commit")
     else:
-        push = facts.git.run("push", "--quiet", f"--force-with-lease=refs/heads/{branch}:", remote, f"{sha}:refs/heads/{branch}", check=False)
+        push = facts.git.run(
+            "push",
+            "--quiet",
+            f"--force-with-lease=refs/heads/{branch}:",
+            remote,
+            f"{sha}:refs/heads/{branch}",
+            check=False,
+            destructive_reason="create the candidate branch only if the remote branch is still absent",
+        )
     if push.returncode != 0 and _PUSH_DENIED.search(push.stderr):
         raise PushDenied(push.stderr.strip()[:300])
     if push.returncode != 0 and not re.search(_PUSH_CONFLICT, push.stderr, re.IGNORECASE):

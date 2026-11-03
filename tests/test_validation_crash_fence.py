@@ -132,6 +132,12 @@ def test_parent_death_cannot_release_unverified_validation_tree(tmp_path, phase)
             assert checkout.name=='checkout' and checkout.parent.name.startswith('stagemesh-candidate-')
             assert temp.name.startswith('stagemesh-gate-')
             project = Path(json.loads((tmp_path/'case.json').read_text())['project'])
-            GitWorkspace(project).run('worktree','remove','--force',str(checkout))
+            GitWorkspace(project).run(
+                "worktree",
+                "remove",
+                "--force",
+                str(checkout),
+                destructive_reason="test fixture removes its fenced validation worktree",
+            )
             shutil.rmtree(checkout.parent)
             shutil.rmtree(temp)

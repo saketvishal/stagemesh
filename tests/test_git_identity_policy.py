@@ -11,8 +11,9 @@ from test_run_ready import _project
 
 from stagemesh.attribution import attribution_for_worker
 from stagemesh.autonomy.gitfacts import GitFacts
-from stagemesh.git import GitWorkspace
+from stagemesh.git import GitValidationError, GitWorkspace
 from stagemesh.git_identity import (
+    AI_PROVIDER_EMAIL_DOMAINS,
     GitIdentityError,
     configured_identity,
     is_non_human_email,
@@ -21,9 +22,37 @@ from stagemesh.git_identity import (
 )
 from stagemesh.workspaces import prepare_task_workspace
 
-OWNER = ("Repo Owner", "42+repoowner@users.noreply.github.com")
-HUMAN = ("Ada Lovelace", "ada@example.org")
+OWNER = ("Repository Owner", "repository.owner@example.test")
+HUMAN = ("Human Contributor", "human.contributor@example.test")
+PROVIDER_EMAILS = tuple(
+    f"fixture@{domain}" for domain in sorted(AI_PROVIDER_EMAIL_DOMAINS)
+)
+PROVIDER_EMAIL = PROVIDER_EMAILS[0]
 SRC = Path(__file__).resolve().parents[1] / "src"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("reset", "--hard", "HEAD"),
+        ("clean", "-fdq"),
+        ("rebase", "main"),
+        ("rebase", "--abort"),
+        ("worktree", "remove", "--force", "somewhere"),
+        ("worktree", "remove", "-f", "somewhere"),
+        ("push", "--force-with-lease=refs/heads/main:abc", "origin", "HEAD:main"),
+        ("push", "-f", "origin", "HEAD:main"),
+        ("branch", "-D", "old"),
+        ("branch", "-dr", "old"),
+        ("update-ref", "-d", "refs/heads/old"),
+        ("commit", "--amend", "--no-edit"),
+    ],
+)
+def test_destructive_git_commands_require_an_explicit_reason(
+    tmp_path: Path, args: tuple[str, ...]
+) -> None:
+    with pytest.raises(GitValidationError, match="requires an explicit destructive_reason"):
+        GitWorkspace(tmp_path).run(*args, check=False)
 
 
 @pytest.fixture(autouse=True)
@@ -120,14 +149,15 @@ def test_provider_commits_carry_the_project_identity_and_no_fabricated_contribut
     (worktree / "p.txt").write_text("provider change\n", encoding="utf-8")
 
     GitWorkspace(worktree).commit_all(
-        "provider change\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
+        f"provider change\n\nCo-Authored-By: Automated Provider <{PROVIDER_EMAIL}>",
         attribution=attribution_for_worker("local-worker", "codex"),
     )
 
     author, committer = _ident(worktree)
     assert author == committer == f"{OWNER[0]} <{OWNER[1]}>"
     body = _raw(worktree, "log", "-1", "--format=%B")
-    assert "co-authored-by" not in body.lower() and "anthropic" not in body.lower()
+    assert "co-authored-by" not in body.lower()
+    assert all(domain not in body.lower() for domain in AI_PROVIDER_EMAIL_DOMAINS)
     assert "local-worker" not in _raw(worktree, "log", "--all", "--format=%an %ae %cn %ce")
 
 
@@ -135,7 +165,11 @@ def test_state_transplant_commits_are_committed_as_the_project_identity(tmp_path
     project = _owner_repo(tmp_path)
     head = _raw(project, "rev-parse", "HEAD")
     tree = _raw(project, "rev-parse", "HEAD^{tree}")
-    sha = GitFacts(project).commit_tree(tree, head, "rebuilt\n\nCo-authored-by: Codex <codex@openai.com>")
+    sha = GitFacts(project).commit_tree(
+        tree,
+        head,
+        f"rebuilt\n\nCo-authored-by: Provider Tool <{PROVIDER_EMAIL}>",
+    )
     assert _ident(project, sha) == (f"{OWNER[0]} <{OWNER[1]}>", f"{OWNER[0]} <{OWNER[1]}>")
     assert "co-authored-by" not in _raw(project, "log", "-1", "--format=%B", sha).lower()
 
@@ -149,22 +183,26 @@ def test_rebase_preserves_a_genuine_contributors_authorship_and_commits_as_the_o
     branch = _raw(project, "rev-parse", "--abbrev-ref", "HEAD")
     worktree = prepare_task_workspace(project, "T-1")
 
-    (worktree / "ada.txt").write_text("by a human contributor\n", encoding="utf-8")
+    (worktree / "human.txt").write_text("by a human contributor\n", encoding="utf-8")
     _raw(worktree, "add", "-A")
     subprocess.run(
-        ["git", "-c", f"user.name={HUMAN[0]}", "-c", f"user.email={HUMAN[1]}", "commit", "-q", "-m", "human work\n\nCo-authored-by: Grace Hopper <grace@example.org>"],
+        ["git", "-c", f"user.name={HUMAN[0]}", "-c", f"user.email={HUMAN[1]}", "commit", "-q", "-m", "human work\n\nCo-authored-by: Additional Contributor <additional.contributor@example.test>"],
         cwd=worktree, check=True,
     )
     (project / "main.txt").write_text("main advanced\n", encoding="utf-8")
     GitWorkspace(project).commit_all("main advanced")  # the integration ref moves
 
-    result = GitWorkspace(worktree).run("rebase", branch)  # StageMesh's own rebase path (SerializedIntegrator uses git.run)
+    result = GitWorkspace(worktree).run(
+        "rebase",
+        branch,
+        destructive_reason="test the StageMesh-owned candidate rebase identity",
+    )  # StageMesh's own rebase path (SerializedIntegrator uses git.run)
 
     assert result.returncode == 0 and _raw(worktree, "merge-base", "HEAD", base) == base
     author, committer = _ident(worktree)
     assert author == f"{HUMAN[0]} <{HUMAN[1]}>"  # the human keeps authorship
     assert committer == f"{OWNER[0]} <{OWNER[1]}>"  # the rebase is committed by the owner, not by a synthetic StageMesh identity
-    assert "Co-authored-by: Grace Hopper <grace@example.org>" in _raw(worktree, "log", "-1", "--format=%B")  # a human trailer is untouched
+    assert "Co-authored-by: Additional Contributor <additional.contributor@example.test>" in _raw(worktree, "log", "-1", "--format=%B")  # a human trailer is untouched
 
 
 # ---- refusing wrong identities --------------------------------------------------------------------------------------------------------
@@ -173,9 +211,9 @@ def test_rebase_preserves_a_genuine_contributors_authorship_and_commits_as_the_o
 @pytest.mark.parametrize(
     "email",
     [
-        "12345678+repoowner@users.noreply.github.com",  # an invented id belongs to a different GitHub account
-        "Repo Owner 42+repoowner@users.noreply.github.com",  # name glued into the address
-        "owner@@example.org",
+        "12345678+fixtureowner@users.noreply.github.com",  # an invented id belongs to a different GitHub account
+        "Repository Owner 42+fixtureowner@users.noreply.github.com",  # name glued into the address
+        "owner@@example.test",
         "",
     ],
 )
@@ -197,8 +235,8 @@ def test_placeholder_or_malformed_identities_are_refused_before_any_commit(tmp_p
 
 def test_a_placeholder_identity_in_the_environment_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = _owner_repo(tmp_path)
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "Repo Owner")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "12345678+repoowner@users.noreply.github.com")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Repository Owner")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "12345678+fixtureowner@users.noreply.github.com")
     (project / "x.txt").write_text("x\n", encoding="utf-8")
     with pytest.raises(GitIdentityError):
         GitWorkspace(project).commit_all("must not be created")
@@ -216,12 +254,12 @@ def test_project_identity_prefers_the_owners_configuration_to_the_synthetic_one(
 @pytest.mark.parametrize(
     "line",
     [
-        "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
+        f"Co-Authored-By: Automated Provider <{PROVIDER_EMAIL}>",
         "Co-authored-by: StageMesh <stagemesh@example.invalid>",
         "Co-authored-by: StageMesh codex worker local-worker <codex+local-worker@stagemesh.invalid>",
-        "Co-authored-by: Codex <codex@openai.com>",
-        "Co-authored-by: Vishal Singh <12345678+saketvishal@users.noreply.github.com>",
-        "Co-authored-by: Vishal Singh <Vishal Singh 12345678+saketvishal@users.noreply.github.com>",
+        f"Co-authored-by: Provider Tool <{PROVIDER_EMAILS[-1]}>",
+        "Co-authored-by: Fixture User <12345678+fixtureuser@users.noreply.github.com>",
+        "Co-authored-by: Fixture User <Fixture User 12345678+fixtureuser@users.noreply.github.com>",
         "Co-authored-by: no email at all",
     ],
 )
@@ -232,9 +270,9 @@ def test_non_human_and_placeholder_coauthor_trailers_are_stripped(line: str) -> 
 
 
 def test_genuine_human_coauthors_and_message_bodies_are_preserved() -> None:
-    message = "Subject\n\nBody mentions Co-authored-by: in prose.\n\nCo-authored-by: Ada Lovelace <ada@example.org>\n"
+    message = "Subject\n\nBody mentions Co-authored-by: in prose.\n\nCo-authored-by: Human Contributor <human.contributor@example.test>\n"
     assert sanitize_commit_message(message) == message
-    assert not is_non_human_email("ada@example.org") and is_non_human_email("noreply@anthropic.com")
+    assert not is_non_human_email(HUMAN[1]) and is_non_human_email(PROVIDER_EMAIL)
 
 
 # ---- precedence: the owner's identity beats StageMesh's placeholder, wherever it is configured ------------------------------------------
@@ -269,7 +307,12 @@ def test_provider_environment_cannot_override_the_approved_identity(tmp_path: Pa
     from stagemesh.git_identity import provider_environment
 
     project = _owner_repo(tmp_path)
-    hostile = {"GIT_AUTHOR_NAME": "Codex", "GIT_AUTHOR_EMAIL": "codex@openai.com", "GIT_COMMITTER_NAME": "Claude", "GIT_COMMITTER_EMAIL": "x@anthropic.com"}
+    hostile = {
+        "GIT_AUTHOR_NAME": "Provider Tool A",
+        "GIT_AUTHOR_EMAIL": PROVIDER_EMAILS[0],
+        "GIT_COMMITTER_NAME": "Provider Tool B",
+        "GIT_COMMITTER_EMAIL": PROVIDER_EMAILS[-1],
+    }
     env = provider_environment(project, hostile)
     assert (env["GIT_AUTHOR_NAME"], env["GIT_AUTHOR_EMAIL"]) == OWNER
     assert (env["GIT_COMMITTER_NAME"], env["GIT_COMMITTER_EMAIL"]) == OWNER

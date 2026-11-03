@@ -57,6 +57,7 @@ class ChangeContract:
     acceptance_criteria: tuple[str, ...] = ()
     spec_refs: tuple[str, ...] = ()
     skill_refs: tuple[str, ...] = ()
+    capability_refs: tuple[str, ...] = ()
     allowed_files: tuple[str, ...] = ("**",)
     forbidden_files: tuple[str, ...] = ()
     exclusions: tuple[str, ...] = ()
@@ -323,6 +324,7 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
         acceptance_criteria=_texts(payload.get("acceptance_criteria", ()), "acceptance_criteria"),
         spec_refs=_relative_paths(payload.get("spec_refs", ()), "spec_refs"),
         skill_refs=_relative_paths(payload.get("skill_refs", ()), "skill_refs"),
+        capability_refs=_texts(payload.get("capability_refs", ()), "capability_refs"),
         allowed_files=_texts(payload.get("allowed_files", ("**",)), "allowed_files") or ("**",),
         forbidden_files=_texts(payload.get("forbidden_files", ()), "forbidden_files"),
         exclusions=_texts(payload.get("exclusions", ()), "exclusions"),
@@ -659,7 +661,14 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
     finally:
         if not retain:
             try:
-                workspace.run("worktree", "remove", "--force", str(target), check=False)
+                workspace.run(
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(target),
+                    check=False,
+                    destructive_reason="remove a StageMesh-created ephemeral candidate validation worktree after its owned process ended",
+                )
             finally:
                 shutil.rmtree(temp_root, ignore_errors=True)
 
@@ -894,6 +903,9 @@ def contract_prompt(contract: ChangeContract) -> str:
     if contract.skill_refs:
         lines.append("- Project skills:")
         lines.extend(f"  - {item}" for item in contract.skill_refs)
+    if contract.capability_refs:
+        lines.append("- Registered capabilities (must be enabled and provider-compatible):")
+        lines.extend(f"  - {item}" for item in contract.capability_refs)
     if contract.max_changed_files is not None:
         lines.append(f"- Max changed files: {contract.max_changed_files}")
     if contract.max_diff_lines is not None:
@@ -1052,6 +1064,8 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
         payload["spec_refs"] = list(contract.spec_refs)
     if contract.skill_refs:
         payload["skill_refs"] = list(contract.skill_refs)
+    if contract.capability_refs:
+        payload["capability_refs"] = list(contract.capability_refs)
     if contract.exclusive_resources:  # only when set, so existing contracts keep their digests
         payload["exclusive_resources"] = list(contract.exclusive_resources)
     if contract.max_changed_files is not None:

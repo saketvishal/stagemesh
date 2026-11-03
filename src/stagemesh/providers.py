@@ -19,6 +19,11 @@ from typing import Protocol
 
 from .agent_skills import SkillPackError, is_frontend_task, skill_prompt
 from .attribution import attribution_for_worker
+from .capabilities import (
+    OBSERVED_LOAD_REQUIRED,
+    CapabilityRegistryError,
+    skill_evidence_mode,
+)
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
@@ -42,8 +47,20 @@ from .execution import (
 from .execution_ownership import RESEARCH_PROCESS_TREE
 from .focused_validation import focused_test_prompt
 from .git_identity import provider_environment
+from .mcp_capabilities import McpCapabilityError, configure_codex_mcp_command
 from .persistence import Store
 from .process_identity import owner_execution_fields, popen_identity
+from .provider_events import (
+    CAPABILITY_EVIDENCE_MISSING,
+    CAPABILITY_POLICY_VIOLATION,
+    ProviderEventError,
+    event_stream_command,
+    loaded_receipts,
+    mcp_invocation_receipts,
+    observe_mcp_invocations,
+    observe_skill_loads,
+    validate_observable_attachments,
+)
 from .queue_control import OperatorStopRequested
 from .redaction import redact_command_secrets
 from .remediation import ToolRecoveryRefused, execute_tool_recovery, remediation_context
@@ -287,24 +304,60 @@ class RuntimeCommandAdapter:
             budget_problem = _provider_budget_refusal(store, task_id, project)
             if budget_problem:
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
+        capability_audit: list[dict[str, object]] = []
         try:
             task_prompt = _build_task_prompt(
                 task_id, task, run_path, contract=bound.contract, remediation=remediation,
                 planning_project=project,
                 research_findings=research_text,
+                provider_name=self.name,
+                capability_audit=capability_audit,
             )
         except SkillPackError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
+        except CapabilityRegistryError as exc:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"capability_unavailable: {exc}")
         configured_command = self.command_for("code")
+        evidence_mode = skill_evidence_mode(run_path)
+        mcp_requested = any(item.get("kind") == "mcp" for item in capability_audit)
+        permitted_codex_config: frozenset[str] = frozenset()
+        if mcp_requested:
+            try:
+                configured, permitted_codex_config = configure_codex_mcp_command(
+                    configured_command, capability_audit
+                )
+                configured_command = tuple(configured)
+            except McpCapabilityError as exc:
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason=f"capability_unavailable: {exc}",
+                )
+        event_stream = evidence_mode == OBSERVED_LOAD_REQUIRED or mcp_requested
+        if event_stream:
+            try:
+                validate_observable_attachments(capability_audit)
+                configured_command = tuple(event_stream_command(configured_command))
+            except ProviderEventError as exc:
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason=f"{CAPABILITY_EVIDENCE_MISSING}: {exc}",
+                )
         command_identity = command_snapshot(self.name, configured_command, self.all_commands())
         command, provider_input = _command_and_input(configured_command, task_prompt)
         lease.check("before_agent")
-        refused = _authorization_refusal(self, project, "code", command=command)
+        refused = _authorization_refusal(
+            self,
+            project,
+            "code",
+            command=command,
+            permitted_codex_config=permitted_codex_config,
+        )
         if refused:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"provider_not_authorized: {refused}")
         budget_problem = _provider_budget_refusal(store, task_id, project)
         if budget_problem:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
+        _record_capability_attachments(store, task_id, self.name, "IMPLEMENT", capability_audit)
         def launch_attempt():  # type: ignore[no-untyped-def]
             try:
                 attempt_proc = subprocess.Popen(
@@ -365,9 +418,10 @@ class RuntimeCommandAdapter:
                 else:
                     is_cap, reason = classify_failure(code, stdout, stderr)
                     call.finish("failed", reason)
+                audit_stdout = "" if event_stream else stdout
                 evidence = record_tool_failure(
                     store, task_id, execution_id, configured_command, run_path,
-                    code, stdout, stderr, reason, timed_out, self.recovery_actions(),
+                    code, audit_stdout, stderr, reason, timed_out, self.recovery_actions(),
                 )
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
                 plan = evidence.get("recovery") if isinstance(evidence, dict) else None
@@ -380,7 +434,11 @@ class RuntimeCommandAdapter:
                         if isinstance(raw_setup, list) and all(isinstance(part, str) for part in raw_setup):
                             recovery_command = raw_setup
                     refused_recovery = _authorization_refusal(
-                        self, project, "code", command=recovery_command
+                        self,
+                        project,
+                        "code",
+                        command=recovery_command,
+                        permitted_codex_config=permitted_codex_config,
                     )
                     if refused_recovery:
                         return ExecutionResult(
@@ -396,7 +454,13 @@ class RuntimeCommandAdapter:
                     ) -> bool:
                         if budget_refusal := _provider_budget_refusal(store, task_id, project):
                             raise ToolRecoveryRefused(budget_refusal)
-                        refused_retry = _authorization_refusal(self, project, "code", command=command)
+                        refused_retry = _authorization_refusal(
+                            self,
+                            project,
+                            "code",
+                            command=command,
+                            permitted_codex_config=permitted_codex_config,
+                        )
                         if refused_retry:
                             raise ToolRecoveryRefused(f"provider_not_authorized: {refused_retry}")
                         launched, failed = launch_attempt()
@@ -465,11 +529,94 @@ class RuntimeCommandAdapter:
                         continue
                     if recovery.get("execution_status") == "FAILED":
                         return ExecutionResult(ExecutionStatus.FAILED, failure_reason=reason)
-                output, retry_after = capacity_evidence(stdout, stderr)
+                output, retry_after = capacity_evidence(audit_stdout, stderr)
                 return ExecutionResult(
                     ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason,
                     provider_output=output, retry_after=retry_after,
                 )
+            observation = None
+            if evidence_mode == OBSERVED_LOAD_REQUIRED:
+                observation = observe_skill_loads(stdout, capability_audit)
+                for receipt in loaded_receipts(observation, capability_audit):
+                    store.add_audit_event(
+                        "capability.loaded",
+                        {
+                            "task_id": task_id,
+                            "execution_id": execution_id,
+                            "provider": self.name,
+                            "stage": "IMPLEMENT",
+                            **receipt,
+                        },
+                    )
+                if observation.missing:
+                    missing = ", ".join(observation.missing)
+                    reason = f"{CAPABILITY_EVIDENCE_MISSING}: {missing}"
+                    store.add_audit_event(
+                        "capability.evidence_missing",
+                        {
+                            "task_id": task_id,
+                            "execution_id": execution_id,
+                            "provider": self.name,
+                            "stage": "IMPLEMENT",
+                            "provider_invoked": True,
+                            "missing_capabilities": list(observation.missing),
+                            "event_count": observation.event_count,
+                            "malformed_lines": observation.malformed_lines,
+                        },
+                    )
+                    call.finish("failed", CAPABILITY_EVIDENCE_MISSING)
+                    store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
+                    return ExecutionResult(ExecutionStatus.FAILED, failure_reason=reason)
+            mcp_observation = None
+            if mcp_requested:
+                mcp_observation = observe_mcp_invocations(stdout, capability_audit)
+                for receipt in mcp_invocation_receipts(mcp_observation, capability_audit):
+                    store.add_audit_event(
+                        "capability.invoked",
+                        {
+                            "task_id": task_id,
+                            "execution_id": execution_id,
+                            "provider": self.name,
+                            "stage": "IMPLEMENT",
+                            **receipt,
+                        },
+                    )
+                if mcp_observation.violations:
+                    reason = (
+                        f"{CAPABILITY_POLICY_VIOLATION}: unallowlisted MCP tool invocation"
+                    )
+                    store.add_audit_event(
+                        "capability.policy_violation",
+                        {
+                            "task_id": task_id,
+                            "execution_id": execution_id,
+                            "provider": self.name,
+                            "stage": "IMPLEMENT",
+                            "violations": list(mcp_observation.violations),
+                        },
+                    )
+                    call.finish("failed", CAPABILITY_POLICY_VIOLATION)
+                    store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
+                    return ExecutionResult(ExecutionStatus.FAILED, failure_reason=reason)
+                if mcp_observation.missing:
+                    missing = ", ".join(mcp_observation.missing)
+                    reason = f"{CAPABILITY_EVIDENCE_MISSING}: {missing}"
+                    store.add_audit_event(
+                        "capability.evidence_missing",
+                        {
+                            "task_id": task_id,
+                            "execution_id": execution_id,
+                            "provider": self.name,
+                            "stage": "IMPLEMENT",
+                            "provider_invoked": True,
+                            "missing_capabilities": list(mcp_observation.missing),
+                            "event_count": mcp_observation.event_count,
+                            "malformed_lines": mcp_observation.malformed_lines,
+                        },
+                    )
+                    call.finish("failed", CAPABILITY_EVIDENCE_MISSING)
+                    store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
+                    return ExecutionResult(ExecutionStatus.FAILED, failure_reason=reason)
             sha = commit_implementation_candidate(
                 store,
                 task_id,
@@ -479,7 +626,21 @@ class RuntimeCommandAdapter:
                 attribution=attribution_for_worker("local-worker", self.name),
             )
             if sha is None:
-                output, _ = capacity_evidence(stdout, stderr)
+                if observation is None and mcp_observation is None:
+                    output, _ = capacity_evidence(stdout, stderr)
+                else:
+                    event_count = max(
+                        observation.event_count if observation is not None else 0,
+                        mcp_observation.event_count if mcp_observation is not None else 0,
+                    )
+                    summaries = []
+                    if observation is not None:
+                        summaries.append(f"loaded skills: {', '.join(observation.loaded)}")
+                    if mcp_observation is not None:
+                        summaries.append(
+                            f"invoked MCP capabilities: {', '.join(mcp_observation.invoked)}"
+                        )
+                    output = f"structured provider events: {event_count}; " + "; ".join(summaries)
                 failure_reason = _provider_permission_denial(stdout, stderr) or NO_IMPLEMENTATION_CHANGE
                 call.finish("failed", failure_reason)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=failure_reason)
@@ -577,7 +738,15 @@ class RuntimeCommandAdapter:
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         return self.execute(store, task_id, claim_id, project)
 
-    def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
+    def review_candidate(
+        self,
+        prompt: str,
+        project: Path,
+        candidate_sha: str,
+        *,
+        store: Store | None = None,
+        task_id: str | None = None,
+    ) -> str:
         refused = _authorization_refusal(self, project, "review")
         if refused:
             return _review_infrastructure_failure("provider_not_authorized", refused)
@@ -593,16 +762,27 @@ class RuntimeCommandAdapter:
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
+            capability_audit: list[dict[str, object]] = []
             try:
-                review_prompt = prompt + skill_prompt(prompt, stage="review", project=review_path)
+                review_prompt = prompt + skill_prompt(
+                    prompt,
+                    stage="review",
+                    project=review_path,
+                    provider_name=self.name,
+                    capability_audit=capability_audit,
+                )
             except SkillPackError as exc:
                 return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
+            except CapabilityRegistryError as exc:
+                return _review_infrastructure_failure(f"capability_unavailable: {exc}")
             configured_command = self.command_for("review")
             command_identity = command_snapshot(self.name, configured_command, self.all_commands())
             command, provider_input = _command_and_input(configured_command, review_prompt, structured_review=True)
             refused = _authorization_refusal(self, project, "review", command=command)
             if refused:
                 return _review_infrastructure_failure("provider_not_authorized", refused)
+            if store is not None and task_id is not None:
+                _record_capability_attachments(store, task_id, self.name, "REVIEW", capability_audit)
             cleanup_confirmed = False  # an interrupted Popen attempt may already have created a child
             try:
                 proc = subprocess.Popen(
@@ -849,7 +1029,12 @@ def _bounded_process_output(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def _authorization_refusal(
-    adapter: RuntimeCommandAdapter, project: Path, capability: str, *, command: Sequence[str] | None = None
+    adapter: RuntimeCommandAdapter,
+    project: Path,
+    capability: str,
+    *,
+    command: Sequence[str] | None = None,
+    permitted_codex_config: frozenset[str] = frozenset(),
 ) -> str | None:
     """Last check before anything is spawned: the adapter's own flag, then the project's current authorization and the exact command."""
     from . import provider_authorization
@@ -859,6 +1044,7 @@ def _authorization_refusal(
     return provider_authorization.refusal(
         Path(project), adapter.name, adapter.command_for(capability) if command is None else command,
         build_time_allowed=adapter.allowed_at_build,
+        permitted_codex_config=permitted_codex_config,
     )
 
 
@@ -1056,6 +1242,8 @@ def _build_task_prompt(
     remediation: dict[str, object] | None = None,
     planning_project: Path | None = None,
     research_findings: str = "",
+    provider_name: str | None = None,
+    capability_audit: list[dict[str, object]] | None = None,
 ) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
@@ -1088,6 +1276,14 @@ def _build_task_prompt(
     remediation_text = _remediation_prompt(remediation) if remediation else ""
     if remediation and (planning_project or project) is not None and effective_contract is not None:
         remediation_text += _approved_scope_prompt(planning_project or project, task_id, effective_contract)  # type: ignore[arg-type]
+    skill_text = skill_prompt(
+        title,
+        effective_contract,
+        remediation=bool(remediation),
+        project=project,
+        provider_name=provider_name,
+        capability_audit=capability_audit,
+    )
     return (
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
@@ -1099,7 +1295,7 @@ def _build_task_prompt(
         f"{SPEC_PLANNING_DISCIPLINE}"
         f"{IMPLEMENTATION_DISCIPLINE}"
         f"{frontend_text}"
-        f"{skill_prompt(title, effective_contract, remediation=bool(remediation), project=project)}"
+        f"{skill_text}"
         f"{focused_test_prompt(project, effective_contract)}"
         "Workspace rules:\n"
         "- Edit files only. Do not run git commit, checkout, switch, reset, rebase, merge, cherry-pick, branch, tag, "
@@ -1109,6 +1305,27 @@ def _build_task_prompt(
         "implementation candidate itself.\n"
         "- If no code change is needed, explain why and leave the tree unchanged.\n"
     )
+
+
+def _record_capability_attachments(
+    store: Store,
+    task_id: str,
+    provider: str,
+    stage: str,
+    attachments: list[dict[str, object]],
+) -> None:
+    """Record prompt attachment without overstating it as model invocation."""
+    for attachment in attachments:
+        public = {key: value for key, value in attachment.items() if not key.startswith("_")}
+        store.add_audit_event(
+            "capability.attached",
+            {
+                "task_id": task_id,
+                "provider": provider,
+                "stage": stage,
+                **public,
+            },
+        )
 
 
 def _frontend_design_prompt(title: str, contract: object | None) -> str:

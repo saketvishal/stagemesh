@@ -12,6 +12,7 @@
 - Per-task implementation runs in isolated Git worktrees outside the shared project checkout; candidates are committed from the task workspace and bound to exact SHA evidence.
 - Fake and subprocess executors.
 - Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands with bounded command validation and durable execution records.
+- Project-local capability registry with bounded skill attachment, safe skills-only import from Claude Code plugins, observable skill loading, and a Codex-only read-only stdio MCP adapter that disables ambient MCP configuration, enforces an exact tool allowlist, and records redacted invocation receipts.
 - Configured provider commands are converted into runtime adapters for plain/JSON live acceptance.
 - Capacity registry with primary/secondary failover classification and structured visibility.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
@@ -58,6 +59,7 @@
 - Deterministic plain/JSON GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
 - Release-readiness report aggregates local gates, structured live proof gaps, external evidence records, and explicit evidence gaps with artifact and direct JSON output.
 - External evidence registry idempotently records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs, with deduped structured add and candidate-match listing.
+- Hosted CI diagnosis can enrich failed GitHub Actions checks with bounded, credential-safe, redacted job logs; third-party checks and unavailable logs remain gate-level evidence and cannot satisfy strict baseline-detail policy.
 - Passing external evidence must name a candidate SHA and only counts for the matching candidate.
 - Acceptance matrix artifact maps each major requirement to proven local evidence or an explicit external gap, with direct JSON output.
 - End-to-end acceptance artifact maps the requested 18 clean-environment acceptance steps to local proof evidence, with direct JSON output.

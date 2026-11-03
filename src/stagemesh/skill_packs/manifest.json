@@ -13,6 +13,10 @@
       "source_url": "https://github.com/obra/superpowers/blob/main/LICENSE",
       "git_blob_sha": "abf0390320aa14406af7a520b9b0739fdda9bf08"
     },
+    "superpowers/receiving-code-review/SKILL.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/2ce8aa15d05bd57213e6f746f953aafb7ded7a8b/skills/receiving-code-review/SKILL.md",
+      "git_blob_sha": "950da7b74bf6dbed6b8726d12ddadd65a9f5fda7"
+    },
     "superpowers/verification-before-completion/SKILL.md": {
       "source_url": "https://github.com/obra/superpowers/blob/main/skills/verification-before-completion/SKILL.md",
       "git_blob_sha": "7d45333cc4a49c57a80df6c1fe2fa777a207afbc"
