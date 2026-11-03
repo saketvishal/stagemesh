@@ -89,6 +89,21 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class DriverInstallConfig:
+    """Declarative defaults for an explicit `driver install --use-project-config`."""
+
+    interval_seconds: int = 600
+    window_seconds: int = 2700
+    concurrency: int = 2
+    max_tasks: int = 10
+    max_steps_per_task: int = 8
+    max_consecutive_failures: int = 3
+    auto_merge_ff: bool = False
+    strict_live: bool = False
+    integration: str = "pr"
+
+
+@dataclass(frozen=True)
 class GitHubConfig:
     owner: str | None = None
     repo: str | None = None
@@ -236,6 +251,7 @@ class StageMeshConfig:
     adverse_review: AdverseReviewPolicy = field(default_factory=AdverseReviewPolicy)
     require_approved_spec: bool = False
     research: ResearchConfig | None = None
+    driver: DriverInstallConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -358,6 +374,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
         require_approved_spec=_require_approved_spec(_optional_mapping(data, "planning_gate")),
         research=_research_config(_optional_mapping(data, "research"), known),
+        driver=_driver_install_config(_optional_mapping(data, "driver")) if "driver" in data else None,
     )
 
 
@@ -372,6 +389,70 @@ def _optional_mapping(data: dict[str, object], key: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ConfigValidationError(f"{key} must be an object")
     return value
+
+
+_DRIVER_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
+_DRIVER_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _driver_duration(data: dict[str, object], key: str, default: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ConfigValidationError(f"driver.{key} must be a positive duration")
+    match = _DRIVER_DURATION.fullmatch(str(value))
+    if match is None:
+        raise ConfigValidationError(f"driver.{key} must look like 10m, 45s or a number of seconds")
+    seconds = float(match.group(1)) * _DRIVER_UNITS[match.group(2).lower()]
+    if seconds <= 0 or not seconds.is_integer():
+        raise ConfigValidationError(f"driver.{key} must resolve to a positive whole number of seconds")
+    return int(seconds)
+
+
+def _driver_count(data: dict[str, object], key: str, default: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigValidationError(f"driver.{key} must be an integer of at least 1")
+    return value
+
+
+def _driver_flag(data: dict[str, object], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigValidationError(f"driver.{key} must be a boolean")
+    return value
+
+
+def _driver_install_config(data: dict[str, object]) -> DriverInstallConfig:
+    unknown = set(data) - {
+        "interval",
+        "window_duration",
+        "concurrency",
+        "max_tasks",
+        "max_steps_per_task",
+        "max_consecutive_failures",
+        "auto_merge_ff",
+        "strict_live",
+        "integration",
+    }
+    if unknown:
+        raise ConfigValidationError(f"driver has unsupported keys: {', '.join(sorted(unknown))}")
+    interval = _driver_duration(data, "interval", 600)
+    if interval < 60 or interval % 60:
+        raise ConfigValidationError("driver.interval must be at least 60 seconds and an exact whole number of minutes")
+    integration = data.get("integration", "pr")
+    if integration not in {"pr", "local"}:
+        raise ConfigValidationError("driver.integration must be pr or local")
+    return DriverInstallConfig(
+        interval_seconds=interval,
+        window_seconds=_driver_duration(data, "window_duration", 2700),
+        concurrency=_driver_count(data, "concurrency", 2),
+        max_tasks=_driver_count(data, "max_tasks", 10),
+        max_steps_per_task=_driver_count(data, "max_steps_per_task", 8),
+        max_consecutive_failures=_driver_count(data, "max_consecutive_failures", 3),
+        auto_merge_ff=_driver_flag(data, "auto_merge_ff", False),
+        strict_live=_driver_flag(data, "strict_live", False),
+        integration=str(integration),
+    )
 
 
 def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str, ProviderSpec]]:

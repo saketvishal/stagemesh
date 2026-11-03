@@ -147,7 +147,9 @@ Ordered by value for reaching the gate:
    integration guard of `continue` does not consult it. Check runs carry no logs, so baseline comparison is gate-level (`GATE_LEVEL` evidence, reported in the
    trace) and, by default (`baseline_requires_detail: true`), is not enough to call a candidate merge-ready: the policy asks for log-level base
    evidence instead. Job-log retrieval is not implemented.
-4. **Test-observation convention has no producer.** Scenario G relies on `STAGEMESH_TEST_OBSERVATION` lines; no StageMesh test fixture emits them yet.
+4. **Test-observation production is explicit, not automatic.** `stagemesh test-observation` emits the validated
+   `STAGEMESH_TEST_OBSERVATION` format for a fixture or CI harness without running a provider. Existing project fixtures must invoke it;
+   StageMesh does not inject a global pytest plugin or infer observations from arbitrary logs.
 5. **Destructive git requests are not intercepted.** `decide_git_operation` is policy only; StageMesh's own git calls are not routed through it.
 6. **Reruns cannot be requested.** A failure classified as infrastructure is retried only by waiting for a new observation; StageMesh cannot yet ask the host to rerun failed jobs (the bounded budget ends in a typed escalation).
 7. A scheduled driver tick runs `run-window` preflight across active executions and automatically recovers only identities proven DEAD.
@@ -158,7 +160,9 @@ Ordered by value for reaching the gate:
     an external writer until its email is listed in `trusted_committer_emails`. This is safe but would stall a hands-off run; the right fix is to learn the provider's identity from the adapter.
 11. **Refresh budget.** Supervised runs allow at least 5 automatic refreshes (`SUPERVISED_MIN_REFRESH_ATTEMPTS`); a ref that advances
     more often still ends in the typed `integration_stale_base` block and needs `retry-task`.
-12. **Supervisor settings are read from `.stagemesh/autonomy.json` only**; there is no `config.json` section or CLI flag yet.
+12. **Driver installation remains explicit.** Reusable install defaults may live under `driver` in `.stagemesh/config.json` and
+    `driver install --plan --use-project-config` previews them without writes. Reading config never installs a schedule, and mutable
+    driver state remains in the separate project-owned runtime record.
 
 ## Windows verification ledger (2026-10-23 and 2026-10-24)
 

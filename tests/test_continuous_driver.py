@@ -515,6 +515,192 @@ def test_cli_requires_explicit_provider_acknowledgement_before_persistent_instal
     assert not config_path(project).exists()
 
 
+def test_driver_install_plan_resolves_project_profile_and_cli_overrides_without_writes(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "driver": {
+                    "interval": "15m",
+                    "window_duration": "30m",
+                    "concurrency": 3,
+                    "max_tasks": 7,
+                    "max_steps_per_task": 6,
+                    "max_consecutive_failures": 2,
+                    "auto_merge_ff": True,
+                    "strict_live": True,
+                    "integration": "local",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    scheduler_calls: list[Path] = []
+    monkeypatch.setattr(
+        driver_scheduler,
+        "default_driver_scheduler",
+        lambda selected: scheduler_calls.append(selected),
+    )
+
+    code = main(
+        [
+            "--project",
+            str(project),
+            "driver",
+            "install",
+            "--plan",
+            "--use-project-config",
+            "--concurrency",
+            "4",
+            "--no-strict-live",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0 and payload["planned"] is True
+    assert payload["config"] == {
+        "project": str(project.resolve()),
+        "state": "paused",
+        "interval_seconds": 900,
+        "window_seconds": 1800,
+        "concurrency": 4,
+        "max_tasks": 7,
+        "max_steps_per_task": 6,
+        "max_consecutive_failures": 2,
+        "auto_merge_ff": True,
+        "strict_live": False,
+        "integration": "local",
+    }
+    assert payload["writes"] == [] and payload["provider_calls"] == 0
+    assert scheduler_calls == []
+    assert not (project / ".stagemesh" / "stagemesh.sqlite3").exists()
+    assert not config_path(project).exists()
+
+
+def test_driver_install_plan_has_a_concise_plain_read_only_view(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(["--project", str(project), "driver", "install", "--plan"])
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "local continuous driver install plan (read-only)" in output
+    assert "driver tick" in output and "interval: 600s; window: 2700s; tasks/concurrency: 10/2" in output
+    assert not (project / ".stagemesh" / "stagemesh.sqlite3").exists()
+    assert not config_path(project).exists()
+
+
+def test_driver_project_profile_is_inert_until_explicitly_selected(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "driver": {
+                    "interval": "20m",
+                    "max_tasks": 99,
+                    "auto_merge_ff": True,
+                    "integration": "local",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["--project", str(project), "driver", "install", "--plan", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["config"]["interval_seconds"] == 600
+    assert payload["config"]["max_tasks"] == 10
+    assert payload["config"]["auto_merge_ff"] is False
+    assert payload["config"]["integration"] == "pr"
+    assert not (project / ".stagemesh" / "stagemesh.sqlite3").exists()
+    assert not config_path(project).exists()
+
+
+def test_driver_project_profile_selection_requires_a_declared_profile(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(
+        ["--project", str(project), "driver", "install", "--plan", "--use-project-config"]
+    )
+
+    assert code == 2
+    assert "requires a driver object" in capsys.readouterr().err
+    assert not (project / ".stagemesh" / "stagemesh.sqlite3").exists()
+    assert not config_path(project).exists()
+
+
+@pytest.mark.parametrize(
+    "driver",
+    [
+        {"unknown": 1},
+        {"interval": "90s"},
+        {"window_duration": False},
+        {"concurrency": 0},
+        {"auto_merge_ff": "yes"},
+        {"integration": "direct"},
+    ],
+)
+def test_driver_project_profile_refuses_invalid_values_before_runtime_state(
+    project: Path, capsys: pytest.CaptureFixture[str], driver: dict[str, object]
+) -> None:
+    (project / ".stagemesh" / "config.json").write_text(json.dumps({"driver": driver}), encoding="utf-8")
+
+    code = main(
+        ["--project", str(project), "driver", "install", "--plan", "--use-project-config", "--json"]
+    )
+
+    assert code == 2 and "driver error:" in capsys.readouterr().err
+    assert not (project / ".stagemesh" / "stagemesh.sqlite3").exists()
+    assert not config_path(project).exists()
+
+
+def test_driver_project_profile_matches_actual_install_resolution(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"driver": {"interval": "2m", "window_duration": "5m", "max_tasks": 4}}),
+        encoding="utf-8",
+    )
+    ensured: list[tuple[list[str], int, int]] = []
+
+    class RecordingScheduler:
+        handle = "StageMesh\\driver-profile"
+
+        def ensure(self, argv, interval_seconds, execution_limit_seconds=None):
+            ensured.append((list(argv), interval_seconds, execution_limit_seconds))
+            return self.handle
+
+    monkeypatch.setattr(driver_scheduler, "default_driver_scheduler", lambda _project: RecordingScheduler())
+
+    code = main(
+        [
+            "--project",
+            str(project),
+            "driver",
+            "install",
+            "--use-project-config",
+            "--acknowledge-provider-use",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    installed_config = load_config(project)
+    assert installed_config.interval_seconds == 120
+    assert installed_config.window_seconds == 300
+    assert installed_config.max_tasks == 4
+    assert ensured and ensured[0][1:] == (
+        installed_config.interval_seconds,
+        continuous_driver.scheduler_limit_seconds(installed_config),
+    )
+    assert json.loads(capsys.readouterr().out)["config"]["state"] == "running"
+
+
 def test_failed_scheduler_install_leaves_an_inert_recoverable_configuration(
     project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
