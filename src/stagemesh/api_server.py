@@ -35,6 +35,7 @@ CONTRACT = "stagemesh.activity/1"
 CONTRACT_V2 = "stagemesh.activity/2"
 CONTRACT_V3 = "stagemesh.activity/3"
 CONTRACT_V4 = "stagemesh.activity/4"
+CONTRACT_V5 = "stagemesh.activity/5"
 LOOPBACK = "127.0.0.1"
 _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", "limit", "offset"})
 _PARAMS_V2 = _PARAMS | {"project", "time_basis"}
@@ -42,6 +43,9 @@ _PARAMS_V3 = _PARAMS_V2 | {"source", "source_status", "include_source_history"}
 _PARAMS_V4 = _PARAMS_V3 | {
     "task_event", "task_status", "include_task_history", "retry_kind", "retry_state",
     "include_retry_history",
+}
+_PARAMS_V5 = _PARAMS_V4 | {
+    "evidence_kind", "evidence_status", "include_evidence_history",
 }
 _INT = re.compile(r"^[0-9]{1,9}$")
 _MAX_QUERY_CHARS = 2048
@@ -127,7 +131,9 @@ def _decode(component: str) -> str:
 
 def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
     allowed = (
-        _PARAMS_V4
+        _PARAMS_V5
+        if version == 5
+        else _PARAMS_V4
         if version == 4
         else (_PARAMS_V3 if version == 3 else (_PARAMS_V2 if version == 2 else _PARAMS))
     )
@@ -153,7 +159,7 @@ def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
     kwargs: dict[str, Any] = {}
     for name in (
         "state", "task_id", "stage", "provider", "project", "time_basis", "source", "source_status",
-        "task_event", "task_status", "retry_kind", "retry_state",
+        "task_event", "task_status", "retry_kind", "retry_state", "evidence_kind", "evidence_status",
     ):
         if name in one:
             kwargs[name] = one[name]
@@ -168,6 +174,10 @@ def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
     if "include_retry_history" in one:
         kwargs["include_retry_history"] = _boolean(
             "include_retry_history", one["include_retry_history"]
+        )
+    if "include_evidence_history" in one:
+        kwargs["include_evidence_history"] = _boolean(
+            "include_evidence_history", one["include_evidence_history"]
         )
     for name in ("since", "until"):
         if name in one:
@@ -229,6 +239,9 @@ def _entry(entry: ActivityEntry, *, version: int = 1) -> dict[str, Any]:
             "retry_kind", "retry_state", "retry_attempt", "retry_limit",
         ):
             data.pop(name)
+    if version < 5:
+        for name in ("evidence_kind", "evidence_status"):
+            data.pop(name)
     return data
 
 
@@ -243,6 +256,11 @@ def serialize_page(page: ActivityPage, *, version: int = 1) -> dict[str, Any]:
     }
     if version >= 2:
         counts = page.status_counts
+        if version < 5:
+            counts = {
+                name: values for name, values in counts.items()
+                if name not in {"evidence", "evidence_outcome"}
+            }
         if version < 4:
             counts = {
                 name: values for name, values in counts.items()
@@ -305,7 +323,9 @@ class ActivityApi:
     def handle(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
         contract = CONTRACT
         try:
-            if urlsplit(target).path.startswith("/api/v4/"):
+            if urlsplit(target).path.startswith("/api/v5/"):
+                contract = CONTRACT_V5
+            elif urlsplit(target).path.startswith("/api/v4/"):
                 contract = CONTRACT_V4
             elif urlsplit(target).path.startswith("/api/v3/"):
                 contract = CONTRACT_V3
@@ -339,16 +359,16 @@ class ActivityApi:
             raise ApiError(400, "invalid_query", "request body is not allowed")
         parts = urlsplit(target)
         path = parts.path
-        version = 4 if path.startswith("/api/v4/") else (3 if path.startswith("/api/v3/") else (2 if path.startswith("/api/v2/") else 1))
-        contract = CONTRACT_V4 if version == 4 else (CONTRACT_V3 if version == 3 else (CONTRACT_V2 if version == 2 else CONTRACT))
+        version = 5 if path.startswith("/api/v5/") else (4 if path.startswith("/api/v4/") else (3 if path.startswith("/api/v3/") else (2 if path.startswith("/api/v2/") else 1)))
+        contract = CONTRACT_V5 if version == 5 else (CONTRACT_V4 if version == 4 else (CONTRACT_V3 if version == 3 else (CONTRACT_V2 if version == 2 else CONTRACT)))
         if not path.startswith("/api/"):
             return self._static(path)  # the shell carries no data, so it needs no credential
         self._authenticate(lowered.get("authorization", ""))
-        if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health", "/api/v4/health"}:
+        if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health", "/api/v4/health", "/api/v5/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")
             return _json(200, {"status": "ok", "version": __version__}, contract)
-        if path in {"/api/v1/activity", "/api/v2/activity", "/api/v3/activity", "/api/v4/activity"}:
+        if path in {"/api/v1/activity", "/api/v2/activity", "/api/v3/activity", "/api/v4/activity", "/api/v5/activity"}:
             query = parse_query(parts.query, version=version)
             store = self._open()
             try:
@@ -356,7 +376,7 @@ class ActivityApi:
             finally:
                 store.conn.close()
             return _json(200, serialize_page(page, version=version), contract)
-        if path == "/api/v4/periods":
+        if path in {"/api/v4/periods", "/api/v5/periods"}:
             query = parse_period_query(parts.query)
             store = self._open()
             try:

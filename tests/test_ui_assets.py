@@ -66,9 +66,10 @@ def test_ui_source_is_csp_safe_and_never_injects_html():
     for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "localStorage", "sessionStorage"):
         assert banned not in js, banned
     assert "history.replaceState" in js and "location.hash" in js  # token read once, then removed from the address bar
-    assert "Authorization" in js and "/api/v4/activity" in js
-    assert "/api/v4/health" in js
+    assert "Authorization" in js and "/api/v5/activity" in js
+    assert "/api/v5/health" in js and "/api/v5/periods" in js
     assert "include_task_history" in js and "include_retry_history" in js and "retry_state" in js
+    assert "include_evidence_history" in js and "evidence_status" in js
 
 
 def test_ui_covers_contract_states_and_filters():
@@ -81,6 +82,8 @@ def test_ui_covers_contract_states_and_filters():
     for marker in ('role="status"', "<caption", 'lang="en"'):
         assert marker in html, marker
     assert 'aria-live="polite"' in html
+    for marker in ("This week", "This month", 'id="series-table"', 'id="interval-table"', 'id="drill"'):
+        assert marker in html, marker
 
 
 def test_built_wheel_ships_the_ui_shell(tmp_path: Path):

@@ -1,8 +1,10 @@
 """Browser-level error policy: terminal errors stop polling, transient failures remain retryable."""
 from pathlib import Path
+
 import pytest
 import test_ui_browser_behavior as browser
-from test_ui_browser_behavior import fixture_base
+
+fixture_base = browser.fixture_base
 
 DRIVER = r'''
 (() => {
@@ -12,11 +14,11 @@ DRIVER = r'''
   const out = {errors: []};
   let failing = false, calls = 0;
   window.fetch = async (...args) => {
-    if (String(args[0]).startsWith("/api/v4/activity")) {
+    if (String(args[0]).startsWith("/api/v5/activity")) {
       calls++;
       if (failing && status !== 400) {
         if (status === 0) throw new TypeError("controlled network loss");
-        return new Response(JSON.stringify({contract: "stagemesh.activity/1", error: {code: "controlled", message: "controlled " + status}}), {status, headers: {"Content-Type": "application/json"}});
+        return new Response(JSON.stringify({contract: "stagemesh.activity/5", error: {code: "controlled", message: "controlled " + status}}), {status, headers: {"Content-Type": "application/json"}});
       }
     }
     return original(...args);
@@ -61,8 +63,8 @@ DRIVER = r'''
 '''
 
 @pytest.mark.parametrize("status", [400, 401, 403, 503, 0], ids=["invalid-range", "unauthenticated", "forbidden", "store-unavailable", "network-loss"])
-def test_browser_polling_obeys_error_policy_and_explicit_recovery(fixture_base, tmp_path: Path, status):
-    result = browser.run_scenario(fixture_base, str(status), tmp_path)
+def test_browser_polling_obeys_error_policy_and_explicit_recovery(request, tmp_path: Path, status):
+    result = browser.run_scenario(request.getfixturevalue("fixture_base"), str(status), tmp_path)
     print("ERROR_POLICY_BROWSER_FACTS=" + str(result))
     terminal = status in (400, 401, 403)
     assert result["autoAfterError"] is not terminal, result

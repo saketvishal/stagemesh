@@ -15,11 +15,11 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from .domain import ExecutionKind, ExecutionStatus, Stage, TaskStatus
+from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .persistence import Store
 from .redaction import redact_url_credentials
 
-ActivityKind = Literal["task", "execution", "audit", "source", "task_transition", "retry"]
+ActivityKind = Literal["task", "execution", "audit", "source", "task_transition", "retry", "evidence"]
 ActivityState = Literal["open", "closed"]
 TimeBasis = Literal["activity", "opened", "updated", "completed"]
 RetryKind = Literal["automatic_provider", "blocked_reentry", "remediation", "operator"]
@@ -33,7 +33,13 @@ MAX_SCAN = 1000  # retained rows per source and across the combined projection
 MAX_TITLE_CHARS = 200
 RETRY_KINDS: tuple[str, ...] = ("automatic_provider", "blocked_reentry", "remediation", "operator")
 RETRY_STATES: tuple[str, ...] = ("QUEUED", "CLAIMED", "RUNNING", "SUCCEEDED", "FAILED", "UNKNOWN", "SUPERSEDED")
-_KIND_ORDER = {"task_transition": 0, "retry": 1, "source": 2, "audit": 3, "execution": 4, "task": 5}
+EVIDENCE_KINDS: tuple[str, ...] = (
+    EvidenceKind.VALIDATION.value,
+    EvidenceKind.REVIEW.value,
+    EvidenceKind.INTEGRATION.value,
+)
+EVIDENCE_STATUSES: tuple[str, ...] = tuple(status.value for status in EvidenceStatus)
+_KIND_ORDER = {"task_transition": 0, "retry": 1, "evidence": 2, "source": 3, "audit": 4, "execution": 5, "task": 6}
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 # Fixed application outcomes only: identifier-shaped provider text may still be a secret.
 _SAFE_RESULTS = frozenset({
@@ -71,6 +77,9 @@ class ActivityQuery:
     retry_kind: RetryKind | None = None
     retry_state: RetryState | None = None
     include_retry_history: bool = False
+    evidence_kind: str | None = None
+    evidence_status: str | None = None
+    include_evidence_history: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +109,8 @@ class ActivityEntry:
     retry_state: RetryState | None = None
     retry_attempt: int | None = None
     retry_limit: int | None = None
+    evidence_kind: str | None = None
+    evidence_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +183,22 @@ def validate_query(query: ActivityQuery) -> ActivityQuery:
         query.retry_kind is not None or query.retry_state is not None
     ):
         raise ActivityQueryError("activity task_event and retry filters cannot be combined")
+    if not isinstance(query.include_evidence_history, bool):
+        raise ActivityQueryError("activity include_evidence_history must be a boolean")
+    if query.evidence_kind is not None and query.evidence_kind not in EVIDENCE_KINDS:
+        raise ActivityQueryError(
+            "activity evidence_kind must be one of: " + ", ".join(EVIDENCE_KINDS)
+        )
+    if query.evidence_status is not None and query.evidence_status not in EVIDENCE_STATUSES:
+        raise ActivityQueryError(
+            "activity evidence_status must be one of: " + ", ".join(EVIDENCE_STATUSES)
+        )
+    if (query.evidence_kind is not None or query.evidence_status is not None) and not query.include_evidence_history:
+        raise ActivityQueryError("activity evidence filters require include_evidence_history")
+    if (query.evidence_kind is not None or query.evidence_status is not None) and (
+        query.task_event is not None or query.retry_kind is not None or query.retry_state is not None
+    ):
+        raise ActivityQueryError("activity evidence, task-event and retry filters cannot be combined")
     for field, value in (("since", query.since), ("until", query.until)):
         if value is None:
             continue
@@ -195,13 +222,14 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
     entries: list[ActivityEntry] = []
     truncated = False
     retry_filtered = query.retry_kind is not None or query.retry_state is not None
+    evidence_filtered = query.evidence_kind is not None or query.evidence_status is not None
     # Task and audit rows carry no provider; a provider filter selects executions only.
     sources = []
-    if query.task_event is None and not retry_filtered and query.provider is None and query.time_basis != "completed":
+    if query.task_event is None and not retry_filtered and not evidence_filtered and query.provider is None and query.time_basis != "completed":
         sources.append(_task_entries)
-    if query.task_event is None and not retry_filtered:
+    if query.task_event is None and not retry_filtered and not evidence_filtered:
         sources.append(_execution_entries)
-    if (query.task_event is None and not retry_filtered and query.provider is None and query.state != "open" and query.time_basis != "opened"
+    if (query.task_event is None and not retry_filtered and not evidence_filtered and query.provider is None and query.state != "open" and query.time_basis != "opened"
             and (query.stage is None or (query.time_basis == "completed" and query.stage == Stage.DONE.value))):
         sources.append(_audit_entries)
     if (
@@ -210,6 +238,7 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
         and query.time_basis in {"activity", "updated"}
         and query.task_event is None
         and not retry_filtered
+        and not evidence_filtered
     ):
         sources.append(_source_entries)
     if (
@@ -217,14 +246,25 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
         and query.provider is None
         and query.time_basis in {"activity", "updated"}
         and not retry_filtered
+        and not evidence_filtered
     ):
         sources.append(_task_transition_entries)
     if (
         query.include_retry_history
         and query.time_basis in {"activity", "updated"}
         and query.task_event is None
+        and not evidence_filtered
     ):
         sources.append(_retry_entries)
+    if (
+        query.include_evidence_history
+        and query.provider is None
+        and query.time_basis in {"activity", "updated"}
+        and query.task_event is None
+        and not retry_filtered
+        and query.state != "open"
+    ):
+        sources.append(_evidence_entries)
     for source in sources:
         found, cut = source(store, query)
         entries.extend(found)
@@ -263,18 +303,26 @@ def _status_counts(entries: list[ActivityEntry]) -> dict[str, dict[str, int]]:
         },
         "retry": {**{kind: 0 for kind in RETRY_KINDS}, "UNKNOWN": 0},
         "retry_outcome": {state: 0 for state in RETRY_STATES},
+        "evidence": {**{kind: 0 for kind in EVIDENCE_KINDS}, "UNKNOWN": 0},
+        "evidence_outcome": {status: 0 for status in EVIDENCE_STATUSES},
     }
     for entry in entries:
         group = counts[entry.kind]
         observed = (
             entry.source_status
             if entry.kind == "source"
-            else (entry.retry_kind if entry.kind == "retry" else entry.status)
+            else (
+                entry.retry_kind
+                if entry.kind == "retry"
+                else (entry.evidence_kind if entry.kind == "evidence" else entry.status)
+            )
         )
         status = observed if observed in group else ("EVENT" if entry.kind == "audit" else "UNKNOWN")
         group[status] += 1
         if entry.kind == "retry" and entry.retry_state in counts["retry_outcome"]:
             counts["retry_outcome"][entry.retry_state] += 1
+        if entry.kind == "evidence" and entry.evidence_status in counts["evidence_outcome"]:
+            counts["evidence_outcome"][entry.evidence_status] += 1
     return counts
 
 
@@ -753,6 +801,67 @@ def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
                 retry_limit=limit,
             )
         )
+    return entries, len(rows) > MAX_SCAN
+
+
+def _evidence_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEntry], bool]:
+    """Typed validation/review/integration outcomes; payloads are never projected."""
+    params: list[Any] = []
+    clauses = _time_clause("e.created_at", query, params)
+    clauses.append(f"e.kind IN ({','.join('?' for _ in EVIDENCE_KINDS)})")
+    params.extend(EVIDENCE_KINDS)
+    clauses.append(f"e.status IN ({','.join('?' for _ in EVIDENCE_STATUSES)})")
+    params.extend(EVIDENCE_STATUSES)
+    if query.evidence_kind is not None:
+        clauses.append("e.kind = ?")
+        params.append(query.evidence_kind)
+    if query.evidence_status is not None:
+        clauses.append("e.status = ?")
+        params.append(query.evidence_status)
+    if query.project is not None:
+        clauses.append("t.project = ?")
+        params.append(query.project)
+    if query.task_id is not None:
+        clauses.append("e.task_id = ?")
+        params.append(query.task_id)
+    if query.stage is not None:
+        clauses.append("t.stage = ?")
+        params.append(query.stage)
+    _current_task_status_filter(clauses, params, query, "t")
+    _source_filters(clauses, params, query, task_alias="t", cache_alias="s")
+    rows = store.conn.execute(
+        "SELECT e.id, e.task_id, e.candidate_sha, e.kind, e.status, e.created_at, "
+        "t.stage, t.status AS task_status, t.project, t.source, t.source_id, "
+        "s.status AS source_status FROM evidence e JOIN tasks t ON t.id=e.task_id "
+        f"LEFT JOIN source_cache s ON s.source=t.source AND s.source_id=t.source_id{_where(clauses)} "
+        "ORDER BY e.created_at DESC, e.id LIMIT ?",
+        (*params, MAX_SCAN + 1),
+    ).fetchall()
+    entries = [
+        ActivityEntry(
+            kind="evidence",
+            id=row["id"],
+            at=_at(row["created_at"]),
+            state="closed",
+            task_id=row["task_id"],
+            stage=row["stage"],
+            status=row["status"],
+            event_type="evidence.recorded",
+            candidate_sha=(
+                row["candidate_sha"]
+                if isinstance(row["candidate_sha"], str) and _SAFE_SHA.fullmatch(row["candidate_sha"])
+                else None
+            ),
+            project=_safe_project(row["project"]),
+            source=_safe_code(row["source"]),
+            source_id=_safe_identifier(row["source_id"]),
+            source_status=_safe_code(row["source_status"]),
+            current_task_status=row["task_status"],
+            evidence_kind=row["kind"],
+            evidence_status=row["status"],
+        )
+        for row in rows[:MAX_SCAN]
+    ]
     return entries, len(rows) > MAX_SCAN
 
 

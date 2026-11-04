@@ -17,6 +17,7 @@ import threading
 import urllib.error
 import urllib.request
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,13 @@ TOKEN = "behaviour-token"
 DRIVER = r"""
 (() => {
   const scenario = new URLSearchParams(location.search).get("scenario") || "main";
+  const NativeDate = Date;
+  if (scenario === "periodPresets") {
+    window.Date = class FixedDate extends NativeDate {
+      constructor(...args) { super(...(args.length ? args : [2026, 0, 15, 12, 0, 0])); }
+      static now() { return new NativeDate(2026, 0, 15, 12, 0, 0).getTime(); }
+    };
+  }
   const realFetch = window.fetch.bind(window);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const control = { held: [], hold: null, fail: false, dropKey: null, log: [] };
@@ -38,8 +46,9 @@ DRIVER = r"""
   // Test-only wrapper around the page's real fetch: it can withhold, fail or alter ACTUAL server responses.
   window.fetch = async (url, opts) => {
     const u = String(url);
-    const activity = u.includes("/api/v4/activity");
-    if (activity) control.log.push("request " + u);
+    const activity = u.includes("/api/v5/activity");
+    const periods = u.includes("/api/v5/periods");
+    if (activity || periods) control.log.push("request " + u);
     if (activity && control.fail) { control.log.push("fail " + u); throw new TypeError("network down"); }
     const res = await realFetch(url, opts);
     if (!activity) return res;
@@ -86,6 +95,8 @@ DRIVER = r"""
       out.drillRows = rows();
       out.drillTask = $("task").value;
       out.loadedPagesReset = $("more").hidden;
+      out.drillVisible = !$("drill").hidden;
+      out.allHistories = ["source_history", "task_history", "retry_history", "evidence_history"].every((id) => $(id).checked);
 
       $("task").value = ""; $("task").dispatchEvent(new Event("change"));
       await until(() => rows() === 100, "filter cleared");
@@ -116,7 +127,66 @@ DRIVER = r"""
       $("retry_kind").dispatchEvent(new Event("change"));
       await until(() => control.log.some((entry) => entry.includes("retry_kind=operator")), "retry filters");
       out.retryUrl = control.log.filter((entry) => entry.includes("retry_kind=operator")).slice(-1)[0];
+      $("retry_kind").value = "";
+      $("retry_state").value = "";
+      $("evidence_kind").value = "REVIEW";
+      $("evidence_status").value = "FAILED";
+      $("evidence_kind").dispatchEvent(new Event("change"));
+      await until(() => control.log.some((entry) => entry.includes("evidence_kind=REVIEW")), "evidence filters");
+      out.evidenceUrl = control.log.filter((entry) => entry.includes("evidence_kind=REVIEW")).slice(-1)[0];
       out.counts = $("status-counts").textContent;
+    },
+
+    async periodPresets() {
+      await until(() => rows() === 100, "first page");
+      $("auto").checked = false; $("auto").dispatchEvent(new Event("change"));
+      $("timezone").value = "UTC";
+      $("period").value = "week"; $("period").dispatchEvent(new Event("change"));
+      await until(() => control.log.some((entry) => entry.includes("/api/v5/periods")), "week request");
+      const week = control.log.filter((entry) => entry.includes("/api/v5/periods")).slice(-1)[0];
+      const weekQuery = new URL(week.slice("request ".length), location.href).searchParams;
+      const weekStart = new NativeDate(weekQuery.get("since"));
+      const weekEnd = new NativeDate(weekQuery.get("until"));
+      out.weekStartDay = weekStart.getDay();
+      out.weekDays = (weekEnd - weekStart) / 86400000;
+      out.weekTimezone = weekQuery.get("timezone");
+      $("period").value = "month"; $("period").dispatchEvent(new Event("change"));
+      await until(() => control.log.filter((entry) => entry.includes("/api/v5/periods")).length >= 2, "month request");
+      const month = control.log.filter((entry) => entry.includes("/api/v5/periods")).slice(-1)[0];
+      const monthQuery = new URL(month.slice("request ".length), location.href).searchParams;
+      const monthStart = new NativeDate(monthQuery.get("since"));
+      const monthEnd = new NativeDate(monthQuery.get("until"));
+      out.monthStartDay = monthStart.getDate();
+      out.monthEndDay = monthEnd.getDate();
+      out.monthsApart = (monthEnd.getFullYear() * 12 + monthEnd.getMonth()) - (monthStart.getFullYear() * 12 + monthStart.getMonth());
+    },
+
+    async periods() {
+      await until(() => rows() === 100, "first page");
+      $("auto").checked = false; $("auto").dispatchEvent(new Event("change"));
+      $("period").value = "custom";
+      $("since").value = "2026-05-01T00:00";
+      $("until").value = "2026-05-05T00:00";
+      $("timezone").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      $("bucket").value = "day";
+      $("period").dispatchEvent(new Event("change"));
+      await until(() => document.querySelectorAll("#interval-rows tr").length === 100, "interval first page");
+      out.seriesRows = document.querySelectorAll("#series-rows tr").length;
+      out.intervalFirst = document.querySelectorAll("#interval-rows tr").length;
+      out.periodMoreVisible = !$("period-more").hidden;
+      out.summary = $("period-summary").textContent;
+      out.timezone = $("timezone").value;
+      $("period-more").focus(); $("period-more").click();
+      await until(() => document.querySelectorAll("#interval-rows tr").length === 130, "interval second page");
+      out.intervalSecond = document.querySelectorAll("#interval-rows tr").length;
+      out.periodMoreHidden = $("period-more").hidden;
+      out.focusAfterPeriodMore = document.activeElement === $("interval-table");
+      out.stillActive = [...document.querySelectorAll("#interval-rows td")].some((cell) => cell.textContent === "Still active");
+      const button = document.querySelector("#interval-rows button");
+      button.click();
+      await until(() => !$("drill").hidden, "interval task drill-down");
+      out.drillVisible = !$("drill").hidden;
+      out.allHistories = ["source_history", "task_history", "retry_history", "evidence_history"].every((id) => $(id).checked);
     },
 
     // Load more is accepted but its second-page response is still in flight when a refresh happens.
@@ -305,6 +375,42 @@ def fixture_base(tmp_path: Path):
     httpd.server_close()
 
 
+@pytest.fixture
+def period_base(tmp_path: Path):
+    db = tmp_path / "period-ui.sqlite3"
+    store = Store(db)
+    store.migrate()
+    start = datetime(2026, 5, 1, 12, tzinfo=UTC)
+    for i in range(130):
+        task = store.upsert_task(
+            f"Period task {i}", source="local", source_id=f"period-{i}", project="team/alpha"
+        )
+        instant = (start + timedelta(minutes=i)).timestamp()
+        store.conn.execute(
+            "UPDATE tasks SET stage='IMPLEMENT', status='OPEN', created_at=?, updated_at=? WHERE id=?",
+            (instant, instant, task),
+        )
+        store.conn.execute(
+            "UPDATE audit_events SET created_at=? WHERE event_type='task.created' "
+            "AND json_extract(payload, '$.task_id')=?",
+            (instant, task),
+        )
+    store.conn.commit()
+    store.close()
+    site = tmp_path / "period-site"
+    site.mkdir()
+    for name in ("app.js", "app.css"):
+        shutil.copyfile(UI / name, site / name)
+    index = (UI / "index.html").read_text(encoding="utf-8")
+    marker = '<script src="/app.js"></script>'
+    (site / "index.html").write_text(index.replace(marker, '<script src="/driver.js"></script>\n' + marker), encoding="utf-8")
+    httpd, _ = make_server(db, token=TOKEN, static_dir=site, api_class=FixtureApi)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+
+
 def run_scenario(base: str, scenario: str, tmp_path: Path) -> dict:
     browser = _find_browser()
     if browser is None:
@@ -336,14 +442,15 @@ def test_focus_paging_and_filters_in_a_real_browser(fixture_base, tmp_path: Path
     assert result["rowsAfterRefresh"] == 130
     # Activating the focused button drills into that task and resets paging
     assert result["drillRows"] == 1 and result["drillTask"] == "task-0" and result["loadedPagesReset"] is True
+    assert result["drillVisible"] is True and result["allHistories"] is True
     assert result["afterClear"] == 100 and result["moreVisibleAgain"] is True
     assert result["closedRows"] == 44  # every third task is DONE
 
 
-def test_v4_filter_controls_emit_bounded_encoded_queries(fixture_base, tmp_path: Path):
+def test_v5_filter_controls_emit_bounded_encoded_queries(fixture_base, tmp_path: Path):
     result = run_scenario(fixture_base, "v4Filters", tmp_path)
     task = result["taskUrl"]
-    assert "/api/v4/activity?" in task and "project=team%2Falpha" in task
+    assert "/api/v5/activity?" in task and "project=team%2Falpha" in task
     assert "source=github" in task and "time_basis=updated" in task
     assert "task_status=OPEN" in task and "source_status=CLOSED" in task
     assert "include_source_history=true" in task and "include_task_history=true" in task
@@ -351,6 +458,26 @@ def test_v4_filter_controls_emit_bounded_encoded_queries(fixture_base, tmp_path:
     assert "retry_kind=operator" in retry and "retry_state=FAILED" in retry
     assert "include_retry_history=true" in retry
     assert "task_event=" not in retry
+    evidence = result["evidenceUrl"]
+    assert "evidence_kind=REVIEW" in evidence and "evidence_status=FAILED" in evidence
+    assert "include_evidence_history=true" in evidence and "retry_kind=" not in evidence
+
+
+def test_calendar_presets_emit_this_week_and_this_month_bounds(fixture_base, tmp_path: Path):
+    result = run_scenario(fixture_base, "periodPresets", tmp_path)
+    assert result["weekStartDay"] == 1 and result["weekDays"] == 7
+    assert result["weekTimezone"] == "UTC"
+    assert result["monthStartDay"] == 1 and result["monthEndDay"] == 1 and result["monthsApart"] == 1
+
+
+def test_recorded_series_intervals_pagination_and_drill_down(period_base, tmp_path: Path):
+    result = run_scenario(period_base, "periods", tmp_path)
+    assert result["seriesRows"] == 4
+    assert result["intervalFirst"] == 100 and result["periodMoreVisible"] is True
+    assert result["intervalSecond"] == 130 and result["periodMoreHidden"] is True
+    assert result["focusAfterPeriodMore"] is True and result["stillActive"] is True
+    assert "Timezone " + result["timezone"] in result["summary"] and "history unavailable 0" in result["summary"]
+    assert result["drillVisible"] is True and result["allHistories"] is True
 
 
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):
@@ -438,7 +565,7 @@ def test_installed_wheel_serves_its_own_ui_and_requires_auth(tmp_path: Path):
             except urllib.error.HTTPError as exc:
                 return exc.code, exc.read()
 
-        for asset, needle in (("/", b"StageMesh activity"), ("/app.js", b"/api/v4/activity"), ("/app.css", b"[hidden]")):
+        for asset, needle in (("/", b"StageMesh activity"), ("/app.js", b"/api/v5/activity"), ("/app.css", b"[hidden]")):
             status, body = get(asset)
             assert status == 200 and needle in body, asset
             assert body == (UI / ("index.html" if asset == "/" else asset.lstrip("/"))).read_bytes(), asset

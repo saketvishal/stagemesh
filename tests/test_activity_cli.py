@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from stagemesh import cli as cli_module
-from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage
+from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage
 from stagemesh.persistence import Store
 
 BASE = datetime(2026, 1, 15, 18, tzinfo=UTC)
@@ -157,6 +157,41 @@ def test_activity_cli_filters_and_displays_typed_retry_history(
     assert database.read_bytes() == before
 
 
+def test_activity_cli_filters_and_displays_typed_evidence_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, task_id, _execution_id = _project(tmp_path)
+    database = cli_module.db_path(project)
+    store = Store(database)
+    evidence = store.add_evidence(
+        task_id,
+        "a" * 40,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {"token": "private", "findings": [{"message": "not for activity"}]},
+    )
+    store.close()
+    before = database.read_bytes()
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--task", task_id,
+        "--evidence-kind", "REVIEW", "--evidence-status", "FAILED",
+        "--evidence-history", "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [entry["id"] for entry in payload["entries"]] == [evidence]
+    assert payload["entries"][0]["evidence_kind"] == "REVIEW"
+    assert payload["entries"][0]["evidence_status"] == "FAILED"
+    assert "private" not in json.dumps(payload) and "not for activity" not in json.dumps(payload)
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--task", task_id, "--evidence-history",
+    ]) == 0
+    text = capsys.readouterr().out
+    assert "evidence_kind=REVIEW" in text and "evidence_status=FAILED" in text
+    assert database.read_bytes() == before
+
+
 def test_activity_text_is_bounded_and_shows_pagination_hint(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -252,6 +287,8 @@ def test_activity_week_preserves_a_local_offset_transition() -> None:
         ["--source", "token-secret"],
         ["--source-status", "has spaces"],
         ["--task-event", "status_changed"],
+        ["--evidence-kind", "REVIEW"],
+        ["--evidence-status", "FAILED"],
     ],
 )
 def test_activity_rejects_invalid_ranges_and_pagination(
