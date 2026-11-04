@@ -16,6 +16,7 @@
 <nav aria-label="Operator views">
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
   <button type="button" id="show-status" aria-pressed="false">Status</button>
+  <button type="button" id="show-task" aria-pressed="false" hidden>Task detail</button>
 </nav>
 <main id="activity-view">
 <form id="filters" aria-label="Activity filters">
@@ -145,6 +146,32 @@
   <section aria-labelledby="selection-heading">
     <h3 id="selection-heading">Provider selections</h3>
     <table><thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Policy</th><th scope="col">Recorded order</th><th scope="col">Eligibility</th></tr></thead><tbody id="selection-rows"></tbody></table>
+  </section>
+</main>
+<main id="task-view" hidden>
+  <p><button type="button" id="close-detail">Back</button> <button type="button" id="detail-history">Open retained activity history</button></p>
+  <h2 id="detail-heading">Task detail</h2>
+  <p id="detail-message" class="muted" role="status" aria-live="polite"></p>
+  <dl id="detail-facts" class="metrics"></dl>
+  <section aria-labelledby="detail-dependencies-heading">
+    <h3 id="detail-dependencies-heading">Dependencies</h3>
+    <table><thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Status</th></tr></thead><tbody id="detail-dependencies"></tbody></table>
+  </section>
+  <section aria-labelledby="detail-decisions-heading">
+    <h3 id="detail-decisions-heading">Recorded decision context</h3>
+    <table><thead><tr><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Candidate</th><th scope="col">Detail</th></tr></thead><tbody id="detail-decisions"></tbody></table>
+  </section>
+  <section aria-labelledby="detail-evidence-heading">
+    <h3 id="detail-evidence-heading">Validation, review and integration evidence</h3>
+    <table><thead><tr><th scope="col">Time</th><th scope="col">Kind</th><th scope="col">Outcome</th><th scope="col">Candidate</th></tr></thead><tbody id="detail-evidence"></tbody></table>
+  </section>
+  <section aria-labelledby="detail-retries-heading">
+    <h3 id="detail-retries-heading">Remediation and retries</h3>
+    <table><thead><tr><th scope="col">Time</th><th scope="col">Kind</th><th scope="col">State</th><th scope="col">Attempt</th><th scope="col">Candidate</th></tr></thead><tbody id="detail-retries"></tbody></table>
+  </section>
+  <section aria-labelledby="detail-timeline-heading">
+    <h3 id="detail-timeline-heading">Recorded lifecycle timeline</h3>
+    <table id="detail-timeline-table" tabindex="-1"><thead><tr><th scope="col">Time</th><th scope="col">Kind</th><th scope="col">Stage</th><th scope="col">Recorded state</th><th scope="col">Provider</th><th scope="col">Detail</th></tr></thead><tbody id="detail-timeline"></tbody></table>
   </section>
 </main>
 <script src="/app.js"></script>

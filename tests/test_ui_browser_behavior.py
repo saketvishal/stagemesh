@@ -24,7 +24,7 @@ import pytest
 
 from stagemesh.api_server import UI_ASSETS, ActivityApi, make_server
 from stagemesh.block_kinds import BlockKind, record_block
-from stagemesh.domain import ExecutionKind, ExecutionStatus
+from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from stagemesh.persistence import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,7 +92,10 @@ DRIVER = r"""
       out.focusKept = !!document.activeElement && document.activeElement.dataset.key === key;
       out.rowsAfterRefresh = rows();
 
-      document.activeElement.click(); // what Enter does on a focused button: drill into the task
+      document.activeElement.click(); // what Enter does on a focused button: open the task detail
+      await until(() => !$("task-view").hidden, "task detail");
+      out.detailVisible = !$("task-view").hidden;
+      $("detail-history").click();
       await until(() => rows() === 1, "drill-down");
       out.drillRows = rows();
       out.drillTask = $("task").value;
@@ -186,6 +189,9 @@ DRIVER = r"""
       out.stillActive = [...document.querySelectorAll("#interval-rows td")].some((cell) => cell.textContent === "Still active");
       const button = document.querySelector("#interval-rows button");
       button.click();
+      await until(() => !$("task-view").hidden, "interval task detail");
+      out.detailVisible = !$("task-view").hidden;
+      $("detail-history").click();
       await until(() => !$("drill").hidden, "interval task drill-down");
       out.drillVisible = !$("drill").hidden;
       out.allHistories = ["source_history", "task_history", "retry_history", "evidence_history"].every((id) => $(id).checked);
@@ -204,6 +210,25 @@ DRIVER = r"""
       out.efficiency = $("efficiency-summary").textContent;
       const task = document.querySelector("#failure-rows button");
       task.click();
+      await until(
+        () => document.querySelectorAll("#detail-timeline tr").length >= 5,
+        "status task detail",
+      );
+      out.detailVisible = !$("task-view").hidden;
+      out.detailTimeline = document.querySelectorAll("#detail-timeline tr").length;
+      out.detailEvidence = document.querySelectorAll("#detail-evidence tr").length;
+      out.detailRetries = document.querySelectorAll("#detail-retries tr").length;
+      out.detailDependencies = document.querySelectorAll("#detail-dependencies tr").length;
+      out.detailFocus = document.activeElement === $("close-detail");
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("status-view").hidden, "status return from task detail");
+      out.detailReturnFocus = document.activeElement === task;
+      task.click();
+      await until(
+        () => document.querySelectorAll("#detail-timeline tr").length >= 5,
+        "reopened status task detail",
+      );
+      $("detail-history").click();
       await until(() => !$("drill").hidden, "status task drill-down");
       out.drillVisible = !$("drill").hidden;
       out.activityVisible = !$("activity-view").hidden && $("status-view").hidden;
@@ -437,6 +462,14 @@ def status_base(tmp_path: Path):
     store = Store(db)
     store.migrate()
     task = store.upsert_task("Status task", source="local", source_id="status-task")
+    dependency = store.upsert_task("Dependency", source="local", source_id="status-dependency")
+    store.add_dependency(task, dependency)
+    store.add_candidate(task, "a" * 40, "codex", True)
+    store.add_evidence(task, "a" * 40, EvidenceKind.REVIEW, EvidenceStatus.FAILED, {"private": "not projected"})
+    store.add_audit_event(
+        "task.operator_retry_requested",
+        {"task_id": task, "stage": "PLAN", "candidate_sha": "a" * 40},
+    )
     store.block_task(task)
     record_block(store, task, BlockKind.HUMAN_DECISION, "choose recorded behavior")
     running = store.start_execution(
@@ -509,7 +542,7 @@ def test_focus_paging_and_filters_in_a_real_browser(fixture_base, tmp_path: Path
     assert result["rowsAfterRefresh"] == 130
     # Activating the focused button drills into that task and resets paging
     assert result["drillRows"] == 1 and result["drillTask"] == "task-0" and result["loadedPagesReset"] is True
-    assert result["drillVisible"] is True and result["allHistories"] is True
+    assert result["detailVisible"] is True and result["drillVisible"] is True and result["allHistories"] is True
     assert result["afterClear"] == 100 and result["moreVisibleAgain"] is True
     assert result["closedRows"] == 44  # every third task is DONE
 
@@ -544,7 +577,7 @@ def test_recorded_series_intervals_pagination_and_drill_down(period_base, tmp_pa
     assert result["intervalSecond"] == 130 and result["periodMoreHidden"] is True
     assert result["focusAfterPeriodMore"] is True and result["stillActive"] is True
     assert "Timezone " + result["timezone"] in result["summary"] and "history unavailable 0" in result["summary"]
-    assert result["drillVisible"] is True and result["allHistories"] is True
+    assert result["detailVisible"] is True and result["drillVisible"] is True and result["allHistories"] is True
 
 
 def test_status_view_renders_bounded_operator_sections_and_links_to_history(status_base, tmp_path: Path):
@@ -553,6 +586,9 @@ def test_status_view_renders_bounded_operator_sections_and_links_to_history(stat
     assert result["attention"] >= 2 and result["pending"] == 2
     assert result["active"] == 2 and result["failures"] == 1 and result["selections"] == 1
     assert "billing cost UNKNOWN" in result["efficiency"]
+    assert result["detailVisible"] is True and result["detailTimeline"] >= 5
+    assert result["detailEvidence"] == 1 and result["detailRetries"] == 1 and result["detailDependencies"] == 1
+    assert result["detailFocus"] is True and result["detailReturnFocus"] is True
     assert result["drillVisible"] is True and result["activityVisible"] is True
 
 

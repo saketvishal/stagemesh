@@ -405,6 +405,29 @@ bounded journal never grants permission. The shipped dashboard exposes Activity
 and Status views, keeps task links as an explicit retained-history drill-down,
 and performs no writes or operator actions.
 
+## Task detail snapshot
+
+`GET /api/v1/task?task_id=...` uses `stagemesh.task-detail/1` and requires
+exactly one non-empty, percent-encoded task identifier. It shares the loopback,
+Bearer, GET-only and SQLite read-only/query-only boundary. Missing tasks return a
+generic `task_not_found` error without echoing the identifier.
+
+The response keeps current facts separate from history: `task`, `source`,
+nullable durable `candidate`, recorded `dependencies`, typed
+`pending_decisions`, a newest-first `timeline`, and evidence/retry subsets. The
+timeline is capped at 200 retained rows and reports `truncated`; it never
+reconstructs events before durable lifecycle recording. Validation, review and
+integration entries expose only kind, allowlisted outcome, candidate identity
+and recorded time. Retry entries preserve exact queued/claimed/running/terminal/
+superseded state and never relabel initial work. Current dependency and source
+status are ledger facts, not inferred liveness or completion.
+
+No audit/evidence payload, finding, command, environment, executable path,
+provider output or arbitrary URL is selected. Pending approval coverage retains
+an `UNKNOWN` row. The dashboard task pane consumes only this contract; task links
+from activity, intervals, failures and pending decisions share the same view,
+with an explicit action to enter the separately labelled retained-history filter.
+
 ## Known gaps against #134
 
 V4 adds durable task block/reopen/DONE and candidate-bound rework occurrences from
