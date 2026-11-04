@@ -541,6 +541,13 @@ def test_a_damaged_ledger_refuses_to_start(tmp_path: Path) -> None:
         def __init__(self, real) -> None:
             self.real = real
 
+        def __enter__(self):
+            self.real.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.real.__exit__(exc_type, exc, traceback)
+
         def execute(self, sql, *args):
             if sql.startswith("PRAGMA quick_check"):
                 return self.real.execute("SELECT 'database disk image is malformed'")
