@@ -96,7 +96,7 @@ unrelated behavior, and failed checks must not be removed to make work pass.
 ## StageMesh Hosted CI Plan
 
 StageMesh's own protected `windows` and `linux` jobs consume the separate
-`stagemesh.ci-validation/1` plan. This is not a generic client-repository selector.
+`stagemesh.ci-validation/2` plan. This is not a generic client-repository selector.
 It recognizes one audited read-only operator boundary by exact paths and retains a
 fixed operator regression on both operating systems, including the real-browser
 and Windows installer/timezone checks. The plan is data only; it does not execute
@@ -107,6 +107,9 @@ That includes workflow/selector/profile, dependency, schema, persistence,
 lifecycle, claims, authorization, security, packaging and shared-interface changes.
 Documentation-only plans explicitly claim no runtime coverage. Mandatory static
 range/attribution, focused-policy and invariant checks remain present in every
-mode. Pushes to `main`, scheduled runs and manual runs always execute the complete
-regression. See [the bounded component audit](validation-components.md) for the
-exact roots, tests, coupling limits and unmeasured dependencies.
+mode. An ordinary protected push to `main` uses a bounded Windows/Linux smoke
+plan after pull-request validation; a push that changes workflow, selection,
+dependency, schema, security, packaging, or another CI-sensitive boundary fails
+safe to the complete regression. Scheduled and manual runs remain authoritative
+complete regressions. See [the bounded component audit](validation-components.md)
+for the exact roots, tests, coupling limits and unmeasured dependencies.

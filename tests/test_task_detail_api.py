@@ -28,7 +28,29 @@ def db(tmp_path: Path) -> tuple[Path, str]:
         "a" * 40,
         EvidenceKind.VALIDATION,
         EvidenceStatus.PASSED,
-        {"command": "pytest token=private", "url": "https://secret.invalid"},
+        {
+            "command": "pytest token=private",
+            "url": "https://secret.invalid",
+            "e2e_evaluations": [
+                {
+                    "kind": "browser",
+                    "result": "PASS",
+                    "target": "https://secret.invalid/private",
+                    "metadata": {
+                        "policy_fingerprint": "b" * 64,
+                        "evaluator": "reviewer",
+                        "independent": True,
+                        "requirements": [{"id": "home-mobile", "status": "PASS"}],
+                        "lifecycle": {
+                            "managed": True,
+                            "started": True,
+                            "healthy": True,
+                            "cleanup_confirmed": True,
+                        },
+                    },
+                }
+            ],
+        },
     )
     store.add_audit_event(
         "task.operator_retry_requested",
@@ -54,13 +76,17 @@ def test_task_detail_is_read_only_bounded_and_keeps_current_facts_separate(db) -
 
     assert status == 200 and body["contract"] == TASK_DETAIL_CONTRACT
     assert set(body) == {
-        "contract", "observed_at", "task", "source", "candidate", "dependencies",
+        "contract", "observed_at", "task", "source", "candidate", "dependencies", "e2e",
         "pending_decisions", "timeline", "evidence", "retries", "history",
     }
     assert body["task"]["id"] == task and body["task"]["status"] == "BLOCKED"
     assert body["source"] == {"kind": "github", "id": "issue-1", "status": None}
     assert body["candidate"]["sha"] == "a" * 40 and body["candidate"]["durable_handoff"] is True
     assert len(body["dependencies"]) == 1 and body["dependencies"][0]["status"] == "OPEN"
+    assert body["e2e"]["status"] == "passed"
+    assert body["e2e"]["policies"][0]["requirements"] == [
+        {"id": "home-mobile", "status": "PASS"}
+    ]
     assert body["pending_decisions"][0]["kind"] == "human_decision"
     assert body["pending_decisions"][-1]["status"] == "UNKNOWN"
     assert body["history"]["limit"] == 200 and body["history"]["recorded_creation"] is True

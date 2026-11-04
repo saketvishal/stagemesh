@@ -1,9 +1,9 @@
 """Deterministic, data-only hosted-CI validation planning.
 
-The narrow plan is intentionally repository-specific and exact.  It records one
-audited read-only operator boundary; everything else retains the complete hosted
-regression.  This module does not inspect Git, execute commands, contact providers,
-or make network calls.
+Focused pull-request plans are intentionally repository-specific and exact.
+Post-merge smoke validation is bounded and fails safe to full regression whenever
+CI-sensitive boundaries change.  This module does not inspect Git, execute commands,
+contact providers, or make network calls.
 """
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal
 
-CI_VALIDATION_CONTRACT = "stagemesh.ci-validation/1"
+CI_VALIDATION_CONTRACT = "stagemesh.ci-validation/2"
 FULL = "full"
 OPERATOR = "operator"
 DOCS = "docs"
+SMOKE = "smoke"
 
-Mode = Literal["full", "operator", "docs"]
+Mode = Literal["full", "operator", "docs", "smoke"]
 
 MANDATORY_CHECKS = (
     "attribution-and-static-range-policy",
@@ -77,6 +78,7 @@ _FULL_EXACT_PATHS = frozenset(
         "src/stagemesh/profile.py",
         "src/stagemesh/security.py",
         "src/stagemesh/validation.py",
+        "src/stagemesh/validation_services.py",
         "src/stagemesh/validation_plan.py",
         "scripts/ci_validation_plan.py",
         "scripts/check_ci_range.py",
@@ -250,6 +252,41 @@ def full_ci_validation_plan(
         windows_installer_required=True,
         runtime_coverage=True,
         reasons=recorded,
+    )
+
+
+def post_merge_ci_validation_plan(changed_paths: Iterable[str]) -> CiValidationPlan:
+    """Return a bounded main-push plan, failing safe for CI-sensitive changes."""
+    try:
+        paths = tuple(sorted({_normalize_path(path) for path in changed_paths}))
+    except (TypeError, ValueError) as exc:
+        return full_ci_validation_plan((), f"invalid post-merge changed path: {exc}")
+    if not paths:
+        return full_ci_validation_plan(
+            (), "post-merge changed path set is empty or unavailable"
+        )
+    protected = tuple(path for path in paths if _requires_full(path))
+    if protected:
+        return full_ci_validation_plan(
+            paths,
+            "post-merge CI-sensitive boundary changed",
+            f"full-regression paths: {', '.join(protected)}",
+        )
+    return CiValidationPlan(
+        mode=SMOKE,
+        changed_paths=paths,
+        components=("post_merge_smoke",),
+        direct_test_targets=(),
+        dependent_test_targets=(),
+        mandatory_checks=MANDATORY_CHECKS,
+        required_os=("windows", "linux"),
+        browser_required=False,
+        windows_installer_required=False,
+        runtime_coverage=False,
+        reasons=(
+            "protected pull-request validation already covered the candidate",
+            "main push retains exact range, bootstrap, focused policy, import, and invariants",
+        ),
     )
 
 

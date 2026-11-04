@@ -42,6 +42,7 @@ from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .operator import OperatorReport, execution_runtime_row, operator_report, pending_decision_rows
 from .persistence import Store
 from .redaction import redact_output
+from .validation_services import e2e_policy_projection
 
 CONTRACT = "stagemesh.activity/1"
 CONTRACT_V2 = "stagemesh.activity/2"
@@ -544,6 +545,18 @@ def serialize_task_detail(store: Store, task_id: str) -> dict[str, Any]:
     current_entry = next((entry for entry in timeline if entry["kind"] == "task"), {})
     candidate = store.latest_candidate(task_id)
     candidate_sha = None if candidate is None else _safe_sha(candidate["sha"])
+    e2e = {"status": "pending", "policies": [], "failure_signatures": []}
+    if candidate_sha is not None:
+        e2e_row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            (task_id, candidate_sha, EvidenceKind.VALIDATION),
+        ).fetchone()
+        if e2e_row is not None:
+            try:
+                e2e = e2e_policy_projection(json.loads(e2e_row["payload"]))
+            except (TypeError, ValueError):
+                pass
     dependencies = [
         {
             "task_id": _safe_text(row["id"]),
@@ -602,6 +615,7 @@ def serialize_task_detail(store: Store, task_id: str) -> dict[str, Any]:
             "created_at": _safe_number(candidate["created_at"]),
         },
         "dependencies": dependencies,
+        "e2e": e2e,
         "pending_decisions": pending,
         "timeline": timeline,
         "evidence": [entry for entry in timeline if entry["kind"] == "evidence"],

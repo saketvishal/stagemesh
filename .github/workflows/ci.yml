@@ -32,7 +32,7 @@ jobs:
           STAGEMESH_CI_EVENT: ${{ github.event_name }}
           STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: python scripts/ci_validation_plan.py
       - name: Attribution and static range policy
         env:
@@ -67,6 +67,9 @@ jobs:
       - name: Provider output security boundaries
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_provider_output_security.py
+      - name: E2E loop security boundaries
+        if: ${{ steps.validation-plan.outputs.mode == 'full' }}
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_e2e_loop_security.py tests/test_e2e_remediation.py tests/test_task_detail_api.py
       - name: Autonomous recovery ledger
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_autonomous_recovery.py tests/test_recovery_ledger.py
@@ -111,7 +114,7 @@ jobs:
           STAGEMESH_CI_EVENT: ${{ github.event_name }}
           STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: python scripts/ci_validation_plan.py
       - name: Attribution and static range policy
         env:
@@ -146,6 +149,9 @@ jobs:
       - name: Provider output security boundaries
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_provider_output_security.py
+      - name: E2E loop security boundaries
+        if: ${{ steps.validation-plan.outputs.mode == 'full' }}
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_e2e_loop_security.py tests/test_e2e_remediation.py tests/test_task_detail_api.py
       - name: Autonomous recovery ledger
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_autonomous_recovery.py tests/test_recovery_ledger.py

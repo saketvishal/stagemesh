@@ -13,6 +13,7 @@ FULL_GROUPS = (
     "Existing queue stop compatibility",
     "Execution budgets and review ownership",
     "Provider output security boundaries",
+    "E2E loop security boundaries",
     "Autonomous recovery ledger",
     "Continuous driver control and recovery",
     "Validation environment and fallback progress",
@@ -88,6 +89,9 @@ def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:
         assert "tests/test_recovery_ledger.py" in recovery
         provider_security = _step(job, "Provider output security boundaries")
         assert "tests/test_provider_output_security.py" in provider_security
+        e2e_security = _step(job, "E2E loop security boundaries")
+        assert "tests/test_e2e_loop_security.py" in e2e_security
+        assert "tests/test_e2e_remediation.py" in e2e_security
         delivery = _step(job, "Delivery and window regressions")
         assert "tests/test_autonomous_window.py" in delivery
         assert focused_condition in _step(job, "Stabilization matrix")
@@ -97,7 +101,7 @@ def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:
             assert target in operator, target
 
 
-def test_main_schedule_and_manual_runs_are_authoritative_full_regressions() -> None:
+def test_main_push_is_smoke_while_schedule_and_manual_runs_are_full() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     pre_jobs = text[: text.index("\njobs:\n")]
     assert "  push:\n    branches: [main]" in pre_jobs
@@ -105,7 +109,8 @@ def test_main_schedule_and_manual_runs_are_authoritative_full_regressions() -> N
     assert "  workflow_dispatch:\n    inputs:\n      mode:" in pre_jobs
     assert "default: full" in pre_jobs and "options: [full]" in pre_jobs
     force = (
-        "github.event_name == 'push' || github.event_name == 'schedule' || "
+        "github.event_name == 'schedule' || "
         "github.event_name == 'workflow_dispatch'"
     )
     assert text.count(force) == 2
+    assert "github.event_name == 'push' ||" not in text

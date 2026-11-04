@@ -340,9 +340,17 @@ class Validator:
                 ))
             if any(s.kind in {"browser", "api"} for s in evaluation_services.services):
                 output_root = (artifact_root or project / ".stagemesh" / "artifacts" / "e2e") / execution_id
+                candidate = store.latest_candidate(task_id)
+                implementation_provider = (
+                    str(candidate["produced_by"]) if candidate is not None else None
+                )
                 try:
                     manifests, e2e_gates, e2e_findings = run_configured_evaluations(
-                        project, bound, evaluation_services, output_root,
+                        project,
+                        bound,
+                        evaluation_services,
+                        output_root,
+                        implementation_provider=implementation_provider,
                     )
                     payload["e2e_evaluations"] = manifests
                     payload["e2e_artifact_root"] = str(output_root)

@@ -51,6 +51,7 @@ from .domain import EvidenceKind, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import Store
 from .queue_control import QueueStopControl
+from .validation_services import e2e_policy_projection
 
 ORPHAN_EVENT = "recovery.orphan_execution_failed"
 
@@ -90,6 +91,7 @@ class TaskRecord:
     unblocked: bool = False
     candidates: list[str] = field(default_factory=list)
     validation: str | None = None
+    e2e: dict[str, Any] | None = None
     review: str | None = None
     integration: str | None = None
     stop_reason: str | None = None
@@ -357,6 +359,18 @@ def _snapshot(store: Store, record: TaskRecord, since: float) -> None:
     latest = store.latest_candidate(record.task_id)
     sha = None if latest is None else str(latest["sha"])
     record.validation = latest_evidence_status(store, record.task_id, sha, EvidenceKind.VALIDATION)
+    record.e2e = {"status": "pending", "policies": [], "failure_signatures": []}
+    if sha is not None:
+        e2e_row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            (record.task_id, sha, EvidenceKind.VALIDATION),
+        ).fetchone()
+        if e2e_row is not None:
+            try:
+                record.e2e = e2e_policy_projection(json.loads(e2e_row["payload"]))
+            except (TypeError, ValueError):
+                pass
     record.review = latest_evidence_status(store, record.task_id, sha, EvidenceKind.REVIEW)
     record.integration = latest_evidence_status(store, record.task_id, sha, EvidenceKind.INTEGRATION)
     record.tool_failure = latest_tool_failure(store, record.task_id, since=since)
@@ -964,6 +978,14 @@ def format_report(report: WaveReport) -> str:
             f"candidates {', '.join(sha[:7] for sha in task.candidates) or '-'}; validation {task.validation or '-'}, "
             f"review {task.review or '-'}, integration {task.integration or '-'}"
         )
+        if task.e2e and task.e2e.get("policies"):
+            checks = sum(
+                len(policy.get("requirements", [])) for policy in task.e2e["policies"]
+            )
+            lines.append(
+                f"      e2e policy: {task.e2e['status']}; "
+                f"evaluations={len(task.e2e['policies'])}; declared-checks={checks}"
+            )
         if task.reason:
             lines.append(f"      {task.reason}")
         if task.tool_failure:
