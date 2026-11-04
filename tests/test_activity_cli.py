@@ -59,6 +59,37 @@ def test_activity_json_filters_without_mutating_the_store(tmp_path: Path, capsys
     assert database.read_bytes() == before
 
 
+def test_activity_cli_filters_and_displays_linked_source_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, task_id, _execution_id = _project(tmp_path)
+    database = cli_module.db_path(project)
+    store = Store(database)
+    store.cache_source("local", "ACTIVITY-1", {"state": "OPEN"}, "OPEN")
+    store.cache_source("local", "ACTIVITY-1", {"state": "CLOSED"}, "CLOSED")
+    store.close()
+    before = database.read_bytes()
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--source", "local",
+        "--source-status", "CLOSED", "--source-history", "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    kinds = {entry["kind"] for entry in payload["entries"]}
+    assert {"task", "execution", "source"} <= kinds
+    source = next(entry for entry in payload["entries"] if entry["kind"] == "source")
+    assert source["task_id"] == task_id
+    assert (source["previous_source_status"], source["source_status"]) == ("OPEN", "CLOSED")
+    assert payload["status_counts"]["source"]["CLOSED"] == 1
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--task", task_id, "--source-history",
+    ]) == 0
+    text = capsys.readouterr().out
+    assert "source=local" in text and "previous_source_status=OPEN" in text
+    assert database.read_bytes() == before
+
+
 def test_activity_text_is_bounded_and_shows_pagination_hint(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -151,6 +182,8 @@ def test_activity_week_preserves_a_local_offset_transition() -> None:
         ["--since", "2026-01-02T00:00:00Z", "--until", "2026-01-01T00:00:00Z"],
         ["--limit", "0"],
         ["--offset", "-1"],
+        ["--source", "token-secret"],
+        ["--source-status", "has spaces"],
     ],
 )
 def test_activity_rejects_invalid_ranges_and_pagination(

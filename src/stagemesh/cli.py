@@ -1375,6 +1375,16 @@ def _activity_entry_text(entry: ActivityEntry) -> str:
         f"status={entry.status or '-'}",
         f"provider={entry.provider or '-'}",
     ]
+    if entry.source or entry.source_id or entry.source_status:
+        fields.extend(
+            (
+                f"source={entry.source or '-'}",
+                f"source_id={entry.source_id or '-'}",
+                f"source_status={entry.source_status or '-'}",
+            )
+        )
+    if entry.previous_source_status:
+        fields.append(f"previous_source_status={entry.previous_source_status}")
     detail = entry.title or entry.event_type or entry.result_code
     if detail:
         fields.append(detail)
@@ -1416,6 +1426,9 @@ def command_activity(args: argparse.Namespace) -> int:
             until=until,
             limit=args.limit,
             offset=args.offset,
+            source=args.source,
+            source_status=args.source_status,
+            include_source_history=args.source_history,
         )
         connection = sqlite3.connect(f"{activity_db.as_uri()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
@@ -1430,7 +1443,7 @@ def command_activity(args: argparse.Namespace) -> int:
         print("activity error: activity store is unavailable", file=sys.stderr)
         return 2
     if args.json:
-        print(json.dumps(serialize_page(page, version=2), indent=2, sort_keys=True))
+        print(json.dumps(serialize_page(page, version=3), indent=2, sort_keys=True))
     else:
         print(_format_activity_page(page))
     return 0
@@ -5018,6 +5031,13 @@ def build_parser() -> argparse.ArgumentParser:
     activity.add_argument("--task", dest="task_id")
     activity.add_argument("--stage", choices=tuple(stage.value for stage in Stage))
     activity.add_argument("--provider")
+    activity.add_argument("--source", help="Exact linked task-source kind, for example github")
+    activity.add_argument("--source-status", help="Exact linked source status, for example OPEN or CLOSED")
+    activity.add_argument(
+        "--source-history",
+        action="store_true",
+        help="Include durable linked-source close/reopen transitions",
+    )
     activity.add_argument("--since", metavar="ISO8601", help="Inclusive instant with a UTC offset")
     activity.add_argument("--until", metavar="ISO8601", help="Exclusive instant with a UTC offset")
     activity.add_argument("--last", metavar="Nd", help="Activity in the last N 24-hour days, for example 7d")

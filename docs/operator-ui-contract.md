@@ -226,14 +226,49 @@ statuses use the fixed UNKNOWN count bucket, not a new free-text key. If
 `truncated=true`, both counts and `total` are lower bounds and the client must
 say so. They are not complete all-time statistics. No history is synthesized.
 
+## Version 3: linked-source state and recorded transitions
+
+`GET /api/v3/activity` and `GET /api/v3/health` use contract
+`stagemesh.activity/3`. V3 retains all V2 fields and parameters and adds:
+
+| Parameter | Type | Rule |
+| --- | --- | --- |
+| `source` | string | Exact linked task-source kind; bounded identifier syntax |
+| `source_status` | string | Exact current source status for task, execution and audit rows; exact transition destination for source-history rows |
+| `include_source_history` | `true` or `false` | Opt in to durable source status-change occurrences; default `false` |
+
+V3 entries add nullable `source`, `source_id`, `source_status` and
+`previous_source_status`. Task, execution and audit entries report the linked
+source's current cached status separately from the StageMesh task `status` and
+`state`. A `source` entry represents one recorded `STATUS_CHANGED` occurrence;
+its `source_status` is the transition destination and
+`previous_source_status` is the origin. First observation and unchanged cache
+refreshes do not create transitions. Its task `status` and `state`, when a task
+is linked, are the task's current recorded values rather than historical values
+at the transition. Malformed or unsafe event payloads are not projected.
+
+Source-history rows are available only for the `activity` and `updated` time
+bases because the store records the transition instant but does not infer an
+opening or completion time. Their filters, ordering, retention, pagination and
+time bounds match the other activity sources. `status_counts.source` uses the
+fixed `OPEN`, `CLOSED` and `UNKNOWN` buckets and counts retained transition
+occurrences, not source issues or delivered tasks.
+
+The V1 and V2 routes remain compatibility adapters: they reject V3-only query
+parameters and omit every V3-only entry field and count group. The CLI adopts
+the V3 serializer for JSON and exposes `--source`, `--source-status` and the
+explicit `--source-history` opt-in. Existing calls without those options retain
+the previous feed shape and do not include transition occurrences.
+
 ## Known gaps against #134
 
-V2 supplies recorded project filtering, status counts and opened/updated/completed
-period semantics (#450). The existing V1 dashboard has not adopted them. Full
-reopen/retry/source-sync history, active-at-any-point intervals, opened-versus-completed
-series, rework classification, source-issue state and cross-store aggregation remain
-outside this slice. Missing historical events cannot be reconstructed from current
-task state. The parent objective is not complete merely because this projection is.
+V3 adds current linked-source state and durable source close/reopen transitions
+from this release forward. The existing V1 dashboard has not adopted V2 or V3.
+Task reopen history, retry classification, active-at-any-point intervals,
+opened-versus-completed series, rework classification and cross-store aggregation
+remain outside this slice. Earlier cache changes were not recorded and cannot be
+reconstructed from current state. The parent objective is not complete merely
+because this projection is.
 
 ## Architecture decisions
 
@@ -257,7 +292,8 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
    existing project registry, so no server aggregates stores and the auth and error model stays per project.
 7. **Projection growth:** #450 introduces `/api/v2` and `stagemesh.activity/2` for explicit period semantics,
    recorded project attribution and partitioned counts. `/api/v1` remains an unchanged compatibility adapter
-   for the shipped dashboard; a client adopts V2 explicitly. No database migration is involved.
+   for the shipped dashboard; a client adopts V2 explicitly. V3 adds linked-source fields and opt-in transition
+   occurrences while preserving both earlier response shapes. No database migration is involved.
 8. **Health and version route:** `GET /api/v1/health`. Implemented (#446).
 9. **Dependencies: none.** The server is standard library; the UI is dependency-free HTML, CSS and JavaScript shipped as
    package data (#448), so no Node toolchain is needed to build or install StageMesh.
