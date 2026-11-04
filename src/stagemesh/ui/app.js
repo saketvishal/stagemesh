@@ -1,10 +1,9 @@
 "use strict";
-// Read-only client for /api/v4 (docs/operator-ui-contract.md). The token lives in memory only.
+// Read-only client for /api/v5 (docs/operator-ui-contract.md). The token lives in memory only.
 (() => {
   const params = new URLSearchParams(location.hash.slice(1));
   const token = params.get("token") || "";
   history.replaceState(null, "", location.pathname + location.search);
-
   const $ = (id) => document.getElementById(id);
   const COLUMNS = [
     ["at", "Time"], ["kind", "Kind"], ["state", "State"], ["task_id", "Task"], ["stage", "Stage"],
@@ -12,16 +11,13 @@
     ["provider", "Provider"], ["title", "Title / detail"], ["id", "Id"],
   ];
   const POLL_MS = 10000;
-  const MAX_PAGES = 10; // 1000 retained rows / 100 per page
-  let rows = new Map(); // "kind:id" -> entry, de-duplicated across pages
-  let nextOffset = null;
+  const MAX_PAGES = 10;
+  let rows = new Map(), intervalRows = new Map();
+  let nextOffset = null, periodNextOffset = null;
   let sort = { key: "at", dir: -1 };
-  let lastGood = null;
-  let timer = null;
-  let generation = 0;
-  let loadedPages = 1;
-  let wantedPages = 1;
-  let inflight = false;
+  let lastGood = null, timer = null, generation = 0;
+  let loadedPages = 1, wantedPages = 1, periodLoadedPages = 1, periodWantedPages = 1;
+  let inflight = false, drillState = null;
 
   function setMessage(text, level) {
     const el = $("message");
@@ -32,98 +28,152 @@
   function periodRange() {
     const now = new Date();
     const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const days = (n) => new Date(midnight.getFullYear(), midnight.getMonth(), midnight.getDate() - n);
+    const days = (n) => new Date(midnight.getFullYear(), midnight.getMonth(), midnight.getDate() + n);
     switch ($("period").value) {
-      case "today": return [midnight, null];
-      case "yesterday": return [days(1), midnight];
-      case "7d": return [days(6), null];
-      case "30d": return [days(29), null];
+      case "today": return [midnight, days(1)];
+      case "yesterday": return [days(-1), midnight];
+      case "7d": return [days(-6), days(1)];
+      case "30d": return [days(-29), days(1)];
+      case "week": {
+        const mondayOffset = (midnight.getDay() + 6) % 7;
+        return [days(-mondayOffset), days(7 - mondayOffset)];
+      }
+      case "month": return [
+        new Date(midnight.getFullYear(), midnight.getMonth(), 1),
+        new Date(midnight.getFullYear(), midnight.getMonth() + 1, 1),
+      ];
       case "custom": {
-        const s = $("since").value, u = $("until").value;
-        return [s ? new Date(s) : null, u ? new Date(u) : null];
+        const since = $("since").value, until = $("until").value;
+        return [since ? new Date(since) : null, until ? new Date(until) : null];
       }
       default: return [null, null];
     }
   }
 
+  function addSharedFilters(query) {
+    if ($("task").value.trim()) query.set("task_id", $("task").value.trim());
+    if ($("project").value.trim()) query.set("project", $("project").value.trim());
+    if ($("source").value.trim()) query.set("source", $("source").value.trim());
+  }
+
   function queryString(offset) {
-    const q = new URLSearchParams();
-    for (const key of ["state", "stage", "time_basis", "source_status", "task_status", "task_event", "retry_kind", "retry_state"]) {
-      if ($(key).value) q.set(key, $(key).value);
-    }
-    if ($("task").value.trim()) q.set("task_id", $("task").value.trim());
-    if ($("provider").value.trim()) q.set("provider", $("provider").value.trim());
-    if ($("project").value.trim()) q.set("project", $("project").value.trim());
-    if ($("source").value.trim()) q.set("source", $("source").value.trim());
-    if ($("source_history").checked) q.set("include_source_history", "true");
-    if ($("task_history").checked || $("task_event").value) q.set("include_task_history", "true");
-    if ($("retry_history").checked || $("retry_kind").value || $("retry_state").value) q.set("include_retry_history", "true");
+    const query = new URLSearchParams();
+    for (const key of [
+      "state", "stage", "time_basis", "source_status", "task_status", "task_event", "retry_kind", "retry_state",
+      "evidence_kind", "evidence_status",
+    ]) if ($(key).value) query.set(key, $(key).value);
+    addSharedFilters(query);
+    if ($("provider").value.trim()) query.set("provider", $("provider").value.trim());
+    if ($("source_history").checked) query.set("include_source_history", "true");
+    if ($("task_history").checked || $("task_event").value) query.set("include_task_history", "true");
+    if ($("retry_history").checked || $("retry_kind").value || $("retry_state").value) query.set("include_retry_history", "true");
+    if ($("evidence_history").checked || $("evidence_kind").value || $("evidence_status").value) query.set("include_evidence_history", "true");
     const [since, until] = periodRange();
-    if (since && !isNaN(since)) q.set("since", since.toISOString());
-    if (until && !isNaN(until)) q.set("until", until.toISOString());
-    q.set("limit", "100");
-    if (offset) q.set("offset", String(offset));
-    return q.toString();
+    if (since && !isNaN(since)) query.set("since", since.toISOString());
+    if (until && !isNaN(until)) query.set("until", until.toISOString());
+    query.set("limit", "100");
+    if (offset) query.set("offset", String(offset));
+    return query.toString();
+  }
+
+  function periodQueryString(offset) {
+    const [since, until] = periodRange();
+    if (!since || !until || isNaN(since) || isNaN(until)) return null;
+    const query = new URLSearchParams({
+      since: since.toISOString(), until: until.toISOString(),
+      bucket: $("bucket").value, timezone: $("timezone").value.trim(), limit: "100",
+    });
+    addSharedFilters(query);
+    if (offset) query.set("offset", String(offset));
+    return query.toString();
   }
 
   async function api(path) {
-    const res = await fetch(path, { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
+    const response = await fetch(path, { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
     let body = null;
-    try { body = await res.json(); } catch (_) { /* non-JSON error */ }
-    if (!res.ok) {
-      const err = new Error(body && body.error ? body.error.message : "HTTP " + res.status);
-      err.status = res.status;
-      throw err;
+    try { body = await response.json(); } catch (_) { /* non-JSON error */ }
+    if (!response.ok) {
+      const error = new Error(body && body.error ? body.error.message : "HTTP " + response.status);
+      error.status = response.status;
+      throw error;
     }
     return body;
   }
 
-  // The operator's request is a page range (`wantedPages`), not an event. "Load more" raises it immediately, and every
-  // fetch (initial, refresh, poll) re-reads pages 1..wantedPages, so an accepted Load more cannot be lost to a refresh.
+  async function fetchActivity(target, mine) {
+    const fresh = new Map();
+    let offset = 0, page, fetched = 0;
+    do {
+      page = await api("/api/v5/activity?" + queryString(offset));
+      if (mine !== generation) return null;
+      for (const entry of page.entries) fresh.set(entry.kind + ":" + entry.id, entry);
+      offset = page.next_offset;
+      fetched += 1;
+    } while (fetched < target && offset !== null);
+    return { fresh, page, fetched };
+  }
+
+  async function fetchPeriods(target, mine) {
+    if (periodQueryString(0) === null) return { disabled: true, fresh: new Map(), report: null, fetched: 0 };
+    const fresh = new Map();
+    let offset = 0, report, fetched = 0;
+    do {
+      report = await api("/api/v5/periods?" + periodQueryString(offset));
+      if (mine !== generation) return null;
+      for (const interval of report.active_intervals) fresh.set(interval.task_id + ":" + interval.active_from, interval);
+      offset = report.next_offset;
+      fetched += 1;
+    } while (fetched < target && offset !== null);
+    return { disabled: false, fresh, report, fetched };
+  }
+
   async function loadRange(quiet) {
     const mine = ++generation;
     if (!token) { setMessage("No access token. Open the URL printed by `stagemesh serve`.", "error"); return; }
     inflight = true;
-    if (!quiet) setMessage("Loading…");
-    const target = wantedPages;
+    if (!quiet) setMessage("Loading...");
+    const activityTarget = wantedPages, periodTarget = periodWantedPages;
     try {
-      const fresh = new Map();
-      let offset = 0;
-      let page;
-      let fetched = 0;
-      do {
-        page = await api("/api/v4/activity?" + queryString(offset));
-        if (mine !== generation) return; // a newer request for the same range superseded this one
-        for (const e of page.entries) fresh.set(e.kind + ":" + e.id, e);
-        offset = page.next_offset;
-        fetched += 1;
-      } while (fetched < target && offset !== null);
-      rows = fresh;
-      nextOffset = page.next_offset;
-      loadedPages = fetched;
-      wantedPages = fetched;
+      const [activity, periods] = await Promise.all([fetchActivity(activityTarget, mine), fetchPeriods(periodTarget, mine)]);
+      if (mine !== generation || activity === null || periods === null) return;
+      rows = activity.fresh;
+      nextOffset = activity.page.next_offset;
+      loadedPages = activity.fetched;
+      wantedPages = activity.fetched;
+      intervalRows = periods.fresh;
+      periodNextOffset = periods.report ? periods.report.next_offset : null;
+      periodLoadedPages = periods.fetched || 1;
+      periodWantedPages = periodLoadedPages;
       lastGood = new Date();
-      inflight = false;
-      render(page);
-    } catch (err) {
+      render(activity.page, periods);
+    } catch (error) {
       if (mine !== generation) return;
-      inflight = false;
-      wantedPages = loadedPages; // keep the last good range; a failed Load more leaves no phantom request
+      wantedPages = loadedPages;
+      periodWantedPages = periodLoadedPages;
       const stale = lastGood ? " Showing data from " + lastGood.toLocaleTimeString() + " (stale)." : "";
-      setMessage("Could not load activity: " + err.message + "." + stale, err.status === 400 ? "error" : "warn");
-      if ([400, 401, 403].includes(err.status)) {
+      setMessage("Could not load activity or periods: " + error.message + "." + stale, error.status === 400 ? "error" : "warn");
+      if ([400, 401, 403].includes(error.status)) {
         $("auto").checked = false;
-        schedule(); // terminal request/access errors require an explicit correction and polling opt-in
+        schedule();
       }
-      if (err.status === 401 || err.status === 403) { rows = new Map(); renderRows(); }
+      if (error.status === 401 || error.status === 403) {
+        rows = new Map(); intervalRows = new Map(); renderRows(); renderIntervals();
+      }
+    } finally {
+      if (mine === generation) inflight = false;
     }
   }
 
   const refresh = () => loadRange(false);
-  const reload = () => { wantedPages = 1; loadRange(false); }; // a changed filter starts again from page one
+  const reload = () => { wantedPages = 1; periodWantedPages = 1; loadRange(false); };
   const loadMore = () => {
     if (nextOffset === null) return;
     wantedPages = Math.min(wantedPages + 1, MAX_PAGES);
+    loadRange(false);
+  };
+  const loadMorePeriods = () => {
+    if (periodNextOffset === null) return;
+    periodWantedPages = Math.min(periodWantedPages + 1, MAX_PAGES);
     loadRange(false);
   };
 
@@ -135,58 +185,148 @@
     return (x < y ? -1 : 1) * sort.dir;
   }
 
-  function cell(tr, text, cls) {
-    const td = tr.insertCell();
-    td.textContent = text === null || text === undefined ? "—" : String(text);
+  function cell(row, text, cls) {
+    const td = row.insertCell();
+    td.textContent = text === null || text === undefined ? "-" : String(text);
     if (cls) td.className = cls;
     return td;
+  }
+
+  function enterDrill(taskId) {
+    if (!drillState) {
+      drillState = {};
+      for (const id of [
+        "task", "provider", "task_event", "retry_kind", "retry_state", "evidence_kind", "evidence_status",
+        "source_history", "task_history", "retry_history", "evidence_history",
+      ]) drillState[id] = $(id).type === "checkbox" ? $(id).checked : $(id).value;
+    }
+    $("task").value = taskId;
+    $("provider").value = "";
+    for (const id of ["task_event", "retry_kind", "retry_state", "evidence_kind", "evidence_status"]) $(id).value = "";
+    for (const id of ["source_history", "task_history", "retry_history", "evidence_history"]) $(id).checked = true;
+    $("drill-task").textContent = taskId;
+    $("drill").hidden = false;
+    reload();
+  }
+
+  function exitDrill() {
+    if (!drillState) return;
+    for (const [id, value] of Object.entries(drillState)) {
+      if ($(id).type === "checkbox") $(id).checked = value;
+      else $(id).value = value;
+    }
+    drillState = null;
+    $("drill").hidden = true;
+    reload();
   }
 
   function renderRows() {
     const body = $("rows");
     const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
     body.replaceChildren();
-    for (const e of [...rows.values()].sort(cmp)) {
-      const tr = body.insertRow();
-      cell(tr, new Date(e.at).toLocaleString()).title = e.at;
-      cell(tr, e.kind);
-      cell(tr, e.state, "state-" + e.state);
-      const td = cell(tr, "");
-      if (e.task_id) {
-        const b = document.createElement("button");
-        b.type = "button"; b.textContent = e.task_id; b.title = "Show only this task";
-        b.dataset.key = e.kind + ":" + e.id;
-        b.addEventListener("click", () => { $("task").value = e.task_id; reload(); });
-        td.replaceChildren(b);
-      } else td.textContent = "—";
-      cell(tr, e.stage); cell(tr, e.current_task_status || e.status); cell(tr, e.source_status); cell(tr, e.provider);
-      cell(tr, e.title || [
-        e.execution_kind, e.event_type, e.result_code, e.retry_kind, e.retry_state,
-        e.rework_required && "rework required", e.previous_task_status && (e.previous_task_status + " → " + e.status),
-        e.previous_source_status && (e.previous_source_status + " → " + e.source_status),
-        e.candidate_sha && e.candidate_sha.slice(0, 12),
+    for (const entry of [...rows.values()].sort(cmp)) {
+      const row = body.insertRow();
+      cell(row, new Date(entry.at).toLocaleString()).title = entry.at;
+      cell(row, entry.kind);
+      cell(row, entry.state, "state-" + entry.state);
+      const task = cell(row, "");
+      if (entry.task_id) {
+        const button = document.createElement("button");
+        button.type = "button"; button.textContent = entry.task_id; button.title = "Open recorded task history";
+        button.dataset.key = entry.kind + ":" + entry.id;
+        button.addEventListener("click", () => enterDrill(entry.task_id));
+        task.replaceChildren(button);
+      } else task.textContent = "-";
+      cell(row, entry.stage); cell(row, entry.current_task_status || entry.status);
+      cell(row, entry.source_status); cell(row, entry.provider);
+      cell(row, entry.title || [
+        entry.execution_kind, entry.event_type, entry.result_code, entry.retry_kind, entry.retry_state,
+        entry.evidence_kind, entry.evidence_status,
+        entry.rework_required && "rework required",
+        entry.previous_task_status && (entry.previous_task_status + " -> " + entry.status),
+        entry.previous_source_status && (entry.previous_source_status + " -> " + entry.source_status),
+        entry.candidate_sha && entry.candidate_sha.slice(0, 12),
       ].filter(Boolean).join(" "));
-      cell(tr, e.id);
+      cell(row, entry.id);
     }
-    // Rebuilding rows must not drop keyboard focus (auto-refresh runs every few seconds).
     if (focused) {
-      const again = [...body.querySelectorAll("button")].find((b) => b.dataset.key === focused);
+      const again = [...body.querySelectorAll("button")].find((button) => button.dataset.key === focused);
       if (again) again.focus();
-      else $("table").focus(); // the focused row is gone from the new result: fall back to a predictable target
+      else $("table").focus();
     }
   }
 
-  function render(page) {
+  function renderSeries(report) {
+    const body = $("series-rows");
+    body.replaceChildren();
+    if (!report) return;
+    for (const bucket of report.series) {
+      const row = body.insertRow();
+      const range = cell(row, new Date(bucket.start).toLocaleString() + " - " + new Date(bucket.end).toLocaleString());
+      range.title = bucket.start + " / " + bucket.end;
+      cell(row, bucket.opened_occurrences); cell(row, bucket.opened_tasks);
+      cell(row, bucket.completed_occurrences); cell(row, bucket.completed_tasks);
+    }
+  }
+
+  function renderIntervals() {
+    const body = $("interval-rows");
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.intervalKey : null;
+    body.replaceChildren();
+    for (const interval of intervalRows.values()) {
+      const row = body.insertRow();
+      const task = cell(row, "");
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = interval.task_id; button.title = "Open recorded task history";
+      button.dataset.intervalKey = interval.task_id + ":" + interval.active_from;
+      button.addEventListener("click", () => enterDrill(interval.task_id));
+      task.replaceChildren(button);
+      const start = cell(row, new Date(interval.active_from).toLocaleString()); start.title = interval.active_from;
+      const end = cell(row, interval.active_until ? new Date(interval.active_until).toLocaleString() : "Still active");
+      if (interval.active_until) end.title = interval.active_until;
+      cell(row, interval.current_status); cell(row, interval.stage); cell(row, interval.project); cell(row, interval.source);
+    }
+    if (focused) {
+      const again = [...body.querySelectorAll("button")].find((button) => button.dataset.intervalKey === focused);
+      if (again) again.focus();
+      else $("interval-table").focus();
+    }
+  }
+
+  function renderPeriods(periods) {
+    if (periods.disabled) {
+      $("period-results").hidden = true;
+      $("period-note").hidden = false;
+      $("period-note").textContent = "Choose a bounded period to view recorded intervals and opened/completed series.";
+      return;
+    }
+    const report = periods.report;
+    $("period-note").hidden = true;
+    $("period-results").hidden = false;
+    renderSeries(report);
+    renderIntervals();
+    const focused = document.activeElement === $("period-more");
+    $("period-more").hidden = periodNextOffset === null;
+    if (focused && periodNextOffset === null) $("interval-table").focus();
+    $("period-count").textContent = intervalRows.size + " loaded of " + report.total_intervals;
+    $("period-summary").textContent = [
+      "Timezone " + report.timezone, "bucket " + report.bucket,
+      "considered tasks " + report.considered_tasks, "history unavailable " + report.unavailable_tasks,
+      report.truncated ? "task scan truncated" : "task scan complete",
+    ].join(" | ");
+  }
+
+  function render(page, periods) {
     renderRows();
     const moreHadFocus = document.activeElement === $("more");
     $("more").hidden = nextOffset === null;
-    if (moreHadFocus && nextOffset === null) $("table").focus(); // the button vanished; keep focus in the page
+    if (moreHadFocus && nextOffset === null) $("table").focus();
     $("count").textContent = rows.size + " loaded of " + page.total + (page.truncated ? "+" : "");
-    const counts = page.status_counts || {};
-    const taskCounts = counts.task || {};
+    const taskCounts = (page.status_counts || {}).task || {};
     $("status-counts").textContent = ["OPEN", "CLAIMED", "BLOCKED", "DONE"]
-      .map((key) => key + " " + (taskCounts[key] || 0)).join(" · ");
+      .map((key) => key + " " + (taskCounts[key] || 0)).join(" | ");
     $("freshness").textContent = "updated " + lastGood.toLocaleTimeString();
+    renderPeriods(periods);
     if (page.truncated) setMessage("Older records were excluded by the retention cap; narrow the time range for a complete view.", "warn");
     else if (rows.size === 0) setMessage("No activity matches these filters.");
     else setMessage("");
@@ -196,18 +336,16 @@
     const head = $("head");
     for (const [key, label] of COLUMNS) {
       const th = document.createElement("th");
-      th.scope = "col";
-      th.setAttribute("aria-sort", "none");
-      const b = document.createElement("button");
-      b.type = "button"; b.textContent = label;
-      b.addEventListener("click", () => {
+      th.scope = "col"; th.setAttribute("aria-sort", "none");
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = label;
+      button.addEventListener("click", () => {
         sort = { key, dir: sort.key === key ? -sort.dir : 1 };
-        for (const h of head.children) h.setAttribute("aria-sort", "none");
+        for (const item of head.children) item.setAttribute("aria-sort", "none");
         th.setAttribute("aria-sort", sort.dir === 1 ? "ascending" : "descending");
         renderRows();
       });
-      th.append(b);
-      head.append(th);
+      th.append(button); head.append(th);
     }
     head.children[0].setAttribute("aria-sort", "descending");
   }
@@ -218,25 +356,34 @@
   }
 
   buildHead();
-  $("filters").addEventListener("submit", (e) => e.preventDefault());
+  $("timezone").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  $("filters").addEventListener("submit", (event) => event.preventDefault());
   for (const id of [
-    "period", "since", "until", "state", "stage", "time_basis", "source_status", "task_status",
-    "task_event", "retry_kind", "retry_state", "source_history", "task_history", "retry_history",
+    "period", "since", "until", "bucket", "timezone", "state", "stage", "time_basis", "source_status", "task_status",
+    "task_event", "retry_kind", "retry_state", "evidence_kind", "evidence_status",
+    "source_history", "task_history", "retry_history", "evidence_history",
   ]) $(id).addEventListener("change", () => {
     for (const el of document.querySelectorAll(".custom")) el.hidden = $("period").value !== "custom";
     reload();
   });
-  for (const id of ["task", "provider", "project", "source"]) $(id).addEventListener("change", reload);
+  for (const id of ["provider", "project", "source"]) $(id).addEventListener("change", reload);
+  $("task").addEventListener("change", () => {
+    if (drillState && !$("task").value.trim()) exitDrill();
+    else reload();
+  });
+  $("exit-drill").addEventListener("click", exitDrill);
   $("refresh").addEventListener("click", refresh);
   $("more").addEventListener("click", loadMore);
+  $("period-more").addEventListener("click", loadMorePeriods);
   $("auto").addEventListener("change", schedule);
-  document.addEventListener("keydown", (e) => {
+  document.addEventListener("keydown", (event) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
-    if (e.ctrlKey || e.metaKey || e.altKey || typing) return;
-    if (e.key === "/") { e.preventDefault(); $("task").focus(); }
-    else if (e.key === "r") refresh();
+    if (event.ctrlKey || event.metaKey || event.altKey || typing) return;
+    if (event.key === "/") { event.preventDefault(); $("task").focus(); }
+    else if (event.key === "r") refresh();
+    else if (event.key === "Escape" && drillState) exitDrill();
   });
-  api("/api/v4/health").then((h) => { $("version").textContent = "v" + h.version; }, () => {});
+  api("/api/v5/health").then((health) => { $("version").textContent = "v" + health.version; }, () => {});
   loadRange(false);
   schedule();
 })();

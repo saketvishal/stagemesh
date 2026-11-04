@@ -11,6 +11,7 @@ import pytest
 
 from stagemesh.activity import MAX_LIMIT
 from stagemesh.api_server import ActivityApi, make_server, parse_query
+from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.persistence import Store
 
 TOKEN = "test-token"
@@ -82,6 +83,14 @@ def _direct_v3(db, target="/api/v3/activity", *, method="GET", headers=None):
 
 
 def _direct_v4(db, target="/api/v4/activity", *, method="GET", headers=None):
+    api = ActivityApi(db, TOKEN)
+    api.bind(12345)
+    defaults = {"Host": "127.0.0.1:12345", "Authorization": f"Bearer {TOKEN}"}
+    status, raw, extra = api.handle(method, target, defaults if headers is None else headers)
+    return status, json.loads(raw), extra
+
+
+def _direct_v5(db, target="/api/v5/activity", *, method="GET", headers=None):
     api = ActivityApi(db, TOKEN)
     api.bind(12345)
     defaults = {"Host": "127.0.0.1:12345", "Authorization": f"Bearer {TOKEN}"}
@@ -226,6 +235,74 @@ def test_v4_projects_typed_retry_history_without_changing_v3(db):
     assert all("retry_kind" not in item for item in v3["entries"])
     assert _direct_v3(db, "/api/v3/activity?include_retry_history=true")[0] == 400
     assert db.read_bytes() == before
+
+
+def test_v5_projects_typed_evidence_without_changing_v4(db):
+    store = Store(db)
+    task = store.upsert_task("evidence history", source_id="evidence-history")
+    candidate = "a" * 40
+    evidence = store.add_evidence(
+        task,
+        candidate,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {"token": "private", "findings": [{"message": "provider output"}]},
+    )
+    store.close()
+    before = db.read_bytes()
+
+    status, body, _ = _direct_v5(
+        db,
+        "/api/v5/activity?task_id=" + task
+        + "&include_evidence_history=true&evidence_kind=REVIEW&evidence_status=FAILED",
+    )
+    assert status == 200 and body["contract"] == "stagemesh.activity/5"
+    assert [entry["id"] for entry in body["entries"]] == [evidence]
+    entry = body["entries"][0]
+    assert entry["kind"] == "evidence"
+    assert (entry["evidence_kind"], entry["evidence_status"]) == ("REVIEW", "FAILED")
+    assert entry["candidate_sha"] == candidate and "payload" not in entry
+    assert body["status_counts"]["evidence"]["REVIEW"] == 1
+    assert body["status_counts"]["evidence_outcome"]["FAILED"] == 1
+
+    _, v4, _ = _direct_v4(db, "/api/v4/activity?task_id=" + task)
+    assert "evidence" not in v4["status_counts"] and "evidence_outcome" not in v4["status_counts"]
+    assert all("evidence_kind" not in item and "evidence_status" not in item for item in v4["entries"])
+    assert _direct_v4(db, "/api/v4/activity?include_evidence_history=true")[0] == 400
+    assert db.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "evidence_kind=HANDOFF&include_evidence_history=true",
+        "evidence_kind=REVIEW",
+        "evidence_status=MAYBE&include_evidence_history=true",
+        "evidence_status=FAILED",
+        "include_evidence_history=1",
+        "include_evidence_history=true&include_evidence_history=false",
+        "task_event=status_changed&include_task_history=true&evidence_kind=REVIEW&include_evidence_history=true",
+    ],
+)
+def test_v5_invalid_evidence_filters_use_v5_error_envelope(db, query):
+    status, body, _ = _direct_v5(db, "/api/v5/activity?" + query)
+    assert status == 400 and body["contract"] == "stagemesh.activity/5"
+    assert body["error"]["code"] == "invalid_query"
+
+
+def test_v5_health_periods_and_auth_errors_use_v5_contract(db):
+    status, body, _ = _direct_v5(db, "/api/v5/health")
+    assert status == 200 and body["contract"] == "stagemesh.activity/5"
+    status, body, _ = _direct_v5(
+        db,
+        "/api/v5/periods?since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00Z",
+    )
+    assert status == 200 and body["contract"] == "stagemesh.activity/5"
+    status, body, _ = _direct_v5(
+        db,
+        headers={"Host": "127.0.0.1:12345", "Authorization": "Bearer wrong"},
+    )
+    assert status == 401 and body["contract"] == "stagemesh.activity/5"
 
 
 def test_v4_periods_reports_recorded_active_intervals_and_series_read_only(db):

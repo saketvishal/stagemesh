@@ -319,9 +319,35 @@ states. Generic audit rows for the same allowlisted events are replaced only whe
 retry history is explicitly enabled. The CLI equivalents are `--retry-history`,
 `--retry-kind` and `--retry-state`.
 
+## Version 5: typed validation, review and integration evidence
+
+`GET /api/v5/activity` and `GET /api/v5/health` use contract
+`stagemesh.activity/5`. V5 retains every V4 field and adds explicit opt-in
+`include_evidence_history=true` through the `include_evidence_history` query
+field, exact `evidence_kind` values `VALIDATION`, `REVIEW` and `INTEGRATION`,
+and exact `evidence_status` values `PASSED`,
+`FAILED`, `CAPACITY` and `UNKNOWN`. Kind/status filters require the opt-in and
+select evidence occurrences only; they cannot be combined with task-event or
+retry filters.
+
+An evidence entry has `kind=evidence`, `event_type=evidence.recorded`, the
+allowlisted kind/outcome, exact task identity, safe candidate identity and the
+task/source's current recorded state. It is a closed historical occurrence, not
+proof that the task or source is currently closed. Evidence payloads, findings,
+commands, URLs, credentials and provider output are never selected or serialized.
+Malformed candidates are omitted; unallowlisted kinds/statuses fail closed.
+`status_counts.evidence` partitions kinds and `status_counts.evidence_outcome`
+partitions outcomes. Evidence supports only `activity` and `updated` time bases.
+
+V1-V4 reject V5-only parameters and omit V5-only fields/counts. The CLI options
+are `--evidence-history`, `--evidence-kind` and `--evidence-status`; JSON uses the
+V5 serializer. No migration is required because this is a bounded projection of
+the existing durable evidence table.
+
 ## V4 recorded periods and series
 
-`GET /api/v4/periods` is a separate bounded report because an interval is not a
+`GET /api/v4/periods` and its shape-compatible V5 route are separate bounded
+reports because an interval is not a
 point event. It requires RFC 3339 `since` and `until`; accepts `bucket=day|week`,
 an IANA `timezone` (default `UTC`), and exact `task_id`, `project` and `source`
 filters plus active-interval `limit` (1-200) and `offset` (0-999). The matching
@@ -357,11 +383,13 @@ V4 adds durable task block/reopen/DONE and candidate-bound rework occurrences fr
 this release forward. Successful durable claims add `OPEN -> CLAIMED`, while explicit
 release, confirmed-stale recovery and safe unknown-execution fencing add
 `CLAIMED -> OPEN`; rejected/duplicate claims and unchanged releases add nothing.
-The shipped loopback dashboard now requests V4 and exposes its project, time-basis,
-source/task status, source/task history, task-event and retry filters. It renders
-`current_task_status` separately from `source_status` and treats historical status
-as event detail, not present state. The dashboard has not yet rendered the separate
-period-series route. Cross-store aggregation remains outside this slice.
+The shipped loopback dashboard now requests V5 and exposes project, time-basis,
+source/task status and source/task/retry/evidence history filters. A task drill-down
+opts into every typed retained history while labelling retention/truncation honestly.
+The dashboard renders the recorded period route as an opened/completed series and
+an independently paged active-interval table, with day/week bucket, IANA timezone,
+This week and This month controls. It never rebuckets or reconstructs history in
+the browser. Cross-store aggregation and a project-switcher remain outside this slice.
 Earlier task/source changes were not recorded and cannot be reconstructed from
 current state. The parent objective is not complete merely because this projection is.
 
@@ -387,8 +415,9 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
    existing project registry, so no server aggregates stores and the auth and error model stays per project.
 7. **Projection growth:** #450 introduces `/api/v2` and `stagemesh.activity/2` for explicit period semantics,
    recorded project attribution and partitioned counts. `/api/v1` remains an unchanged compatibility adapter.
-   The shipped dashboard adopts V4 explicitly. V3 adds linked-source fields and opt-in transition
-   occurrences; V4 adds typed task status/rework/retry occurrences. Every version preserves earlier response shapes.
+   The shipped dashboard adopts V5 explicitly. V3 adds linked-source fields and opt-in transition
+   occurrences; V4 adds typed task status/rework/retry occurrences; V5 adds typed evidence outcomes.
+   Every version preserves earlier response shapes.
    Migration 7 adds only the durable retry-to-execution correlation table; activity queries remain read-only.
 8. **Health and version route:** `GET /api/v1/health`. Implemented (#446).
 9. **Dependencies:** the server remains standard-library Python and the UI remains dependency-free HTML, CSS and JavaScript

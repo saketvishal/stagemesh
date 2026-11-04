@@ -1395,6 +1395,13 @@ def _activity_entry_text(entry: ActivityEntry) -> str:
         fields.extend((f"retry_kind={entry.retry_kind}", f"retry_state={entry.retry_state or '-'}"))
         if entry.retry_attempt is not None:
             fields.append(f"retry_attempt={entry.retry_attempt}/{entry.retry_limit}")
+    if entry.evidence_kind:
+        fields.extend(
+            (
+                f"evidence_kind={entry.evidence_kind}",
+                f"evidence_status={entry.evidence_status or '-'}",
+            )
+        )
     detail = entry.title or entry.event_type or entry.result_code
     if detail:
         fields.append(detail)
@@ -1445,6 +1452,9 @@ def command_activity(args: argparse.Namespace) -> int:
             retry_kind=args.retry_kind,
             retry_state=args.retry_state,
             include_retry_history=args.retry_history,
+            evidence_kind=args.evidence_kind,
+            evidence_status=args.evidence_status,
+            include_evidence_history=args.evidence_history,
         )
         connection = sqlite3.connect(f"{activity_db.as_uri()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
@@ -1459,7 +1469,7 @@ def command_activity(args: argparse.Namespace) -> int:
         print("activity error: activity store is unavailable", file=sys.stderr)
         return 2
     if args.json:
-        print(json.dumps(serialize_page(page, version=4), indent=2, sort_keys=True))
+        print(json.dumps(serialize_page(page, version=5), indent=2, sort_keys=True))
     else:
         print(_format_activity_page(page))
     return 0
@@ -5144,6 +5154,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry-history",
         action="store_true",
         help="Include typed automatic, remediation and operator retry occurrences",
+    )
+    activity.add_argument(
+        "--evidence-kind",
+        choices=("VALIDATION", "REVIEW", "INTEGRATION"),
+        help="Exact typed evidence occurrence kind",
+    )
+    activity.add_argument(
+        "--evidence-status",
+        choices=("PASSED", "FAILED", "CAPACITY", "UNKNOWN"),
+        help="Exact typed evidence outcome",
+    )
+    activity.add_argument(
+        "--evidence-history",
+        action="store_true",
+        help="Include typed validation, review and integration outcomes",
     )
     activity.add_argument("--since", metavar="ISO8601", help="Inclusive instant with a UTC offset")
     activity.add_argument("--until", metavar="ISO8601", help="Exclusive instant with a UTC offset")

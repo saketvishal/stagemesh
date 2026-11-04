@@ -21,11 +21,17 @@
       <option value="yesterday">Yesterday</option>
       <option value="7d">Last 7 days</option>
       <option value="30d">Last 30 days</option>
+      <option value="week">This week</option>
+      <option value="month">This month</option>
       <option value="custom">Custom range</option>
     </select>
   </label>
   <label class="custom" hidden>From <input id="since" type="datetime-local"></label>
   <label class="custom" hidden>To <input id="until" type="datetime-local"></label>
+  <label>Series bucket
+    <select id="bucket"><option value="day">Day</option><option value="week">Week</option></select>
+  </label>
+  <label>Timezone <input id="timezone" type="text" maxlength="100" value="UTC" placeholder="IANA timezone"></label>
   <label>State
     <select id="state"><option value="">All</option><option value="open">Open</option><option value="closed">Closed</option></select>
   </label>
@@ -61,12 +67,24 @@
   <label>Retry state
     <select id="retry_state"><option value="">All</option><option>QUEUED</option><option>CLAIMED</option><option>RUNNING</option><option>SUCCEEDED</option><option>FAILED</option><option>UNKNOWN</option><option>SUPERSEDED</option></select>
   </label>
+  <label>Evidence kind
+    <select id="evidence_kind"><option value="">All</option><option>VALIDATION</option><option>REVIEW</option><option>INTEGRATION</option></select>
+  </label>
+  <label>Evidence status
+    <select id="evidence_status"><option value="">All</option><option>PASSED</option><option>FAILED</option><option>CAPACITY</option><option>UNKNOWN</option></select>
+  </label>
   <label class="inline"><input id="source_history" type="checkbox"> Source history</label>
   <label class="inline"><input id="task_history" type="checkbox"> Task history</label>
   <label class="inline"><input id="retry_history" type="checkbox"> Retry history</label>
+  <label class="inline"><input id="evidence_history" type="checkbox"> Evidence history</label>
   <button type="button" id="refresh">Refresh (r)</button>
   <label class="inline"><input id="auto" type="checkbox" checked> Auto-refresh</label>
 </form>
+<aside id="drill" hidden aria-live="polite">
+  Recorded retained history for task <strong id="drill-task"></strong>.
+  Current state and historical outcomes are separate; a retention warning means this view is incomplete.
+  <button type="button" id="exit-drill">Exit task history (Esc)</button>
+</aside>
 <p id="message" role="status" aria-live="polite"></p>
 <table id="table" tabindex="-1">
   <caption class="sr">Activity, newest first. Select a column header to sort the loaded rows.</caption>
@@ -74,6 +92,26 @@
   <tbody id="rows"></tbody>
 </table>
 <p><button type="button" id="more" hidden>Load more</button> <span id="count" class="muted"></span> <span id="status-counts" class="muted" aria-live="polite"></span></p>
+<section aria-labelledby="period-heading">
+  <h2 id="period-heading">Recorded period view</h2>
+  <p id="period-note" class="muted"></p>
+  <div id="period-results" hidden>
+    <p id="period-summary" class="muted" role="status"></p>
+    <h3>Opened and completed</h3>
+    <table id="series-table">
+      <caption class="sr">Server-recorded opened and completed counts by period bucket.</caption>
+      <thead><tr><th scope="col">Bucket</th><th scope="col">Opened events</th><th scope="col">Opened tasks</th><th scope="col">Completed events</th><th scope="col">Completed tasks</th></tr></thead>
+      <tbody id="series-rows"></tbody>
+    </table>
+    <h3>Active at any point</h3>
+    <table id="interval-table" tabindex="-1">
+      <caption class="sr">Recorded task intervals overlapping the selected period.</caption>
+      <thead><tr><th scope="col">Task</th><th scope="col">Active from</th><th scope="col">Active until</th><th scope="col">Current status</th><th scope="col">Stage</th><th scope="col">Project</th><th scope="col">Source</th></tr></thead>
+      <tbody id="interval-rows"></tbody>
+    </table>
+    <p><button type="button" id="period-more" hidden>Load more intervals</button> <span id="period-count" class="muted"></span></p>
+  </div>
+</section>
 <script src="/app.js"></script>
 </body>
 </html>
