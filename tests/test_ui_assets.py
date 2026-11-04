@@ -66,7 +66,9 @@ def test_ui_source_is_csp_safe_and_never_injects_html():
     for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "localStorage", "sessionStorage"):
         assert banned not in js, banned
     assert "history.replaceState" in js and "location.hash" in js  # token read once, then removed from the address bar
-    assert "Authorization" in js and "/api/v1/activity" in js
+    assert "Authorization" in js and "/api/v4/activity" in js
+    assert "/api/v4/health" in js
+    assert "include_task_history" in js and "include_retry_history" in js and "retry_state" in js
 
 
 def test_ui_covers_contract_states_and_filters():

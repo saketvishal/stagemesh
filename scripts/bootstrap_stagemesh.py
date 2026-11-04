@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         _run(str(py), "-m", "pip", "install", "--upgrade", "-e", f"{ROOT}[dev]")
     else:
         # A real copy of the package: the checkout may move, change branch or disappear without affecting this runtime.
-        _run(str(py), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", str(ROOT))
+        _run(str(py), "-m", "pip", "install", "--upgrade", "--force-reinstall", str(ROOT))
     installed_version = _installed_version(py)
     for label, expected in (("repository source", _source_version()), ("configured version", _configured_version())):
         if expected and installed_version and expected != installed_version:

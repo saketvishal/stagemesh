@@ -90,6 +90,73 @@ def test_activity_cli_filters_and_displays_linked_source_history(
     assert database.read_bytes() == before
 
 
+def test_activity_cli_filters_and_displays_task_rework_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, task_id, _execution_id = _project(tmp_path)
+    database = cli_module.db_path(project)
+    store = Store(database)
+    store.block_task(task_id)
+    assert store.unblock_task(task_id)
+    candidate = "a" * 40
+    rework = store.add_audit_event(
+        "task.remediation_queued",
+        {"task_id": task_id, "candidate_sha": candidate, "stage": "REVIEW"},
+    )
+    store.close()
+    before = database.read_bytes()
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--task", task_id,
+        "--task-event", "rework_required", "--task-history", "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [entry["id"] for entry in payload["entries"]] == [rework]
+    assert payload["entries"][0]["rework_required"] is True
+    assert payload["entries"][0]["candidate_sha"] == candidate
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--task", task_id, "--task-history",
+    ]) == 0
+    text = capsys.readouterr().out
+    assert "previous_task_status=BLOCKED" in text
+    assert "rework_required=true" in text
+    assert database.read_bytes() == before
+
+
+def test_activity_cli_filters_and_displays_typed_retry_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, task_id, _execution_id = _project(tmp_path)
+    database = cli_module.db_path(project)
+    store = Store(database)
+    retry = store.add_audit_event(
+        "task.auto_retried_provider_failure",
+        {"task_id": task_id, "attempt": 1, "of": 2},
+    )
+    store.close()
+    before = database.read_bytes()
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--task", task_id,
+        "--retry-kind", "automatic_provider", "--retry-state", "QUEUED",
+        "--retry-history", "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [entry["id"] for entry in payload["entries"]] == [retry]
+    assert payload["entries"][0]["retry_kind"] == "automatic_provider"
+    assert payload["entries"][0]["retry_state"] == "QUEUED"
+    assert payload["entries"][0]["retry_attempt"] == 1
+
+    assert cli_module.main([
+        "--project", str(project), "activity", "--task", task_id, "--retry-history",
+    ]) == 0
+    text = capsys.readouterr().out
+    assert "retry_kind=automatic_provider" in text
+    assert "retry_attempt=1/2" in text
+    assert database.read_bytes() == before
+
+
 def test_activity_text_is_bounded_and_shows_pagination_hint(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -184,6 +251,7 @@ def test_activity_week_preserves_a_local_offset_transition() -> None:
         ["--offset", "-1"],
         ["--source", "token-secret"],
         ["--source-status", "has spaces"],
+        ["--task-event", "status_changed"],
     ],
 )
 def test_activity_rejects_invalid_ranges_and_pagination(

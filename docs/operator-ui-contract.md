@@ -255,20 +255,115 @@ fixed `OPEN`, `CLOSED` and `UNKNOWN` buckets and counts retained transition
 occurrences, not source issues or delivered tasks.
 
 The V1 and V2 routes remain compatibility adapters: they reject V3-only query
-parameters and omit every V3-only entry field and count group. The CLI adopts
-the V3 serializer for JSON and exposes `--source`, `--source-status` and the
-explicit `--source-history` opt-in. Existing calls without those options retain
-the previous feed shape and do not include transition occurrences.
+parameters and omit every V3-only entry field and count group. V3 introduced CLI
+`--source`, `--source-status` and explicit `--source-history` options. Existing
+calls without those options retain the previous feed shape and do not include
+source transition occurrences.
+
+## Version 4: task status and rework occurrences
+
+`GET /api/v4/activity` and `GET /api/v4/health` use contract
+`stagemesh.activity/4`. V4 retains all V3 behavior and adds:
+
+| Parameter | Type | Rule |
+| --- | --- | --- |
+| `task_status` | `OPEN`, `CLAIMED`, `BLOCKED`, `DONE` | Exact current status for ordinary rows; exact transition destination for task-history rows |
+| `task_event` | `status_changed` or `rework_required` | Exact typed task occurrence; requires `include_task_history=true` |
+| `include_task_history` | `true` or `false` | Opt in to durable task status and rework occurrences; default `false` |
+
+V4 adds `task_transition` entries plus nullable `previous_task_status`,
+`current_task_status` and boolean `rework_required` fields. A status occurrence
+records a real durable status change only; repeated block/unblock calls and an
+OPEN-to-OPEN stage change do not invent occurrences. A rework occurrence exists
+only for a recorded `task.remediation_queued` event with a valid candidate SHA
+and failed stage. Provider prose, task titles and current stage never imply
+rework.
+
+For task-history entries, `status` is the historical transition destination (or
+`REWORK_REQUIRED`), while `current_task_status` is the task's present recorded
+status. `stage` is the recorded transition/failed stage. Source fields remain the
+linked source's current recorded state. These values are deliberately separate:
+source closure does not close a task, and a historical reopen does not say the
+task is currently open.
+
+Task history supports only the `activity` and `updated` time bases. It uses the
+same inclusive `since`, exclusive `until`, retention and pagination rules as the
+other occurrence feeds. `status_counts.task_transition` has fixed `OPEN`,
+`CLAIMED`, `BLOCKED`, `DONE`, `REWORK_REQUIRED` and `UNKNOWN` buckets. Counts
+are occurrences, not unique tasks. Malformed or stale typed payloads are omitted,
+and missing pre-feature history is not reconstructed.
+
+V1-V3 reject V4-only parameters and omit V4-only fields, entries and count group.
+When V4 history is opted in, typed task events replace their generic audit rows
+to avoid duplicates; earlier contracts retain their prior generic audit view.
+The CLI exposes `--task-status`, `--task-event` and `--task-history` and uses the
+V4 serializer for JSON.
+
+V4 also supports typed retry occurrences with `include_retry_history` set to
+true, an optional exact `retry_kind` of `automatic_provider`, `blocked_reentry`,
+`remediation` or `operator`, and an optional exact `retry_state` of `QUEUED`,
+`CLAIMED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN` or `SUPERSEDED`. A retry
+entry uses `kind=retry`, a fixed `event_type=task.retry_queued`, and the allowlisted
+kind/state. Bounded positive `retry_attempt` and `retry_limit` are
+present only when both are valid and the attempt does not exceed the limit.
+`candidate_sha` is emitted only when the durable event carries a valid candidate
+identifier. Current task state remains in `current_task_status`. Migration 7
+records the exact retry-event -> claim -> first execution relationship at those
+transactional boundaries; only that linked execution can change the retry outcome.
+An initial execution is never relabeled by ordinal position. A new queued retry
+marks an older unstarted retry `SUPERSEDED`, and releasing its claim before an
+execution returns it to `QUEUED`. Execution kind, safe actor and allowlisted result
+code come from the linked execution row; provider text is never interpreted.
+`status_counts.retry` partitions kinds and `status_counts.retry_outcome` partitions
+states. Generic audit rows for the same allowlisted events are replaced only when
+retry history is explicitly enabled. The CLI equivalents are `--retry-history`,
+`--retry-kind` and `--retry-state`.
+
+## V4 recorded periods and series
+
+`GET /api/v4/periods` is a separate bounded report because an interval is not a
+point event. It requires RFC 3339 `since` and `until`; accepts `bucket=day|week`,
+an IANA `timezone` (default `UTC`), and exact `task_id`, `project` and `source`
+filters plus active-interval `limit` (1-200) and `offset` (0-999). The matching
+CLI is `stagemesh activity-periods --since ... --until ...` with `--bucket`,
+`--timezone`, `--task`, `--activity-project`, `--source`, `--limit` and `--offset`.
+
+The response contains `active_intervals` and `series`. Each interval carries the
+recorded `active_from`, nullable `active_until`, current task status/stage and
+bounded task/source attribution. An interval overlaps the requested half-open
+window when its start is before `until` and its end is absent or after `since`.
+BLOCKED and CLAIMED remain active work; only a recorded transition to DONE closes
+an interval, and a recorded DONE-to-non-DONE transition opens a new one.
+`total_intervals`, `limit`, `offset` and nullable `next_offset` make interval
+pagination explicit. The series and task counts cover the complete bounded query,
+not only the current interval page.
+
+Each day/week series bucket has UTC `start`/`end` instants derived from local
+calendar boundaries in the selected timezone, so 23/25-hour daylight-saving days
+remain correct. `opened_occurrences` includes the recorded creation and every
+recorded reopen; `completed_occurrences` includes every exact transition to DONE.
+`opened_tasks` and `completed_tasks` are unique within that bucket, so a repeated
+occurrence never silently inflates its unique-task count.
+
+Only tasks with one `task.created` anchor, a continuous valid status chain and a
+final recorded status matching the task row contribute. Earlier or inconsistent
+history is counted in `unavailable_tasks`, never reconstructed. `considered_tasks`
+is bounded to 200 after exact filters; `truncated=true` requires a narrower query.
+The report is read-only and returns no titles, audit payloads or provider output.
 
 ## Known gaps against #134
 
-V3 adds current linked-source state and durable source close/reopen transitions
-from this release forward. The existing V1 dashboard has not adopted V2 or V3.
-Task reopen history, retry classification, active-at-any-point intervals,
-opened-versus-completed series, rework classification and cross-store aggregation
-remain outside this slice. Earlier cache changes were not recorded and cannot be
-reconstructed from current state. The parent objective is not complete merely
-because this projection is.
+V4 adds durable task block/reopen/DONE and candidate-bound rework occurrences from
+this release forward. Successful durable claims add `OPEN -> CLAIMED`, while explicit
+release, confirmed-stale recovery and safe unknown-execution fencing add
+`CLAIMED -> OPEN`; rejected/duplicate claims and unchanged releases add nothing.
+The shipped loopback dashboard now requests V4 and exposes its project, time-basis,
+source/task status, source/task history, task-event and retry filters. It renders
+`current_task_status` separately from `source_status` and treats historical status
+as event detail, not present state. The dashboard has not yet rendered the separate
+period-series route. Cross-store aggregation remains outside this slice.
+Earlier task/source changes were not recorded and cannot be reconstructed from
+current state. The parent objective is not complete merely because this projection is.
 
 ## Architecture decisions
 
@@ -291,9 +386,13 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
 6. **Multi-project: one server per project store.** A project switcher launches or selects a server per project through the
    existing project registry, so no server aggregates stores and the auth and error model stays per project.
 7. **Projection growth:** #450 introduces `/api/v2` and `stagemesh.activity/2` for explicit period semantics,
-   recorded project attribution and partitioned counts. `/api/v1` remains an unchanged compatibility adapter
-   for the shipped dashboard; a client adopts V2 explicitly. V3 adds linked-source fields and opt-in transition
-   occurrences while preserving both earlier response shapes. No database migration is involved.
+   recorded project attribution and partitioned counts. `/api/v1` remains an unchanged compatibility adapter.
+   The shipped dashboard adopts V4 explicitly. V3 adds linked-source fields and opt-in transition
+   occurrences; V4 adds typed task status/rework/retry occurrences. Every version preserves earlier response shapes.
+   Migration 7 adds only the durable retry-to-execution correlation table; activity queries remain read-only.
 8. **Health and version route:** `GET /api/v1/health`. Implemented (#446).
-9. **Dependencies: none.** The server is standard library; the UI is dependency-free HTML, CSS and JavaScript shipped as
-   package data (#448), so no Node toolchain is needed to build or install StageMesh.
+9. **Dependencies:** the server remains standard-library Python and the UI remains dependency-free HTML, CSS and JavaScript
+   shipped as package data (#448), so no Node toolchain is needed. Windows runtimes install the standard `tzdata` package
+   because CPython on Windows does not ship the IANA timezone database required by recorded period buckets; Unix platforms
+   use their system database. A deliberately dependency-skipping offline wheel install may return `timezone is unavailable`
+   until `tzdata` is installed in that runtime; it never substitutes UTC or invents bucket boundaries.

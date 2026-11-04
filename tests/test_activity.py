@@ -477,3 +477,358 @@ def test_malformed_or_secret_source_transition_payload_is_not_exposed(store: Sto
 def test_source_filters_fail_closed(store: Store, query: ActivityQuery):
     with pytest.raises(ActivityQueryError):
         query_activity(store, query)
+
+
+def _retime_task_transitions(store: Store, task_id: str) -> list[str]:
+    rows = store.conn.execute(
+        "SELECT id FROM audit_events WHERE event_type='task.status_changed' "
+        "AND json_extract(payload, '$.task_id')=? ORDER BY rowid",
+        (task_id,),
+    ).fetchall()
+    for minute, row in zip((10, 20, 30, 40), rows, strict=False):
+        store.conn.execute("UPDATE audit_events SET created_at=? WHERE id=?", (_at(minute), row["id"]))
+    store.conn.commit()
+    return [str(row["id"]) for row in rows]
+
+
+def test_task_block_reopen_reblock_history_is_durable_distinct_and_idempotent(store: Store):
+    task = store.upsert_task("task history", source="github", source_id="history-1")
+    store.cache_source("github", "history-1", {"state": "CLOSED"}, "CLOSED")
+    store.block_task(task)
+    store.block_task(task)  # unchanged calls do not invent another occurrence
+    assert store.unblock_task(task)
+    assert not store.unblock_task(task)
+    store.block_task(task)
+    blocked, reopened, reblocked = _retime_task_transitions(store, task)
+
+    path = Path(store.conn.execute("PRAGMA database_list").fetchone()[2])
+    restarted = Store(path)
+    try:
+        page = query_activity(
+            restarted,
+            ActivityQuery(task_id=task, include_task_history=True, task_event="status_changed"),
+        )
+        transitions = [entry for entry in page.entries if entry.kind == "task_transition"]
+        assert [entry.id for entry in transitions] == [reblocked, reopened, blocked]
+        assert transitions[1].status == "OPEN"
+        assert transitions[1].previous_task_status == "BLOCKED"
+        assert transitions[1].current_task_status == "BLOCKED"  # current state is separate
+        assert transitions[1].source_status == "CLOSED"  # linked source state is separate too
+        assert page.status_counts["task_transition"] == {
+            "OPEN": 1,
+            "CLAIMED": 0,
+            "BLOCKED": 2,
+            "DONE": 0,
+            "REWORK_REQUIRED": 0,
+            "UNKNOWN": 0,
+        }
+
+        window = query_activity(
+            restarted,
+            ActivityQuery(
+                include_task_history=True,
+                task_status="OPEN",
+                since=BASE + timedelta(minutes=10),
+                until=BASE + timedelta(minutes=30),
+            ),
+        )
+        assert _ids(window) == [reopened]
+    finally:
+        restarted.close()
+
+
+def test_task_rework_history_requires_typed_candidate_bound_occurrence(store: Store):
+    task = store.upsert_task("rework", source_id="rework")
+    candidate = "a" * 40
+    wanted = store.add_audit_event(
+        "task.remediation_queued",
+        {"task_id": task, "candidate_sha": candidate, "stage": "REVIEW", "finding_count": 1},
+    )
+    store.add_audit_event(
+        "task.remediation_queued",
+        {"task_id": task, "candidate_sha": "not-a-sha", "stage": "REVIEW"},
+    )
+
+    page = query_activity(
+        store,
+        ActivityQuery(include_task_history=True, task_event="rework_required"),
+    )
+
+    assert _ids(page) == [wanted]
+    entry = page.entries[0]
+    assert entry.rework_required and entry.status == "REWORK_REQUIRED"
+    assert entry.candidate_sha == candidate and entry.stage == "REVIEW"
+    assert page.status_counts["task_transition"]["REWORK_REQUIRED"] == 1
+
+
+def test_terminal_task_status_history_is_recorded_once(store: Store):
+    task = store.upsert_task("terminal", source_id="terminal")
+    store.advance_task(task, Stage.IMPLEMENT)  # OPEN -> OPEN is not a status occurrence
+    store.advance_task(task, Stage.DONE)
+    store.advance_task(task, Stage.DONE)
+
+    page = query_activity(
+        store,
+        ActivityQuery(
+            task_id=task,
+            task_status="DONE",
+            include_task_history=True,
+            task_event="status_changed",
+        ),
+    )
+
+    assert len(page.entries) == 1
+    entry = page.entries[0]
+    assert entry.status == "DONE" and entry.previous_task_status == "OPEN"
+    assert entry.stage == "DONE" and entry.current_task_status == "DONE"
+
+
+def test_claim_and_explicit_release_record_one_durable_interval(store: Store):
+    task = _task(store, "claimed interval", 1)
+
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    assert store.acquire_claim(task, "worker-b") is None
+    store.release_claim(claim)
+    store.release_claim(claim)
+
+    page = query_activity(
+        store,
+        ActivityQuery(
+            task_id=task,
+            include_task_history=True,
+            task_event="status_changed",
+        ),
+    )
+    transitions = [entry for entry in page.entries if entry.kind == "task_transition"]
+    assert [entry.status for entry in transitions] == ["OPEN", "CLAIMED"]
+    assert [entry.previous_task_status for entry in transitions] == ["CLAIMED", "OPEN"]
+    assert all(entry.current_task_status == "OPEN" for entry in transitions)
+    assert page.status_counts["task_transition"]["CLAIMED"] == 1
+    assert page.status_counts["task_transition"]["OPEN"] == 1
+
+
+def test_stale_claim_recovery_records_claim_release_without_provider_inference(store: Store):
+    task = _task(store, "stale claim", 1)
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    execution = store.start_execution(
+        task_id=task,
+        claim_id=claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+    )
+
+    assert store.recover_stale_execution_claim(execution, "confirmed dead")
+    assert not store.recover_stale_execution_claim(execution, "duplicate")
+
+    page = query_activity(
+        store,
+        ActivityQuery(
+            task_id=task,
+            include_task_history=True,
+            task_event="status_changed",
+        ),
+    )
+    transitions = [entry for entry in page.entries if entry.kind == "task_transition"]
+    assert [entry.status for entry in transitions] == ["OPEN", "CLAIMED"]
+    assert all(entry.current_task_status == "OPEN" for entry in transitions)
+    assert all(entry.provider is None for entry in transitions)
+
+
+def test_typed_retry_history_uses_only_allowlisted_durable_events(store: Store):
+    task = _task(store, "retry history", 1)
+    automatic = store.add_audit_event(
+        "task.auto_retried_provider_failure",
+        {"task_id": task, "attempt": 2, "of": 3, "cause": "provider_no_progress"},
+    )
+    candidate = "a" * 40
+    remediation = store.add_audit_event(
+        "task.remediation_queued",
+        {"task_id": task, "candidate_sha": candidate, "stage": "REVIEW"},
+    )
+    store.add_audit_event("task.retry_from_provider_prose", {"task_id": task, "attempt": 99})
+
+    page = query_activity(store, ActivityQuery(task_id=task, include_retry_history=True))
+    retries = [entry for entry in page.entries if entry.kind == "retry"]
+    assert {entry.id for entry in retries} == {automatic, remediation}
+    by_id = {entry.id: entry for entry in retries}
+    assert by_id[automatic].retry_kind == "automatic_provider"
+    assert (by_id[automatic].retry_attempt, by_id[automatic].retry_limit) == (2, 3)
+    assert by_id[remediation].retry_kind == "remediation"
+    assert by_id[remediation].candidate_sha == candidate
+    assert by_id[automatic].retry_state == "SUPERSEDED"
+    assert by_id[remediation].retry_state == "QUEUED"
+    assert all(entry.provider is None for entry in retries)
+    assert page.status_counts["retry"]["automatic_provider"] == 1
+    assert page.status_counts["retry"]["remediation"] == 1
+    assert page.status_counts["retry_outcome"]["SUPERSEDED"] == 1
+    assert page.status_counts["retry_outcome"]["QUEUED"] == 1
+
+
+def test_retry_execution_outcome_is_durably_correlated_and_filterable(store: Store):
+    task = _task(store, "retry outcome", 1)
+    initial = _execution(store, task, 2, "codex", ExecutionStatus.SUCCEEDED)
+    retry = store.add_audit_event(
+        "task.operator_retry_requested",
+        {"task_id": task, "stage": "PLAN", "candidate_sha": "a" * 40},
+    )
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    execution = store.start_execution(
+        task_id=task,
+        claim_id=claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        actor="codex",
+    )
+    store.finish_execution(execution, ExecutionStatus.FAILED, result="provider_timeout")
+
+    path = Path(store.conn.execute("PRAGMA database_list").fetchone()[2])
+    restarted = Store(path)
+    try:
+        page = query_activity(
+            restarted,
+            ActivityQuery(
+                task_id=task,
+                provider="codex",
+                include_retry_history=True,
+                retry_state="FAILED",
+            ),
+        )
+    finally:
+        restarted.close()
+
+    assert _ids(page) == [retry]
+    entry = page.entries[0]
+    assert entry.retry_kind == "operator" and entry.retry_state == "FAILED"
+    assert entry.status == "FAILED" and entry.current_task_status == "CLAIMED"
+    assert entry.execution_kind == "IMPLEMENTATION" and entry.result_code == "provider_timeout"
+    assert entry.candidate_sha == "a" * 40 and entry.provider == "codex"
+    assert initial != execution  # the initial execution was never relabeled as this retry
+    assert page.status_counts["retry_outcome"]["FAILED"] == 1
+
+
+def test_released_retry_claim_returns_to_queued_without_fabricating_execution(store: Store):
+    task = _task(store, "released retry", 1)
+    retry = store.add_audit_event("task.block_reentered", {"task_id": task, "stage": "PLAN"})
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    store.release_claim(claim)
+
+    page = query_activity(
+        store,
+        ActivityQuery(task_id=task, include_retry_history=True, retry_state="QUEUED"),
+    )
+
+    assert _ids(page) == [retry]
+    assert page.entries[0].execution_kind is page.entries[0].provider is None
+
+
+def test_retry_outcome_redacts_unallowlisted_actor_result_and_candidate(store: Store):
+    task = _task(store, "private retry", 1)
+    retry = store.add_audit_event(
+        "task.operator_retry_requested",
+        {"task_id": task, "candidate_sha": "token-secret"},
+    )
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    execution = store.start_execution(
+        task_id=task,
+        claim_id=claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        actor="token-secret",
+    )
+    store.finish_execution(execution, ExecutionStatus.FAILED, result="private-result")
+
+    page = query_activity(
+        store,
+        ActivityQuery(task_id=task, include_retry_history=True, retry_state="FAILED"),
+    )
+
+    assert _ids(page) == [retry]
+    entry = page.entries[0]
+    assert entry.provider is entry.result_code is entry.candidate_sha is None
+    assert "secret" not in repr(entry) and "private-result" not in repr(entry)
+
+
+def test_retry_correlation_migration_is_restart_safe(tmp_path: Path):
+    path = tmp_path / "upgrade.sqlite3"
+    store = Store(path)
+    store.migrate()
+    store.conn.executescript(
+        "DROP TABLE retry_attempts; "
+        "DELETE FROM schema_migrations WHERE version>=7; "
+        "DELETE FROM migration_audit WHERE version>=7;"
+    )
+    store.close()
+
+    upgraded = Store(path)
+    try:
+        upgraded.migrate()
+        columns = {
+            row["name"] for row in upgraded.conn.execute("PRAGMA table_info(retry_attempts)")
+        }
+        assert upgraded.schema_version() >= 7
+        assert {"retry_event_id", "task_id", "kind", "state", "claim_id", "execution_id"} <= columns
+        assert upgraded.conn.execute(
+            "SELECT COUNT(*) FROM migration_audit WHERE version=7"
+        ).fetchone()[0] == 1
+    finally:
+        upgraded.close()
+
+
+def test_retry_kind_filter_and_malformed_retry_metadata_fail_closed(store: Store):
+    task = _task(store, "retry filter", 1)
+    wanted = store.add_audit_event(
+        "task.block_reentered",
+        {"task_id": task, "attempt": 4, "of": 2, "candidate_sha": "token-secret"},
+    )
+    store.add_audit_event("task.operator_retry_requested", {"task_id": task})
+
+    page = query_activity(
+        store,
+        ActivityQuery(
+            task_id=task,
+            include_retry_history=True,
+            retry_kind="blocked_reentry",
+        ),
+    )
+    assert _ids(page) == [wanted]
+    assert page.entries[0].retry_attempt is page.entries[0].retry_limit is None
+    assert page.entries[0].candidate_sha is None
+    assert "token-secret" not in repr(page)
+
+
+@pytest.mark.parametrize("payload", ["null", "[]", "not json", '{"task_id":"x"}'])
+def test_malformed_task_transition_payload_is_not_exposed(store: Store, payload: str):
+    store.conn.execute(
+        "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+        ("bad-task-transition", "task.status_changed", payload, _at(1)),
+    )
+    store.conn.commit()
+    page = query_activity(store, ActivityQuery(include_task_history=True))
+    assert "bad-task-transition" not in _ids(page)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        ActivityQuery(task_event="unknown", include_task_history=True),  # type: ignore[arg-type]
+        ActivityQuery(task_event="status_changed"),
+        ActivityQuery(task_status="UNKNOWN"),
+        ActivityQuery(include_task_history="yes"),  # type: ignore[arg-type]
+        ActivityQuery(retry_kind="unknown", include_retry_history=True),  # type: ignore[arg-type]
+        ActivityQuery(retry_kind="operator"),
+        ActivityQuery(retry_state="not-a-state", include_retry_history=True),  # type: ignore[arg-type]
+        ActivityQuery(retry_state="FAILED"),
+        ActivityQuery(include_retry_history="yes"),  # type: ignore[arg-type]
+        ActivityQuery(
+            task_event="status_changed",
+            include_task_history=True,
+            retry_kind="operator",
+            include_retry_history=True,
+        ),
+    ],
+)
+def test_task_history_filters_fail_closed(store: Store, query: ActivityQuery):
+    with pytest.raises(ActivityQueryError):
+        query_activity(store, query)

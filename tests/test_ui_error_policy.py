@@ -12,7 +12,7 @@ DRIVER = r'''
   const out = {errors: []};
   let failing = false, calls = 0;
   window.fetch = async (...args) => {
-    if (String(args[0]).startsWith("/api/v1/activity")) {
+    if (String(args[0]).startsWith("/api/v4/activity")) {
       calls++;
       if (failing && status !== 400) {
         if (status === 0) throw new TypeError("controlled network loss");

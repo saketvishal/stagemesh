@@ -188,7 +188,7 @@ if (-not (Test-Path -LiteralPath $runtimePython)) {
                 "$PackageSource#sha256=$($WheelSha256.ToLowerInvariant())"
             )
         } else {
-            Invoke-Checked @($runtimePython) @("-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--no-deps", $PackageSource)
+            Invoke-Checked @($runtimePython) @("-m", "pip", "install", "--disable-pip-version-check", "--no-input", $PackageSource)
         }
         & $runtimeCli --version | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Installed StageMesh entry point failed validation" }
