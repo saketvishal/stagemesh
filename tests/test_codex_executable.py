@@ -70,6 +70,6 @@ def test_capacity_evidence_keeps_redacted_terminal_error():
     excerpt, retry = capacity_evidence("banner\n" + "prompt " * 300, "failed to spawn code-mode host: host executable was not found\nBearer secret-value\nretry-after: 60s")
     assert "host executable was not found" in excerpt
     assert "secret-value" not in excerpt
-    assert "[redacted]" in excerpt
+    assert "***REDACTED***" in excerpt
     assert len(excerpt) <= 500
     assert retry == "retry-after: 60s"
