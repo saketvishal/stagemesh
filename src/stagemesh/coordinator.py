@@ -834,10 +834,18 @@ class Coordinator:
         if not stalled_since_last_round(self.store, task_id):
             return False  # a recovery round already granted the next attempt and it has not run yet
         record_audit(self.store, DIAGNOSIS_EVENT, diagnosis.audit_payload())
-        record_audit(self.store, DIAGNOSIS_STOP_EVENT, {**diagnosis.audit_payload(), "remediation_attempts": 0})
         sha = diagnosis.candidate_sha or ""
         findings = self.store.open_findings_for_candidate(task_id, sha) if sha else []
-        self._on_remediation_exhausted(task_id, sha, Stage.IMPLEMENT, findings, diagnosis, "repeated_failure_diagnosed", queue=False)
+        self._on_remediation_exhausted(
+            task_id,
+            sha,
+            Stage.IMPLEMENT,
+            findings,
+            diagnosis,
+            "repeated_failure_diagnosed",
+            queue=False,
+            stop_payload={**diagnosis.audit_payload(), "remediation_attempts": 0},
+        )
         return self.store.get_task(task_id)["status"] == TaskStatus.BLOCKED
 
     def _review_satisfied(self, task_id: str, sha: str, contract_hash: str) -> bool:
@@ -1223,7 +1231,16 @@ class Coordinator:
             return {}
 
     def _on_remediation_exhausted(
-        self, task_id: str, sha: str, failed_stage: Stage, findings: list, diagnosis: Diagnosis | None, cause: str, *, queue: bool = True
+        self,
+        task_id: str,
+        sha: str,
+        failed_stage: Stage,
+        findings: list,
+        diagnosis: Diagnosis | None,
+        cause: str,
+        *,
+        queue: bool = True,
+        stop_payload: dict[str, Any] | None = None,
     ) -> int:
         """The remediation budget (or an identical repeat) ended the ordinary attempts. Recover with a different approach, or block with
         the kind of block it really is; budget exhaustion alone is never a question for the operator."""
@@ -1253,6 +1270,8 @@ class Coordinator:
             max_attempts=MAX_EXHAUSTION_ROUNDS,
         )
         decision = decide(ctx, self.recovery_advisor)
+        if decision.blocks and stop_payload is not None:
+            record_audit(self.store, DIAGNOSIS_STOP_EVENT, stop_payload)
         record_decision(self.store, task_id, ctx, decision)
         tried = [str(r.get("action")) for r in done]
         if decision.blocks:

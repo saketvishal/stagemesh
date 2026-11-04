@@ -1075,7 +1075,18 @@ def drive_task(
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
     """
-    if adverse_policy is None and getattr(coordinator, "require_independent_review", True):
+    if (
+        adverse_policy is None
+        and getattr(coordinator, "require_independent_review", True)
+        and (
+            not hasattr(coordinator, "reviewer")
+            or getattr(coordinator.reviewer, "separate_roles", False)
+        )
+    ):
+        # The configured adverse gate requires distinct normal/adverse review
+        # evidence.  Legacy single-role reviewers still provide the independent
+        # review contract they were constructed for; silently imposing a gate
+        # they cannot satisfy leaves a successful review stuck in REVIEW.
         try:
             adverse_policy = _configured_adverse_policy(project, selected, None)
         except RunReadyRefusal as refusal:
@@ -1174,7 +1185,17 @@ def drive_task(
                 summary.stop_reason, summary.message = "CURRENT_PROBLEM", ", ".join(problems)
                 summary.detail["problems"] = list(problems)
                 break
-        moved = progressed or new["stage"] != previous["stage"] or new["latest_candidate"] != previous["latest_candidate"]
+        moved = progressed or any(
+            new[key] != previous[key]
+            for key in (
+                "stage",
+                "latest_candidate",
+                "latest_validation",
+                "latest_review",
+                "latest_integration",
+                "latest_evidence",
+            )
+        )
         if not moved:
             failure = _latest_failure(store, selected, tick_started)
             summary.stop_reason = "NO_PROGRESS"

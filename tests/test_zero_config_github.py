@@ -36,11 +36,15 @@ def _prepared_contract(project: Path, task: str) -> None:
     (directory / f"{task}.json").write_text(json.dumps(FAKE_CONTRACT), encoding="utf-8")
 
 
-def test_init_persists_detected_github_origin_as_the_ready_issue_source(tmp_path: Path) -> None:
+def test_init_persists_detected_github_origin_as_the_ready_issue_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     project = _github_project(tmp_path)
 
     assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
 
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task_source_sync"] == {"status": "synced"}
     data = json.loads((project / ".stagemesh" / "config.json").read_text(encoding="utf-8"))
     assert data["github"] == {"owner": "acme", "repo": "widgets"}
     assert data["task_sources"] == [
@@ -56,6 +60,34 @@ def test_init_persists_detected_github_origin_as_the_ready_issue_source(tmp_path
             ],
         }
     ]
+
+
+def test_init_reports_deferred_source_sync_without_leaking_exception_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = _github_project(tmp_path)
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("provider response included SECRET_VALUE")
+
+    monkeypatch.setattr(cli_module, "_sync_all_sources", unavailable)
+
+    assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["task_source_sync"] == {"status": "deferred", "error_type": "RuntimeError"}
+    assert "task-source sync deferred (RuntimeError)" in captured.err
+    assert "SECRET_VALUE" not in captured.out + captured.err
+
+    text_root = tmp_path / "text-mode"
+    text_root.mkdir()
+    text_project = _github_project(text_root)
+    assert cli_module.main(["--project", str(text_project), "init"]) == 0
+    captured = capsys.readouterr()
+    assert "initialized StageMesh" in captured.out
+    assert "task-source sync deferred (RuntimeError)" in captured.err
+    assert "SECRET_VALUE" not in captured.out + captured.err
 
 
 def test_run_window_plan_previews_ready_issues_without_persisting_them(

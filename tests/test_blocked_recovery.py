@@ -140,6 +140,8 @@ def test_continue_on_a_blocked_no_progress_task_recovers_and_completes_without_r
 
     assert summary.recovered and summary.recovered[0]["auto_recovery"] == "provider_no_progress_retry"
     assert summary.stop_reason == "DONE", summary.to_dict()
+    assert summary.final["latest_review"] == "PASSED"
+    assert all(step["new"]["stage"] != "REVIEW" or step["progressed"] for step in summary.steps)
 
 
 def test_continue_when_the_budget_is_spent_refuses_with_a_plain_human_instruction(tmp_path: Path) -> None:
@@ -278,7 +280,7 @@ def test_a_retried_integration_that_rebases_the_candidate_is_not_blocked_by_the_
 
 
 def test_label_selector_scopes_automatic_recovery_to_in_label_tasks(tmp_path: Path, monkeypatch) -> None:
-    import stagemesh.auto_plan as auto_plan
+    from stagemesh import auto_plan
 
     rig = ParallelRig(tmp_path, ["A", "B"])
     for task_id in ("A", "B"):

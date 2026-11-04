@@ -270,11 +270,12 @@ def command_init(args: argparse.Namespace) -> int:
     store.migrate()
     if args.task:
         store.upsert_task(args.task)
+    source_sync: dict[str, str] = {"status": "synced"}
     try:
         config = load_config(project)
         _sync_all_sources(store, project, config, getattr(args, "task", None))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - initialization remains usable while an external task source is unavailable.
+        source_sync = {"status": "deferred", "error_type": type(exc).__name__[:80]}
     schema_version = store.schema_version()
     store.close()
     profile_status, profile_detail = ensure_profile(project)
@@ -289,6 +290,12 @@ def command_init(args: argparse.Namespace) -> int:
         except RegistryConflictError as exc:
             print(f"registry conflict: {exc}", file=sys.stderr)
             return 2
+    if source_sync["status"] == "deferred":
+        print(
+            f"warning: task-source sync deferred ({source_sync['error_type']}); "
+            "check the source configuration or retry initialization",
+            file=sys.stderr,
+        )
     if args.json:
         print(
             json.dumps(
@@ -300,6 +307,7 @@ def command_init(args: argparse.Namespace) -> int:
                     "registered": registered,
                     "profile": profile_status,
                     "github_task_source": "configured" if configured_github_source else "unchanged",
+                    "task_source_sync": source_sync,
                 },
                 indent=2,
                 sort_keys=True,
@@ -3273,19 +3281,39 @@ def command_operator(args: argparse.Namespace) -> int:
     return 0
 
 
+def _operator_project_id(project: Path) -> str:
+    return "project-" + uuid.uuid5(uuid.NAMESPACE_URL, project.as_uri()).hex[:20]
+
+
+def _operator_control(project: Path, enabled: bool):
+    if not enabled:
+        return None
+    from .operator_control import OperatorControl
+
+    secret = uuid.uuid4().hex + uuid.uuid4().hex
+    return OperatorControl(_operator_project_id(project), secret)
+
+
 def command_serve(args: argparse.Namespace) -> int:
     from .api_server import make_server
 
     project = Path(args.project).resolve()
     ui_dir = Path(__file__).parent / "ui"
-    server, api = make_server(db_path(project), port=args.port, static_dir=ui_dir if ui_dir.is_dir() else None)
+    control = _operator_control(project, bool(getattr(args, "enable_control", False)))
+    server, api = make_server(
+        db_path(project),
+        port=args.port,
+        static_dir=ui_dir if ui_dir.is_dir() else None,
+        control=control,
+    )
     port = server.server_address[1]
     # The token rides in the URL fragment: browsers never send it to the server or write it to logs.
     url = f"http://127.0.0.1:{port}/#token={api.token}"
     if args.json:
         print(json.dumps({"url": url, "port": port, "token": api.token}), flush=True)
     else:
-        print(f"StageMesh operator API on http://127.0.0.1:{port}/ (read-only, loopback only)", flush=True)
+        mode = "control enabled" if control is not None else "read-only"
+        print(f"StageMesh operator API on http://127.0.0.1:{port}/ ({mode}, loopback only)", flush=True)
         print(f"Open: {url}", flush=True)
     try:
         server.serve_forever()
@@ -3298,6 +3326,7 @@ def command_serve(args: argparse.Namespace) -> int:
 
 def command_ui(args: argparse.Namespace) -> int:
     from .api_server import make_server
+    from .operator_projects import ProjectProjection, ProjectTarget
     from .ui_launcher import UiLaunchError, launch_ui
 
     project = Path(args.project).resolve()
@@ -3305,14 +3334,71 @@ def command_ui(args: argparse.Namespace) -> int:
     if not 0 <= args.port <= 65535:
         print("ui error: port must be between 0 and 65535", file=sys.stderr)
         return 2
-    server, api = make_server(db_path(project), port=args.port, static_dir=ui_dir if ui_dir.is_dir() else None)
+    enable_control = bool(getattr(args, "enable_control", False))
+    registry_path = getattr(args, "registry", None)
+    servers: list[tuple[object, object, Path]] = []
+    current_index = 0
+    if registry_path:
+        registrations = GlobalRegistry(Path(registry_path).resolve()).load()
+        matches = [index for index, item in enumerate(registrations) if item.path == project]
+        if len(matches) != 1:
+            raise RegistryValidationError(
+                "ui registry must contain the exact current project once; no default was inferred"
+            )
+        current_registration = registrations[matches[0]]
+        if current_registration.db_path != db_path(project).resolve():
+            raise RegistryValidationError("ui registry database does not match the current project store")
+        for item in registrations:
+            if not item.db_path.is_file():
+                raise RegistryValidationError("every ui registry project must have an existing store")
+        ordered = [current_registration] + [item for item in registrations if item.path != project]
+        try:
+            for index, item in enumerate(ordered):
+                control = _operator_control(item.path, enable_control)
+                server, api = make_server(
+                    item.db_path,
+                    port=args.port if index == 0 else 0,
+                    static_dir=ui_dir if ui_dir.is_dir() else None,
+                    control=control,
+                )
+                servers.append((server, api, item.path))
+        except Exception:
+            for created_server, _created_api, _created_path in servers:
+                created_server.server_close()
+            raise
+        targets = tuple(
+            ProjectTarget(
+                ordered[index].name,
+                _operator_project_id(item_path),
+                f"http://127.0.0.1:{server.server_address[1]}/",
+                api.launch_tickets.issue,
+            )
+            for index, (server, api, item_path) in enumerate(servers)
+        )
+        for _server, api, item_path in servers:
+            api.projects = ProjectProjection(_operator_project_id(item_path), targets)
+        for other_server, _other_api, _other_path in servers[1:]:
+            threading.Thread(target=other_server.serve_forever, daemon=True).start()
+    else:
+        control = _operator_control(project, enable_control)
+        server, api = make_server(
+            db_path(project),
+            port=args.port,
+            static_dir=ui_dir if ui_dir.is_dir() else None,
+            control=control,
+        )
+        servers.append((server, api, project))
+    server, api, _current_path = servers[current_index]
     port = server.server_address[1]
     base_url = f"http://127.0.0.1:{port}/"
     launch_url = f"{base_url}#token={api.token}"
     try:
         launched = launch_ui(launch_url)
     except UiLaunchError as exc:
-        server.server_close()
+        for other_server, _other_api, _other_path in servers[1:]:
+            other_server.shutdown()
+        for created_server, _created_api, _created_path in servers:
+            created_server.server_close()
         print(f"ui error: {exc}", file=sys.stderr)
         return 2
     if args.json:
@@ -3325,13 +3411,17 @@ def command_ui(args: argparse.Namespace) -> int:
             flush=True,
         )
     else:
-        print(f"StageMesh UI opened at {base_url} ({launched.method}); press Ctrl+C to stop", flush=True)
+        mode = "control enabled" if enable_control else "read-only"
+        print(f"StageMesh UI opened at {base_url} ({launched.method}, {mode}); press Ctrl+C to stop", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        for other_server, _other_api, _other_path in servers[1:]:
+            other_server.shutdown()
+        for created_server, _created_api, _created_path in servers:
+            created_server.server_close()
     return 0
 
 
@@ -5634,12 +5724,26 @@ def build_parser() -> argparse.ArgumentParser:
     operator = sub.add_parser("operator")
     operator.add_argument("--json", action="store_true")
     operator.set_defaults(func=command_operator)
-    serve = sub.add_parser("serve", help="serve the read-only operator API on loopback")
+    serve = sub.add_parser("serve", help="serve the read-only-by-default operator API on loopback")
     serve.add_argument("--port", type=int, default=0, help="loopback port (default: ephemeral)")
+    serve.add_argument(
+        "--enable-control",
+        action="store_true",
+        help="explicitly enable bounded plan/confirm operator actions for this local session",
+    )
     serve.add_argument("--json", action="store_true")
     serve.set_defaults(func=command_serve)
-    ui = sub.add_parser("ui", help="open the read-only dashboard in a browser app window")
+    ui = sub.add_parser("ui", help="open the read-only-by-default dashboard in a browser app window")
     ui.add_argument("--port", type=int, default=0, help="loopback port (default: ephemeral)")
+    ui.add_argument(
+        "--enable-control",
+        action="store_true",
+        help="explicitly enable bounded plan/confirm operator actions for this local session",
+    )
+    ui.add_argument(
+        "--registry",
+        help="explicit registry whose existing project stores get separate loopback servers and tokens",
+    )
     ui.add_argument("--json", action="store_true")
     ui.set_defaults(func=command_ui)
     dashboard = sub.add_parser("dashboard")

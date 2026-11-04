@@ -1299,7 +1299,7 @@ WRITE_CAPABLE_DEFAULT_COMMANDS = {
         "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
         "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
     ),
-    "agy": "agy --mode accept-edits --dangerously-skip-permissions --model gemini-3.8-flash-medium",
+    "agy": "agy --mode accept-edits",
 }
 
 LEGACY_DEFAULT_COMMANDS = {

@@ -1,5 +1,5 @@
-:root { color-scheme: light dark; --fg: #1b1f24; --bg: #fff; --muted: #57606a; --line: #d0d7de; --accent: #0550ae; --warn: #7d4e00; --bad: #a40e26; }
-@media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --bg: #0d1117; --muted: #9da7b3; --line: #30363d; --accent: #79c0ff; --warn: #e3b341; --bad: #ff7b72; } }
+:root { color-scheme: light dark; --fg: #1b1f24; --bg: #fff; --muted: #57606a; --line: #d0d7de; --accent: #0550ae; --warn: #7d4e00; --bad: #a40e26; --good: #116329; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --bg: #0d1117; --muted: #9da7b3; --line: #30363d; --accent: #79c0ff; --warn: #e3b341; --bad: #ff7b72; --good: #56d364; } }
 body { margin: 0; padding: 0 1rem 2rem; font: 14px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
 header { display: flex; gap: 1rem; align-items: baseline; }
 nav { display: flex; gap: .5rem; padding-bottom: .5rem; border-bottom: 1px solid var(--line); }
@@ -26,6 +26,10 @@ th button:focus-visible { outline: 3px solid var(--accent); }
 tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 td button { all: unset; cursor: pointer; color: var(--accent); text-decoration: underline; }
 td button:focus-visible { outline: 3px solid var(--accent); }
+#control-form { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin: 1rem 0; }
+#control-plan-view { border: 2px solid var(--line); border-radius: 6px; padding: 1rem; max-width: 60rem; }
+#control-result.error { color: var(--bad); }
+#control-result.ok { color: var(--good); }
 .state-open::before { content: "\25CB  "; }
 .state-closed::before { content: "\25CF  "; }
 #message.warn { color: var(--warn); } #message.error { color: var(--bad); font-weight: 600; }

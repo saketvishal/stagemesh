@@ -506,8 +506,11 @@ def test_runtime_records_redacted_observed_load_receipt_before_candidate(
         / "SKILL.md"
     ).resolve()
     captured: list[list[str]] = []
+    real_popen = providers.subprocess.Popen
 
-    def popen(command: list[str], **_kwargs: object) -> SimpleNamespace:
+    def popen(command: list[str], **kwargs: object) -> object:
+        if Path(command[0]).name.casefold() in {"git", "git.exe"}:
+            return real_popen(command, **kwargs)
         captured.append(command)
         return SimpleNamespace(returncode=0)
 
@@ -621,8 +624,11 @@ def test_runtime_activates_claude_plugin_skill_and_requires_load_evidence(
         encoding="utf-8",
     )
     captured: list[list[str]] = []
+    real_popen = providers.subprocess.Popen
 
-    def popen(command: list[str], **_kwargs: object) -> SimpleNamespace:
+    def popen(command: list[str], **kwargs: object) -> object:
+        if Path(command[0]).name.casefold() in {"git", "git.exe"}:
+            return real_popen(command, **kwargs)
         captured.append(command)
         return SimpleNamespace(returncode=0)
 
@@ -769,8 +775,11 @@ def test_runtime_configures_codex_mcp_and_requires_invocation_receipt(
         encoding="utf-8",
     )
     captured: list[list[str]] = []
+    real_popen = providers.subprocess.Popen
 
-    def popen(command: list[str], **_kwargs: object) -> SimpleNamespace:
+    def popen(command: list[str], **kwargs: object) -> object:
+        if Path(command[0]).name.casefold() in {"git", "git.exe"}:
+            return real_popen(command, **kwargs)
         captured.append(command)
         return SimpleNamespace(returncode=0)
 

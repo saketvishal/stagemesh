@@ -1,5 +1,5 @@
 "use strict";
-// Read-only client for activity V5 and operator V1 (docs/operator-ui-contract.md). The token lives in memory only.
+// Read-only by default; bounded control appears only when this loopback session explicitly enables it.
 (() => {
   const params = new URLSearchParams(location.hash.slice(1));
   const token = params.get("token") || "";
@@ -22,6 +22,8 @@
   let detailReturnView = "activity", detailOpener = null;
   let executionSnapshot = null, executionId = null, executionGeneration = 0;
   let executionReturnView = "activity", executionOpener = null;
+  let controlCapabilities = null, controlIntent = null, controlBusy = false;
+  let projectTargets = new Map();
 
   function setMessage(text, level) {
     const el = $("message");
@@ -99,6 +101,29 @@
     if (!response.ok) {
       const error = new Error(body && body.error ? body.error.message : "HTTP " + response.status);
       error.status = response.status;
+      throw error;
+    }
+    return body;
+  }
+
+  async function controlApi(path, options = {}) {
+    const headers = {
+      Authorization: "Bearer " + token,
+      "X-Stagemesh-Control": controlCapabilities ? controlCapabilities.csrf_token : "",
+    };
+    if (options.body !== undefined) headers["Content-Type"] = "application/json";
+    const response = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      cache: "no-store",
+    });
+    let body = null;
+    try { body = await response.json(); } catch (_) { /* non-JSON error */ }
+    if (!response.ok) {
+      const error = new Error(body && body.error ? body.error.message : "HTTP " + response.status);
+      error.status = response.status;
+      error.code = body && body.error ? body.error.code : "unknown";
       throw error;
     }
     return body;
@@ -583,13 +608,189 @@
     }
   }
 
+  function controlKey() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+      return "ui-" + globalThis.crypto.randomUUID();
+    }
+    return "ui-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+  }
+
+  function setControlResult(text, level = "") {
+    const result = $("control-result");
+    result.textContent = text;
+    result.className = level;
+  }
+
+  function updateControlTarget() {
+    const taskAction = $("control-action").value === "task_retry";
+    $("control-task-label").hidden = !taskAction;
+    $("control-task").required = taskAction;
+  }
+
+  function clearControlPlan() {
+    controlIntent = null;
+    $("control-plan-view").hidden = true;
+    $("control-plan-facts").replaceChildren();
+    $("control-preconditions").replaceChildren();
+    $("control-confirm").disabled = false;
+  }
+
+  function renderControlPlan(plan) {
+    const facts = [
+      ["Action", plan.action.replaceAll("_", " ")],
+      ["Exact target", plan.target],
+      ["Idempotency key", plan.idempotency_key],
+      ["Expires", new Date(plan.expires_at * 1000).toLocaleString()],
+      ["Recorded-state digest", plan.state_digest.slice(0, 16) + "..."],
+    ];
+    const target = $("control-plan-facts");
+    target.replaceChildren();
+    for (const [label, value] of facts) {
+      const dt = document.createElement("dt"); dt.textContent = label;
+      const dd = document.createElement("dd"); dd.textContent = value;
+      target.append(dt, dd);
+    }
+    const conditions = $("control-preconditions");
+    conditions.replaceChildren();
+    for (const condition of plan.preconditions || []) {
+      const item = document.createElement("li"); item.textContent = condition; conditions.append(item);
+    }
+    $("control-plan-view").hidden = false;
+    $("control-confirm").focus();
+  }
+
+  async function loadControlCapabilities() {
+    if (!token) return;
+    try {
+      const capabilities = await api("/api/v1/control");
+      if (!capabilities.enabled) return;
+      controlCapabilities = capabilities;
+      $("show-control").hidden = false;
+      $("control-summary").textContent =
+        "Control is enabled only for this loopback session and project " + capabilities.project_id +
+        ". Every action requires a short-lived plan and a separate confirmation.";
+    } catch (error) {
+      if (error.status === 404) {
+        $("control-summary").textContent =
+          "Read-only session. Restart with --enable-control only when bounded operator actions are intended.";
+      } else {
+        $("control-summary").textContent = "Control availability could not be verified.";
+      }
+    }
+  }
+
+  async function loadProjectProjection() {
+    if (!token) return;
+    try {
+      const projection = await api("/api/v1/projects");
+      if (!projection.isolated || projection.aggregated) return;
+      const select = $("project-switch");
+      select.replaceChildren();
+      projectTargets = new Map();
+      for (const project of projection.projects || []) {
+        const option = document.createElement("option");
+        option.value = project.project_id;
+        option.textContent = project.name;
+        option.selected = project.current === true;
+        select.append(option);
+        projectTargets.set(project.project_id, project);
+      }
+      $("project-switch-label").hidden = projectTargets.size < 2;
+      $("project-switch-note").textContent = projectTargets.size < 2 ? "" :
+        "Each choice opens its own loopback server, bearer token, and isolated database.";
+    } catch (_) {
+      projectTargets = new Map();
+      $("project-switch-label").hidden = true;
+      $("project-switch-note").textContent = "";
+    }
+  }
+
+  function switchProject() {
+    const select = $("project-switch");
+    const target = projectTargets.get(select.value);
+    if (!target || target.current || !target.launch_url) return;
+    select.disabled = true;
+    $("project-switch-note").textContent = "Opening the selected isolated project server...";
+    location.assign(target.launch_url);
+  }
+
+  async function planControl(event) {
+    event.preventDefault();
+    if (!controlCapabilities || controlBusy) return;
+    const action = $("control-action").value;
+    const taskId = $("control-task").value.trim();
+    if (action === "task_retry" && !taskId) {
+      setControlResult("Enter the exact blocked task id before reviewing a retry.", "error");
+      $("control-task").focus();
+      return;
+    }
+    controlBusy = true;
+    $("control-plan").disabled = true;
+    clearControlPlan();
+    setControlResult("Checking current recorded state...");
+    const request = { action, idempotency_key: controlKey() };
+    if (action === "task_retry") request.task_id = taskId;
+    try {
+      controlIntent = await controlApi("/api/v1/control/plan", { method: "POST", body: request });
+      renderControlPlan(controlIntent);
+      setControlResult("Plan prepared. Review the exact target, expiry, and preconditions before confirming.");
+    } catch (error) {
+      setControlResult("Plan refused: " + error.message + ".", "error");
+    } finally {
+      controlBusy = false;
+      $("control-plan").disabled = false;
+    }
+  }
+
+  function receiptText(receipt, reconciled) {
+    const result = receipt.result || {};
+    const outcome = result.queue_state || result.status || receipt.status || "recorded";
+    return (reconciled ? "Receipt reconciled after an uncertain response. " : "Action accepted. ") +
+      receipt.action.replaceAll("_", " ") + " for " + (receipt.task_id || "this queue") +
+      ": " + outcome + ". Receipt " + receipt.idempotency_key + ".";
+  }
+
+  async function confirmControl() {
+    if (!controlIntent || controlBusy) return;
+    const planned = controlIntent;
+    controlBusy = true;
+    $("control-confirm").disabled = true;
+    $("control-plan").disabled = true;
+    setControlResult("Confirming the exact reviewed plan...");
+    let receipt = null, reconciled = false;
+    try {
+      receipt = await controlApi("/api/v1/control/confirm", {
+        method: "POST", body: { intent: planned.intent },
+      });
+    } catch (error) {
+      try {
+        receipt = await controlApi(
+          "/api/v1/control/receipt?idempotency_key=" + encodeURIComponent(planned.idempotency_key)
+        );
+        reconciled = true;
+      } catch (_) {
+        setControlResult("Confirmation refused or unrecorded: " + error.message + ".", "error");
+      }
+    }
+    if (receipt) {
+      setControlResult(receiptText(receipt, reconciled), "ok");
+      controlIntent = null;
+      $("control-confirm").disabled = true;
+      await loadRange(false);
+    }
+    controlBusy = false;
+    $("control-plan").disabled = false;
+  }
+
   function setView(name) {
     $("activity-view").hidden = name !== "activity";
     $("status-view").hidden = name !== "status";
+    $("control-view").hidden = name !== "control";
     $("task-view").hidden = name !== "task";
     $("execution-view").hidden = name !== "execution";
     $("show-activity").setAttribute("aria-pressed", String(name === "activity"));
     $("show-status").setAttribute("aria-pressed", String(name === "status"));
+    $("show-control").setAttribute("aria-pressed", String(name === "control"));
     $("show-task").setAttribute("aria-pressed", String(name === "task"));
     $("show-execution").setAttribute("aria-pressed", String(name === "execution"));
   }
@@ -656,12 +857,22 @@
   $("period-more").addEventListener("click", loadMorePeriods);
   $("show-activity").addEventListener("click", () => setView("activity"));
   $("show-status").addEventListener("click", () => setView("status"));
+  $("show-control").addEventListener("click", () => setView("control"));
   $("show-task").addEventListener("click", () => setView("task"));
   $("show-execution").addEventListener("click", () => setView("execution"));
   $("close-detail").addEventListener("click", closeTask);
   $("close-execution").addEventListener("click", closeExecution);
   $("detail-history").addEventListener("click", () => { if (detailTaskId) enterDrill(detailTaskId); });
   $("auto").addEventListener("change", schedule);
+  $("control-action").addEventListener("change", () => { clearControlPlan(); updateControlTarget(); });
+  $("control-form").addEventListener("submit", planControl);
+  $("control-confirm").addEventListener("click", confirmControl);
+  $("control-cancel").addEventListener("click", () => {
+    clearControlPlan();
+    setControlResult("Plan cancelled. No action was submitted.");
+    $("control-plan").focus();
+  });
+  $("project-switch").addEventListener("change", switchProject);
   document.addEventListener("keydown", (event) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     if (event.ctrlKey || event.metaKey || event.altKey || typing) return;
@@ -672,6 +883,9 @@
     else if (event.key === "Escape" && drillState) exitDrill();
   });
   api("/api/v5/health").then((health) => { $("version").textContent = "v" + health.version; }, () => {});
+  updateControlTarget();
+  loadControlCapabilities();
+  loadProjectProjection();
   loadRange(false);
   schedule();
 })();

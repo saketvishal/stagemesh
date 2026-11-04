@@ -53,6 +53,7 @@ class GlobalRegistry:
         loaded: list[ProjectRegistration] = []
         names: set[str] = set()
         paths: set[Path] = set()
+        db_paths: set[Path] = set()
         for item in projects:
             if not isinstance(item, dict):
                 raise RegistryValidationError("registry project entries must be objects")
@@ -65,18 +66,36 @@ class GlobalRegistry:
                     db_path=Path(item["db_path"]),
                 )
             )
-            if project.name in names:
+            folded_name = project.name.casefold()
+            if folded_name in names:
                 raise RegistryValidationError(f"duplicate registry project name: {project.name}")
             if project.path in paths:
                 raise RegistryValidationError(f"duplicate registry project path: {project.path}")
-            names.add(project.name)
+            if project.db_path in db_paths:
+                raise RegistryValidationError(f"duplicate registry database path: {project.db_path}")
+            names.add(folded_name)
             paths.add(project.path)
+            db_paths.add(project.db_path)
             loaded.append(project)
         return loaded
 
     def save(self, projects: list[ProjectRegistration]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         normalized = [self._normalize(project) for project in projects]
+        names: set[str] = set()
+        paths: set[Path] = set()
+        db_paths: set[Path] = set()
+        for project in normalized:
+            folded_name = project.name.casefold()
+            if folded_name in names:
+                raise RegistryValidationError(f"duplicate registry project name: {project.name}")
+            if project.path in paths:
+                raise RegistryValidationError(f"duplicate registry project path: {project.path}")
+            if project.db_path in db_paths:
+                raise RegistryValidationError(f"duplicate registry database path: {project.db_path}")
+            names.add(folded_name)
+            paths.add(project.path)
+            db_paths.add(project.db_path)
         self.path.write_text(
             json.dumps(
                 {
@@ -95,10 +114,12 @@ class GlobalRegistry:
         normalized = self._normalize(project)
         projects = self.load()
         for item in projects:
-            if item.name == normalized.name and item.path != normalized.path:
+            if item.name.casefold() == normalized.name.casefold() and item.path != normalized.path:
                 raise RegistryConflictError(f"project name already registered for a different path: {normalized.name}")
             if item.path == normalized.path and item.name != normalized.name:
                 raise RegistryConflictError(f"project path already registered under a different name: {normalized.path}")
-        projects = [item for item in projects if item.name != normalized.name]
+            if item.db_path == normalized.db_path and item.path != normalized.path:
+                raise RegistryConflictError(f"project database already registered for a different path: {normalized.db_path}")
+        projects = [item for item in projects if item.name.casefold() != normalized.name.casefold()]
         projects.append(normalized)
         self.save(projects)

@@ -1,4 +1,4 @@
-# Operator UI contract: shared read-only activity API
+# Operator UI contract: read-only projections and opt-in bounded control
 
 Parent objectives #135 (operator UI) and #134 (activity history). The server in `src/stagemesh/api_server.py`
 (`stagemesh serve`, #446) implements this contract over the activity projection in `src/stagemesh/activity.py`
@@ -8,12 +8,13 @@ dependency and no schema change.
 ## Principles
 
 - The UI reads only this contract. It never opens the coordinator database or imports store internals.
-- Every endpoint in this version is read-only: `GET` only, no request body, no state change, no audit write on read.
+- Every activity, status, task, execution and project projection remains **`GET` only** and opens its store read-only/query-only.
+  Bounded operator actions use the separate contract below and are absent unless the local process explicitly opts in.
 - The contract is a thin projection of `ActivityQuery` and `ActivityPage`. It adds no fields the projection does not produce.
 - Unknown parameters, malformed values, out-of-range pages and unauthenticated calls fail closed with an error; they are never
   ignored, coerced or answered with partial data.
-- Operator actions (retry, stop, approve) are out of scope. They will be separate, audited command endpoints with their own
-  contract; none are reachable through the endpoints below.
+- Arbitrary commands, approvals, provider calls, process termination and remote control are out of scope. The only opt-in
+  actions are blocked-task retry and non-terminating queue-admission pause/resume.
 
 ## Transport
 
@@ -403,7 +404,56 @@ only when providers recorded it, and billing cost remains `UNKNOWN`. Pending
 approval coverage always retains an `UNKNOWN` row because absence from the
 bounded journal never grants permission. The shipped dashboard exposes Activity
 and Status views, keeps task links as an explicit retained-history drill-down,
-and performs no writes or operator actions.
+and performs no writes unless the process was explicitly launched with the bounded control contract enabled.
+
+## Opt-in bounded operator control
+
+`stagemesh serve` and `stagemesh ui` remain read-only by default. `--enable-control`
+creates an in-memory, per-launch control secret and enables `stagemesh.operator-control/1`
+for that loopback process only. It does not add a non-loopback bind, persist a secret,
+enable arbitrary commands, approve delivery, terminate running work, or invoke a provider.
+
+The fixed allowlist is `task_retry`, `queue_pause`, and `queue_resume`. A retry is
+refused unless the task is currently BLOCKED, has no active claim or running execution,
+is not an objective root, and its recorded source remains eligible. Queue events affect
+future admission only and record `terminate_running=false`.
+
+The authenticated routes are:
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/v1/control` | Capability, project identity, TTL and same-origin control token |
+| `POST /api/v1/control/plan` | Validate one allowlisted request and return a signed current-state-bound intent |
+| `POST /api/v1/control/confirm` | Revalidate and execute one unexpired intent exactly once per idempotency key |
+| `GET /api/v1/control/receipt?idempotency_key=...` | Reconcile a duplicate or uncertain network outcome |
+
+POST requires the existing Bearer credential, the exact local `Origin`, the derived
+`X-Stagemesh-Control` value, JSON content type, an explicit bounded content length,
+and a body of at most 8 KiB. Intents bind the project, action, target, state digest,
+idempotency key, nonce and expiry with HMAC. Confirmation rejects changed state,
+expired or cross-project intents, idempotency rebinding and concurrent duplicates.
+Receipts are durable audit events with fixed fields; task titles, paths, commands,
+provider output, environment values and secrets are never serialized.
+
+The UI first shows the exact target, expiry and preconditions, then requires a separate
+Confirm action. It disables duplicate submissions and, if a confirmation response is
+lost, queries the durable receipt before reporting an unknown outcome. Successful
+confirmation refreshes the ordinary recorded-state projections.
+
+## Isolated project switcher
+
+`stagemesh ui --registry <path>` validates the registry and requires the current
+project to match exactly one entry; it never infers an ambiguous default. Every entry
+must name an existing database inside its resolved project boundary, and duplicate
+case-insensitive names, project paths or database paths fail closed.
+
+Each registered project receives its own loopback server, ephemeral port, Bearer token,
+database connection boundary, and (when explicitly requested) control secret.
+`GET /api/v1/projects` returns only bounded names, derived project identifiers and
+target launch URLs; it contains no filesystem path or Bearer token and never aggregates
+database rows. A switch URL carries a 30-second, one-use target-local launch ticket.
+Only the target server redeems it and places its own Bearer token in its own URL
+fragment. Tickets are in memory, bounded, expiring and replay-refusing.
 
 ## Task detail snapshot
 
@@ -470,7 +520,8 @@ opts into every typed retained history while labelling retention/truncation hone
 The dashboard renders the recorded period route as an opened/completed series and
 an independently paged active-interval table, with day/week bucket, IANA timezone,
 This week and This month controls. It never rebuckets or reconstructs history in
-the browser. Cross-store aggregation and a project-switcher remain outside this slice.
+the browser. Registry mode now supplies an isolated project switcher; cross-store
+aggregation remains deliberately unsupported.
 Earlier task/source changes were not recorded and cannot be reconstructed from
 current state. The parent objective is not complete merely because this projection is.
 
@@ -492,8 +543,8 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
    added later as a new route without changing this one.
 5. **Pagination: offset plus client de-duplication by `(kind, id)`.** The retained window is capped at 1000 rows, so a
    snapshot cursor adds state for little gain. `truncated` already tells the operator when to narrow the range.
-6. **Multi-project: one server per project store.** A project switcher launches or selects a server per project through the
-   existing project registry, so no server aggregates stores and the auth and error model stays per project.
+6. **Multi-project: one server per project store.** Implemented through explicit registry mode and target-local one-use
+   launch tickets. No server aggregates stores or exposes another project's Bearer token.
 7. **Projection growth:** #450 introduces `/api/v2` and `stagemesh.activity/2` for explicit period semantics,
    recorded project attribution and partitioned counts. `/api/v1` remains an unchanged compatibility adapter.
    The shipped dashboard adopts V5 explicitly. V3 adds linked-source fields and opt-in transition
