@@ -4,13 +4,13 @@ import time
 from dataclasses import replace
 
 import pytest
-
 from autonomy_support import git
+from test_landing_recovery import recovery_rig
+
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
 from stagemesh.persistence import Store
 from stagemesh.run_window import WindowOptions
 from stagemesh.survivor_wave import STAGING_REF, RunResult, _defer_pr_delivery
-from test_landing_recovery import recovery_rig
 
 
 def deferred_rig(tmp_path, monkeypatch):
@@ -118,11 +118,13 @@ def test_dispatch_guard_refuses_task_that_changed_to_implementation(tmp_path, mo
 
 
 def test_recovery_receives_remaining_window_budget_after_earlier_work(tmp_path):
-    import stagemesh.run_window as rw
     from test_run_window import window
+
+    import stagemesh.run_window as rw
 
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ["1", "2", "3"], auto_merge_ff=True, concurrency=1, max_tasks=3, required_checks=("web",))
+    hooks.is_ancestor = lambda older, newer: older <= newer
     observed = []
 
     def land(record, deadline):
@@ -136,4 +138,5 @@ def test_recovery_receives_remaining_window_budget_after_earlier_work(tmp_path):
     land.recover = recover
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
     assert not report.ok and observed == [2]
-    assert rig.runs == ["1", "2"] and options.max_tasks == 3
+    assert rig.runs == ["1", "2", "3"] and options.max_tasks == 3
+    assert report.merged_prs == [{"merged": True, "pr": 1, "task_id": "1"}]
