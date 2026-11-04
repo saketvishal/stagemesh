@@ -81,7 +81,7 @@ class RecordingReviewAdapter:
         return self.response
 
 
-def test_python_gate_uses_current_runtime_and_candidate_src(tmp_path: Path) -> None:
+def test_python_gate_uses_recorded_path_runtime_and_candidate_src(tmp_path: Path) -> None:
     project = tmp_path / "repo"
     (project / "src").mkdir(parents=True)
     (project / "src" / "probe_runtime.py").write_text('VALUE = "candidate-src"\n', encoding="utf-8")
@@ -100,7 +100,9 @@ def test_python_gate_uses_current_runtime_and_candidate_src(tmp_path: Path) -> N
     )
 
     assert gate.status == "PASSED", gate.stderr
-    assert Path(sys.executable).resolve() == Path(gate.stdout.splitlines()[0]).resolve()
+    assert gate.resolution is not None
+    assert gate.resolution["method"] == "path-lookup"
+    assert Path(str(gate.resolution["executed"])).resolve() == Path(gate.stdout.splitlines()[0]).resolve()
     assert "candidate-src" in gate.stdout
 
 
