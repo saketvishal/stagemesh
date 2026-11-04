@@ -40,6 +40,18 @@ from .activity_periods import (
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .operator import OperatorReport, execution_runtime_row, operator_report, pending_decision_rows
+from .operator_control import (
+    CONTROL_CONTRACT,
+    MAX_CONTROL_BODY_BYTES,
+    OperatorControl,
+    OperatorControlError,
+)
+from .operator_projects import (
+    PROJECTS_CONTRACT,
+    OperatorProjectError,
+    ProjectLaunchTickets,
+    ProjectProjection,
+)
 from .persistence import Store
 from .redaction import redact_output
 from .validation_services import e2e_policy_projection
@@ -272,6 +284,45 @@ def parse_execution_detail_query(raw: str) -> str:
     if not execution_id.strip() or len(execution_id) > 200:
         raise _invalid("execution_id must be a non-empty string of 200 characters or fewer")
     return execution_id
+
+
+def parse_control_receipt_query(raw: str) -> str:
+    if len(raw) > _MAX_QUERY_CHARS or not _URL_SAFE.match(raw):
+        raise _invalid("control receipt query must be percent-encoded ASCII")
+    segments = raw.split("&") if raw else []
+    if len(segments) != 1:
+        raise _invalid("control receipt requires exactly one idempotency_key")
+    name, sep, value = segments[0].partition("=")
+    if not sep or _decode(name) != "idempotency_key":
+        raise _invalid("control receipt requires exactly one idempotency_key")
+    idempotency_key = _decode(value)
+    if not idempotency_key or len(idempotency_key) > 100:
+        raise _invalid("idempotency_key must be between 1 and 100 characters")
+    return idempotency_key
+
+
+def parse_project_launch_query(raw: str) -> str:
+    if len(raw) > _MAX_QUERY_CHARS or not _URL_SAFE.match(raw):
+        raise OperatorProjectError("invalid_launch", "project launch ticket is invalid", status=403)
+    segments = raw.split("&") if raw else []
+    if len(segments) != 1:
+        raise OperatorProjectError("invalid_launch", "project launch ticket is invalid", status=403)
+    name, sep, value = segments[0].partition("=")
+    if not sep or _decode(name) != "ticket":
+        raise OperatorProjectError("invalid_launch", "project launch ticket is invalid", status=403)
+    return _decode(value)
+
+
+def parse_control_json(body: bytes) -> object:
+    def object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        parsed: dict[str, object] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise ValueError("duplicate JSON field")
+            parsed[key] = value
+        return parsed
+
+    return json.loads(body, object_pairs_hook=object_without_duplicates)
 
 
 def _entry(entry: ActivityEntry, *, version: int = 1) -> dict[str, Any]:
@@ -769,22 +820,43 @@ def serialize_execution_detail(store: Store, execution_id: str) -> dict[str, Any
 class ActivityApi:
     """Transport-independent request handling, so tests need no sockets."""
 
-    def __init__(self, db_path: Path, token: str, static_dir: Path | None = None):
+    def __init__(
+        self,
+        db_path: Path,
+        token: str,
+        static_dir: Path | None = None,
+        control: OperatorControl | None = None,
+        projects: ProjectProjection | None = None,
+        launch_tickets: ProjectLaunchTickets | None = None,
+    ):
         if not token:
             raise ValueError("an access token is required")
         self.db_path = Path(db_path)
         self.token = token
         self.static_dir = static_dir
+        self.control = control
+        self.projects = projects
+        self.launch_tickets = launch_tickets or ProjectLaunchTickets(token)
         self.allowed_hosts: frozenset[str] = frozenset()
 
     def bind(self, port: int) -> None:
         hosts = {f"{LOOPBACK}:{port}", f"localhost:{port}"}
         self.allowed_hosts = frozenset(hosts)
 
-    def handle(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
+    def handle(
+        self,
+        method: str,
+        target: str,
+        headers: Mapping[str, str],
+        body: bytes = b"",
+    ) -> Response:
         contract = CONTRACT
         try:
-            if urlsplit(target).path == "/api/v1/execution":
+            if urlsplit(target).path.startswith("/api/v1/control"):
+                contract = CONTROL_CONTRACT
+            elif urlsplit(target).path == "/api/v1/projects":
+                contract = PROJECTS_CONTRACT
+            elif urlsplit(target).path == "/api/v1/execution":
                 contract = EXECUTION_DETAIL_CONTRACT
             elif urlsplit(target).path == "/api/v1/task":
                 contract = TASK_DETAIL_CONTRACT
@@ -798,13 +870,17 @@ class ActivityApi:
                 contract = CONTRACT_V3
             elif urlsplit(target).path.startswith("/api/v2/"):
                 contract = CONTRACT_V2
-            status, body, extra = self._route(method, target, headers)
+            status, body, extra = self._route(method, target, headers, body)
         except ApiError as exc:
             status, body, extra = _error(exc, contract)
         except ActivityQueryError as exc:
             status, body, extra = _error(ApiError(400, "invalid_query", str(exc)), contract)
         except ActivityPeriodError as exc:
             status, body, extra = _error(ApiError(400, "invalid_query", str(exc)), contract)
+        except OperatorControlError as exc:
+            status, body, extra = _error(ApiError(exc.status, exc.code, str(exc)), contract)
+        except OperatorProjectError as exc:
+            status, body, extra = _error(ApiError(exc.status, exc.code, str(exc)), contract)
         except (sqlite3.Error, OSError):
             status, body, extra = _error(ApiError(503, "store_unavailable", "activity store is unavailable"), contract)
         except Exception:  # noqa: BLE001 - never leak internals
@@ -812,7 +888,13 @@ class ActivityApi:
         extra.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
         return status, body, extra
 
-    def _route(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
+    def _route(
+        self,
+        method: str,
+        target: str,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> Response:
         lowered = {key.lower(): value for key, value in headers.items()}
         host = lowered.get("host", "")
         if host not in self.allowed_hosts:
@@ -820,17 +902,31 @@ class ActivityApi:
         origin = lowered.get("origin")
         if origin is not None and origin not in {f"http://{h}" for h in self.allowed_hosts}:
             raise ApiError(403, "forbidden", "origin not allowed")
-        if method != "GET":
-            raise ApiError(405, "method_not_allowed", "only GET is supported")
-        if lowered.get("content-length", "0") not in {"", "0"} or "transfer-encoding" in lowered:
-            raise ApiError(400, "invalid_query", "request body is not allowed")
         parts = urlsplit(target)
         path = parts.path
+        control_route = path.startswith("/api/v1/control")
+        if method != "GET" and not control_route:
+            raise ApiError(405, "method_not_allowed", "only GET is supported")
+        if not control_route and (body or lowered.get("content-length", "0") not in {"", "0"} or "transfer-encoding" in lowered):
+            raise ApiError(400, "invalid_query", "request body is not allowed")
         version = 5 if path.startswith("/api/v5/") else (4 if path.startswith("/api/v4/") else (3 if path.startswith("/api/v3/") else (2 if path.startswith("/api/v2/") else 1)))
         contract = CONTRACT_V5 if version == 5 else (CONTRACT_V4 if version == 4 else (CONTRACT_V3 if version == 3 else (CONTRACT_V2 if version == 2 else CONTRACT)))
+        if path == "/project-launch":
+            if method != "GET" or body or lowered.get("content-length", "0") not in {"", "0"}:
+                raise ApiError(405, "method_not_allowed", "project launch requires GET")
+            location = self.launch_tickets.redeem(parse_project_launch_query(parts.query))
+            return 303, b"", {"Location": location}
         if not path.startswith("/api/"):
             return self._static(path)  # the shell carries no data, so it needs no credential
         self._authenticate(lowered.get("authorization", ""))
+        if control_route:
+            return self._control_route(method, path, parts.query, lowered, body)
+        if path == "/api/v1/projects":
+            if parts.query:
+                raise ApiError(400, "invalid_query", "projects takes no parameters")
+            if self.projects is None:
+                raise ApiError(404, "not_found", "unknown route")
+            return _json(200, self.projects.serialize(), PROJECTS_CONTRACT)
         if path == "/api/v1/execution":
             execution_id = parse_execution_detail_query(parts.query)
             store = self._open()
@@ -878,6 +974,74 @@ class ActivityApi:
             return _json(200, serialize_period_report(report), contract)
         raise ApiError(404, "not_found", "unknown route")
 
+    def _control_route(
+        self,
+        method: str,
+        path: str,
+        query: str,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> Response:
+        control = self.control
+        if control is None:
+            raise ApiError(404, "not_found", "unknown route")
+        if method == "GET" and path == "/api/v1/control":
+            if query or body or headers.get("content-length", "0") not in {"", "0"}:
+                raise ApiError(400, "invalid_query", "control capabilities take no parameters")
+            return _json(200, control.capabilities(), CONTROL_CONTRACT)
+        if method == "GET" and path == "/api/v1/control/receipt":
+            if body or headers.get("content-length", "0") not in {"", "0"}:
+                raise ApiError(400, "invalid_query", "control receipt does not accept a body")
+            store = self._open()
+            try:
+                receipt = control.receipt(store, parse_control_receipt_query(query))
+            finally:
+                store.close()
+            if receipt is None:
+                raise ApiError(404, "receipt_not_found", "control receipt was not found")
+            return _json(200, receipt, CONTROL_CONTRACT)
+        if method != "POST" or path not in {"/api/v1/control/plan", "/api/v1/control/confirm"}:
+            raise ApiError(405, "method_not_allowed", "control route does not support this method")
+        if query:
+            raise ApiError(400, "invalid_request", "control request does not accept query parameters")
+        expected_origins = {f"http://{host}" for host in self.allowed_hosts}
+        if headers.get("origin") not in expected_origins:
+            raise ApiError(403, "forbidden", "control confirmation requires the local origin")
+        if "transfer-encoding" in headers:
+            raise ApiError(400, "invalid_request", "transfer encoding is not supported")
+        raw_length = headers.get("content-length", "")
+        if not raw_length.isascii() or not raw_length.isdigit():
+            raise ApiError(400, "invalid_request", "control request requires a valid content length")
+        content_length = int(raw_length)
+        if content_length > MAX_CONTROL_BODY_BYTES:
+            raise ApiError(413, "request_too_large", "control request is too large")
+        if content_length != len(body):
+            raise ApiError(400, "invalid_request", "control request body length does not match")
+        if headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
+            raise ApiError(415, "unsupported_media_type", "control request requires application/json")
+        supplied_csrf = headers.get("x-stagemesh-control", "")
+        if not hmac.compare_digest(supplied_csrf.encode(), control.csrf_token.encode()):
+            raise ApiError(403, "forbidden", "control confirmation credential is invalid")
+        try:
+            request = parse_control_json(body)
+        except (UnicodeDecodeError, ValueError):
+            raise ApiError(400, "invalid_request", "control request body is invalid JSON") from None
+        if path.endswith("/plan"):
+            store = self._open()
+            try:
+                intent = control.plan(store, request)
+            finally:
+                store.close()
+            return _json(200, intent.to_dict(), CONTROL_CONTRACT)
+        if not isinstance(request, dict) or set(request) != {"intent"}:
+            raise ApiError(400, "invalid_request", "control confirmation requires exactly one intent")
+        store = self._open_write()
+        try:
+            receipt = control.confirm(store, request["intent"])
+        finally:
+            store.close()
+        return _json(200, receipt, CONTROL_CONTRACT)
+
     def _authenticate(self, header: str) -> None:
         scheme, _, value = header.partition(" ")
         if scheme != "Bearer" or not hmac.compare_digest(value.encode(), self.token.encode()):
@@ -897,6 +1061,11 @@ class ActivityApi:
         except BaseException:
             conn.close()
             raise
+
+    def _open_write(self) -> Store:
+        if not self.db_path.is_file():
+            raise ApiError(503, "store_unavailable", "activity store is unavailable")
+        return Store(self.db_path)
 
     def _static(self, path: str) -> Response:
         if self.static_dir is None:
@@ -921,8 +1090,15 @@ def make_server(
     port: int = 0,
     static_dir: Path | None = None,
     api_class: type[ActivityApi] = ActivityApi,
+    control: OperatorControl | None = None,
+    projects: ProjectProjection | None = None,
 ) -> tuple[HTTPServer, ActivityApi]:
-    api = api_class(db_path, token or secrets.token_urlsafe(32), static_dir)
+    access_token = token or secrets.token_urlsafe(32)
+    # Preserve the original api_class constructor contract for test/embedding subclasses.
+    api = api_class(db_path, access_token, static_dir)
+    api.control = control
+    api.projects = projects
+    api.launch_tickets = ProjectLaunchTickets(access_token)
     handler = _handler(api)
     server = HTTPServer((LOOPBACK, port), handler)
     api.bind(server.server_address[1])
@@ -936,7 +1112,15 @@ def _handler(api: ActivityApi) -> Callable[..., BaseHTTPRequestHandler]:
         sys_version = ""
 
         def _serve(self) -> None:
-            status, body, headers = api.handle(self.command, self.path, dict(self.headers.items()))
+            raw_length = self.headers.get("Content-Length", "0")
+            request_body = b""
+            if raw_length.isascii() and raw_length.isdigit():
+                length = int(raw_length)
+                if 0 < length <= MAX_CONTROL_BODY_BYTES:
+                    request_body = self.rfile.read(length)
+            status, body, headers = api.handle(
+                self.command, self.path, dict(self.headers.items()), request_body
+            )
             self.send_response(status)
             for key, value in headers.items():
                 self.send_header(key, value)

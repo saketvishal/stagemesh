@@ -12,10 +12,15 @@
   <h1>StageMesh operator</h1>
   <span id="version" class="muted"></span>
   <span id="freshness" class="muted" role="status"></span>
+  <label id="project-switch-label" hidden>Project server
+    <select id="project-switch" aria-describedby="project-switch-note"></select>
+  </label>
+  <span id="project-switch-note" class="muted"></span>
 </header>
 <nav aria-label="Operator views">
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
   <button type="button" id="show-status" aria-pressed="false">Status</button>
+  <button type="button" id="show-control" aria-pressed="false" hidden>Control</button>
   <button type="button" id="show-task" aria-pressed="false" hidden>Task detail</button>
   <button type="button" id="show-execution" aria-pressed="false" hidden>Execution detail</button>
 </nav>
@@ -148,6 +153,34 @@
     <h3 id="selection-heading">Provider selections</h3>
     <table><thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Policy</th><th scope="col">Recorded order</th><th scope="col">Eligibility</th></tr></thead><tbody id="selection-rows"></tbody></table>
   </section>
+</main>
+<main id="control-view" hidden>
+  <h2>Bounded operator control</h2>
+  <p id="control-summary" class="muted" role="status" aria-live="polite">Checking whether control was explicitly enabled...</p>
+  <form id="control-form" aria-label="Plan a bounded operator action">
+    <label>Action
+      <select id="control-action">
+        <option value="task_retry">Retry a blocked task</option>
+        <option value="queue_pause">Pause queue admission</option>
+        <option value="queue_resume">Resume queue admission</option>
+      </select>
+    </label>
+    <label id="control-task-label">Exact task id
+      <input id="control-task" type="text" maxlength="200" autocomplete="off">
+    </label>
+    <button type="submit" id="control-plan">Review plan</button>
+  </form>
+  <section id="control-plan-view" aria-labelledby="control-plan-heading" hidden>
+    <h3 id="control-plan-heading">Confirm this exact plan</h3>
+    <dl id="control-plan-facts" class="metrics"></dl>
+    <h4>Preconditions checked at confirmation</h4>
+    <ul id="control-preconditions"></ul>
+    <p>
+      <button type="button" id="control-confirm">Confirm action</button>
+      <button type="button" id="control-cancel">Cancel</button>
+    </p>
+  </section>
+  <p id="control-result" role="status" aria-live="assertive"></p>
 </main>
 <main id="task-view" hidden>
   <p><button type="button" id="close-detail">Back</button> <button type="button" id="detail-history">Open retained activity history</button></p>
