@@ -340,6 +340,14 @@ class Store:
             self.conn.execute(
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=?", (TaskStatus.CLAIMED, now, task_id)
             )
+            self._record_task_status_transition(
+                task_id,
+                str(task["status"]),
+                str(TaskStatus.CLAIMED),
+                str(task["stage"]),
+                "claim.acquired",
+                now,
+            )
             return claim_id
 
     def start_execution(
@@ -645,17 +653,22 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         stage = _validate_enum(stage, Stage, "task stage")
         status = TaskStatus.DONE if stage is Stage.DONE else TaskStatus.OPEN
-        before = self.conn.execute("SELECT stage FROM tasks WHERE id=?", (task_id,)).fetchone()
-        self.conn.execute(
-            "UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (stage, status, time.time(), task_id)
-        )
-        self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
-        if before is not None and str(before["stage"]) != str(stage):  # one small event per real transition (efficiency accounting)
+        before = self.conn.execute("SELECT stage, status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        now = time.time()
+        with self.conn:
             self.conn.execute(
-                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
-                (str(uuid.uuid4()), "stage.transition", json.dumps({"task_id": task_id, "from": str(before["stage"]), "to": str(stage)}, sort_keys=True), time.time()),
+                "UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (stage, status, now, task_id)
             )
-        self.conn.commit()
+            self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+            if before is not None and str(before["stage"]) != str(stage):  # one small event per real transition (efficiency accounting)
+                self.conn.execute(
+                    "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                    (str(uuid.uuid4()), "stage.transition", json.dumps({"task_id": task_id, "from": str(before["stage"]), "to": str(stage)}, sort_keys=True), now),
+                )
+            if before is not None:
+                self._record_task_status_transition(
+                    task_id, str(before["status"]), str(status), str(stage), "stage.transition", now
+                )
 
     def release_claim(self, claim_id: str) -> None:
         """Deactivate a claim without advancing the task stage, restoring the task to OPEN.
@@ -665,16 +678,30 @@ class Store:
         after the lease TTL.
         """
         claim_id = _validate_text(claim_id, "claim id")
-        row = self.conn.execute("SELECT task_id FROM claims WHERE id=?", (claim_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT c.task_id, t.stage, t.status FROM claims c "
+            "JOIN tasks t ON t.id=c.task_id WHERE c.id=?",
+            (claim_id,),
+        ).fetchone()
         if row is None:
             return
         task_id = str(row["task_id"])
+        now = time.time()
         with self.conn:
             self.conn.execute("UPDATE claims SET active=0 WHERE id=?", (claim_id,))
-            self.conn.execute(
+            changed = self.conn.execute(
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
-                (TaskStatus.OPEN, time.time(), task_id, TaskStatus.CLAIMED),
-            )
+                (TaskStatus.OPEN, now, task_id, TaskStatus.CLAIMED),
+            ).rowcount
+            if changed == 1:
+                self._record_task_status_transition(
+                    task_id,
+                    str(TaskStatus.CLAIMED),
+                    str(TaskStatus.OPEN),
+                    str(row["stage"]),
+                    "claim.released",
+                    now,
+                )
 
     def latest_execution_for_claim(self, claim_id: str) -> sqlite3.Row | None:
         claim_id = _validate_text(claim_id, "claim id")
@@ -765,6 +792,7 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         baseline_sha = _validate_text(baseline_sha, "baseline sha")
         now = time.time()
+        task = self.conn.execute("SELECT stage, status FROM tasks WHERE id=?", (task_id,)).fetchone()
         with self.conn:
             self.conn.execute(
                 "INSERT INTO task_baselines(task_id, baseline_sha, created_at) VALUES (?, ?, ?) "
@@ -775,6 +803,15 @@ class Store:
             cleared = self.conn.execute("UPDATE task_remediations SET cleared=1 WHERE task_id=? AND cleared=0", (task_id,)).rowcount
             self.conn.execute("UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (Stage.IMPLEMENT, TaskStatus.OPEN, now, task_id))
             self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+            if task is not None:
+                self._record_task_status_transition(
+                    task_id,
+                    str(task["status"]),
+                    str(TaskStatus.OPEN),
+                    str(Stage.IMPLEMENT),
+                    "task.baseline_advanced",
+                    now,
+                )
             for event_type, payload in (
                 ("task.baseline_advanced", {**audit_payload, "remediations_cleared": cleared}),
                 ("task.advance", {"task_id": task_id, "stage": str(Stage.IMPLEMENT), "reason": "operator advanced the task baseline"}),
@@ -806,12 +843,54 @@ class Store:
 
     def block_task(self, task_id: str) -> None:
         task_id = _validate_text(task_id, "task id")
+        task = self.conn.execute("SELECT stage, status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        now = time.time()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+                (TaskStatus.BLOCKED, now, task_id),
+            )
+            self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+            if task is not None:
+                self._record_task_status_transition(
+                    task_id,
+                    str(task["status"]),
+                    str(TaskStatus.BLOCKED),
+                    str(task["stage"]),
+                    "task.blocked",
+                    now,
+                )
+
+    def _record_task_status_transition(
+        self,
+        task_id: str,
+        previous_status: str,
+        current_status: str,
+        stage: str,
+        cause: str,
+        at: float,
+    ) -> None:
+        """Record one bounded occurrence for a real durable task-status change."""
+        if previous_status == current_status:
+            return
         self.conn.execute(
-            "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
-            (TaskStatus.BLOCKED, time.time(), task_id),
+            "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                "task.status_changed",
+                json.dumps(
+                    {
+                        "task_id": task_id,
+                        "previous_status": previous_status,
+                        "current_status": current_status,
+                        "stage": stage,
+                        "cause": cause,
+                    },
+                    sort_keys=True,
+                ),
+                at,
+            ),
         )
-        self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
-        self.conn.commit()
 
     def retire_source_task(
         self,
@@ -845,6 +924,14 @@ class Store:
             self.conn.execute(
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
                 (TaskStatus.BLOCKED, now, task["id"]),
+            )
+            self._record_task_status_transition(
+                str(task["id"]),
+                str(task["status"]),
+                str(TaskStatus.BLOCKED),
+                str(task["stage"]),
+                "task.source_retired",
+                now,
             )
             self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task["id"],))
             self.conn.execute(
@@ -923,6 +1010,14 @@ class Store:
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
                 (TaskStatus.OPEN, now, task["id"]),
             )
+            self._record_task_status_transition(
+                str(task["id"]),
+                str(task["status"]),
+                str(TaskStatus.OPEN),
+                str(task["stage"]),
+                "task.source_restored",
+                now,
+            )
             self.conn.execute(
                 "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -1000,6 +1095,14 @@ class Store:
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
                 (TaskStatus.OPEN, now, task["id"], TaskStatus.CLAIMED),
             )
+            self._record_task_status_transition(
+                str(task["id"]),
+                str(TaskStatus.CLAIMED),
+                str(TaskStatus.OPEN),
+                str(task["stage"]),
+                "recovery.stale_claim_released",
+                now,
+            )
             self.conn.execute(
                 "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
                 (
@@ -1039,10 +1142,23 @@ class Store:
             )
             if execution["claim_id"] is not None:
                 self.conn.execute("UPDATE claims SET active=0 WHERE id=? AND active=1", (execution["claim_id"],))
-                self.conn.execute(
+                changed = self.conn.execute(
                     "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
                     (TaskStatus.OPEN, now, execution["task_id"], TaskStatus.CLAIMED),
-                )
+                ).rowcount
+                if changed == 1:
+                    task = self.conn.execute(
+                        "SELECT stage FROM tasks WHERE id=?", (execution["task_id"],)
+                    ).fetchone()
+                    if task is not None:
+                        self._record_task_status_transition(
+                            str(execution["task_id"]),
+                            str(TaskStatus.CLAIMED),
+                            str(TaskStatus.OPEN),
+                            str(task["stage"]),
+                            "recovery.unknown_execution_fenced",
+                            now,
+                        )
             self.conn.execute(
                 "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
                 (
@@ -1462,6 +1578,15 @@ class Store:
             ).rowcount
             if updated != 1:
                 return False
+            stage = self.conn.execute("SELECT stage FROM tasks WHERE id=?", (task_id,)).fetchone()
+            self._record_task_status_transition(
+                task_id,
+                str(TaskStatus.BLOCKED),
+                str(TaskStatus.OPEN),
+                str(stage["stage"]) if stage is not None else "",
+                "task.unblocked",
+                now,
+            )
             cleared = self.conn.execute(
                 "UPDATE task_remediations SET cleared=1 WHERE task_id=? AND cleared=0", (task_id,)
             ).rowcount

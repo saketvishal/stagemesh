@@ -38,7 +38,8 @@ DRIVER = r"""
   // Test-only wrapper around the page's real fetch: it can withhold, fail or alter ACTUAL server responses.
   window.fetch = async (url, opts) => {
     const u = String(url);
-    const activity = u.includes("/api/v1/activity");
+    const activity = u.includes("/api/v4/activity");
+    if (activity) control.log.push("request " + u);
     if (activity && control.fail) { control.log.push("fail " + u); throw new TypeError("network down"); }
     const res = await realFetch(url, opts);
     if (!activity) return res;
@@ -94,6 +95,27 @@ DRIVER = r"""
       $("state").value = "closed"; $("state").dispatchEvent(new Event("change"));
       await until(() => rows() === 44, "closed filter");
       out.closedRows = rows();
+    },
+
+    async v4Filters() {
+      await until(() => rows() === 100, "first page");
+      $("auto").checked = false; $("auto").dispatchEvent(new Event("change"));
+      $("project").value = "team/alpha";
+      $("source").value = "github";
+      $("time_basis").value = "updated";
+      $("task_status").value = "OPEN";
+      $("source_status").value = "CLOSED";
+      $("task_event").value = "status_changed";
+      $("source_history").checked = true;
+      $("project").dispatchEvent(new Event("change"));
+      await until(() => control.log.some((entry) => entry.includes("task_event=status_changed")), "task filters");
+      out.taskUrl = control.log.filter((entry) => entry.includes("task_event=status_changed")).slice(-1)[0];
+      $("task_event").value = "";
+      $("retry_kind").value = "operator";
+      $("retry_kind").dispatchEvent(new Event("change"));
+      await until(() => control.log.some((entry) => entry.includes("retry_kind=operator")), "retry filters");
+      out.retryUrl = control.log.filter((entry) => entry.includes("retry_kind=operator")).slice(-1)[0];
+      out.counts = $("status-counts").textContent;
     },
 
     // Load more is accepted but its second-page response is still in flight when a refresh happens.
@@ -317,6 +339,18 @@ def test_focus_paging_and_filters_in_a_real_browser(fixture_base, tmp_path: Path
     assert result["closedRows"] == 44  # every third task is DONE
 
 
+def test_v4_filter_controls_emit_bounded_encoded_queries(fixture_base, tmp_path: Path):
+    result = run_scenario(fixture_base, "v4Filters", tmp_path)
+    task = result["taskUrl"]
+    assert "/api/v4/activity?" in task and "project=team%2Falpha" in task
+    assert "source=github" in task and "time_basis=updated" in task
+    assert "task_status=OPEN" in task and "source_status=CLOSED" in task
+    assert "include_source_history=true" in task and "include_task_history=true" in task
+    retry = result["retryUrl"]
+    assert "retry_kind=operator" in retry and "include_retry_history=true" in retry
+    assert "task_event=" not in retry
+
+
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):
     result = run_scenario(fixture_base, "pending", tmp_path)
     assert result["heldBeforeRefresh"] >= 1 and result["rowsWhileHeld"] == 100  # the real second page was withheld
@@ -402,7 +436,7 @@ def test_installed_wheel_serves_its_own_ui_and_requires_auth(tmp_path: Path):
             except urllib.error.HTTPError as exc:
                 return exc.code, exc.read()
 
-        for asset, needle in (("/", b"StageMesh activity"), ("/app.js", b"/api/v1/activity"), ("/app.css", b"[hidden]")):
+        for asset, needle in (("/", b"StageMesh activity"), ("/app.js", b"/api/v4/activity"), ("/app.css", b"[hidden]")):
             status, body = get(asset)
             assert status == 200 and needle in body, asset
             assert body == (UI / ("index.html" if asset == "/" else asset.lstrip("/"))).read_bytes(), asset

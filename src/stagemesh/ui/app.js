@@ -1,5 +1,5 @@
 "use strict";
-// Read-only client for /api/v1 (docs/operator-ui-contract.md). The token lives in memory only.
+// Read-only client for /api/v4 (docs/operator-ui-contract.md). The token lives in memory only.
 (() => {
   const params = new URLSearchParams(location.hash.slice(1));
   const token = params.get("token") || "";
@@ -8,7 +8,8 @@
   const $ = (id) => document.getElementById(id);
   const COLUMNS = [
     ["at", "Time"], ["kind", "Kind"], ["state", "State"], ["task_id", "Task"], ["stage", "Stage"],
-    ["status", "Status"], ["provider", "Provider"], ["title", "Title / detail"], ["id", "Id"],
+    ["current_task_status", "Task status"], ["source_status", "Source status"],
+    ["provider", "Provider"], ["title", "Title / detail"], ["id", "Id"],
   ];
   const POLL_MS = 10000;
   const MAX_PAGES = 10; // 1000 retained rows / 100 per page
@@ -47,9 +48,16 @@
 
   function queryString(offset) {
     const q = new URLSearchParams();
-    for (const key of ["state", "stage"]) if ($(key).value) q.set(key, $(key).value);
+    for (const key of ["state", "stage", "time_basis", "source_status", "task_status", "task_event", "retry_kind"]) {
+      if ($(key).value) q.set(key, $(key).value);
+    }
     if ($("task").value.trim()) q.set("task_id", $("task").value.trim());
     if ($("provider").value.trim()) q.set("provider", $("provider").value.trim());
+    if ($("project").value.trim()) q.set("project", $("project").value.trim());
+    if ($("source").value.trim()) q.set("source", $("source").value.trim());
+    if ($("source_history").checked) q.set("include_source_history", "true");
+    if ($("task_history").checked || $("task_event").value) q.set("include_task_history", "true");
+    if ($("retry_history").checked || $("retry_kind").value) q.set("include_retry_history", "true");
     const [since, until] = periodRange();
     if (since && !isNaN(since)) q.set("since", since.toISOString());
     if (until && !isNaN(until)) q.set("until", until.toISOString());
@@ -84,7 +92,7 @@
       let page;
       let fetched = 0;
       do {
-        page = await api("/api/v1/activity?" + queryString(offset));
+        page = await api("/api/v4/activity?" + queryString(offset));
         if (mine !== generation) return; // a newer request for the same range superseded this one
         for (const e of page.entries) fresh.set(e.kind + ":" + e.id, e);
         offset = page.next_offset;
@@ -151,8 +159,13 @@
         b.addEventListener("click", () => { $("task").value = e.task_id; reload(); });
         td.replaceChildren(b);
       } else td.textContent = "—";
-      cell(tr, e.stage); cell(tr, e.status); cell(tr, e.provider);
-      cell(tr, e.title || [e.execution_kind, e.event_type, e.result_code, e.candidate_sha && e.candidate_sha.slice(0, 12)].filter(Boolean).join(" "));
+      cell(tr, e.stage); cell(tr, e.current_task_status || e.status); cell(tr, e.source_status); cell(tr, e.provider);
+      cell(tr, e.title || [
+        e.execution_kind, e.event_type, e.result_code, e.retry_kind,
+        e.rework_required && "rework required", e.previous_task_status && (e.previous_task_status + " → " + e.status),
+        e.previous_source_status && (e.previous_source_status + " → " + e.source_status),
+        e.candidate_sha && e.candidate_sha.slice(0, 12),
+      ].filter(Boolean).join(" "));
       cell(tr, e.id);
     }
     // Rebuilding rows must not drop keyboard focus (auto-refresh runs every few seconds).
@@ -169,6 +182,10 @@
     $("more").hidden = nextOffset === null;
     if (moreHadFocus && nextOffset === null) $("table").focus(); // the button vanished; keep focus in the page
     $("count").textContent = rows.size + " loaded of " + page.total + (page.truncated ? "+" : "");
+    const counts = page.status_counts || {};
+    const taskCounts = counts.task || {};
+    $("status-counts").textContent = ["OPEN", "CLAIMED", "BLOCKED", "DONE"]
+      .map((key) => key + " " + (taskCounts[key] || 0)).join(" · ");
     $("freshness").textContent = "updated " + lastGood.toLocaleTimeString();
     if (page.truncated) setMessage("Older records were excluded by the retention cap; narrow the time range for a complete view.", "warn");
     else if (rows.size === 0) setMessage("No activity matches these filters.");
@@ -202,11 +219,14 @@
 
   buildHead();
   $("filters").addEventListener("submit", (e) => e.preventDefault());
-  for (const id of ["period", "since", "until", "state", "stage"]) $(id).addEventListener("change", () => {
+  for (const id of [
+    "period", "since", "until", "state", "stage", "time_basis", "source_status", "task_status",
+    "task_event", "retry_kind", "source_history", "task_history", "retry_history",
+  ]) $(id).addEventListener("change", () => {
     for (const el of document.querySelectorAll(".custom")) el.hidden = $("period").value !== "custom";
     reload();
   });
-  for (const id of ["task", "provider"]) $(id).addEventListener("change", reload);
+  for (const id of ["task", "provider", "project", "source"]) $(id).addEventListener("change", reload);
   $("refresh").addEventListener("click", refresh);
   $("more").addEventListener("click", loadMore);
   $("auto").addEventListener("change", schedule);
@@ -216,7 +236,7 @@
     if (e.key === "/") { e.preventDefault(); $("task").focus(); }
     else if (e.key === "r") refresh();
   });
-  api("/api/v1/health").then((h) => { $("version").textContent = "v" + h.version; }, () => {});
+  api("/api/v4/health").then((h) => { $("version").textContent = "v" + h.version; }, () => {});
   loadRange(false);
   schedule();
 })();

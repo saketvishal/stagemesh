@@ -34,8 +34,33 @@
       <option>PLAN</option><option>IMPLEMENT</option><option>VALIDATE</option><option>REVIEW</option><option>INTEGRATE</option><option>DONE</option>
     </select>
   </label>
+  <label>Time meaning
+    <select id="time_basis">
+      <option value="activity">Activity</option><option value="opened">Opened</option>
+      <option value="updated">Updated</option><option value="completed">Completed</option>
+    </select>
+  </label>
+  <label>Task status
+    <select id="task_status"><option value="">All</option>
+      <option>OPEN</option><option>CLAIMED</option><option>BLOCKED</option><option>DONE</option>
+    </select>
+  </label>
+  <label>Source status
+    <select id="source_status"><option value="">All</option><option>OPEN</option><option>CLOSED</option></select>
+  </label>
   <label>Task <input id="task" type="search" maxlength="200" placeholder="task id (press / to focus)"></label>
+  <label>Project <input id="project" type="search" maxlength="200"></label>
+  <label>Source <input id="source" type="search" maxlength="200" placeholder="for example github"></label>
   <label>Provider <input id="provider" type="search" maxlength="200"></label>
+  <label>Task event
+    <select id="task_event"><option value="">All</option><option value="status_changed">Status changed</option><option value="rework_required">Rework required</option></select>
+  </label>
+  <label>Retry kind
+    <select id="retry_kind"><option value="">All</option><option value="automatic_provider">Automatic provider</option><option value="blocked_reentry">Blocked re-entry</option><option value="remediation">Remediation</option><option value="operator">Operator</option></select>
+  </label>
+  <label class="inline"><input id="source_history" type="checkbox"> Source history</label>
+  <label class="inline"><input id="task_history" type="checkbox"> Task history</label>
+  <label class="inline"><input id="retry_history" type="checkbox"> Retry history</label>
   <button type="button" id="refresh">Refresh (r)</button>
   <label class="inline"><input id="auto" type="checkbox" checked> Auto-refresh</label>
 </form>
@@ -45,7 +70,7 @@
   <thead><tr id="head"></tr></thead>
   <tbody id="rows"></tbody>
 </table>
-<p><button type="button" id="more" hidden>Load more</button> <span id="count" class="muted"></span></p>
+<p><button type="button" id="more" hidden>Load more</button> <span id="count" class="muted"></span> <span id="status-counts" class="muted" aria-live="polite"></span></p>
 <script src="/app.js"></script>
 </body>
 </html>

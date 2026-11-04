@@ -81,6 +81,14 @@ def _direct_v3(db, target="/api/v3/activity", *, method="GET", headers=None):
     return status, json.loads(raw), extra
 
 
+def _direct_v4(db, target="/api/v4/activity", *, method="GET", headers=None):
+    api = ActivityApi(db, TOKEN)
+    api.bind(12345)
+    defaults = {"Host": "127.0.0.1:12345", "Authorization": f"Bearer {TOKEN}"}
+    status, raw, extra = api.handle(method, target, defaults if headers is None else headers)
+    return status, json.loads(raw), extra
+
+
 def test_v2_project_time_basis_and_counts_leave_v1_response_unchanged(db):
     store = Store(db)
     store.conn.execute("UPDATE tasks SET project='team/alpha' WHERE id='t0'")
@@ -154,6 +162,88 @@ def test_v3_health_and_auth_errors_use_v3_contract(db):
 def test_v3_invalid_source_filters_use_v3_error_envelope(db, query):
     status, body, _ = _direct_v3(db, "/api/v3/activity?" + query)
     assert status == 400 and body["contract"] == "stagemesh.activity/3"
+    assert body["error"]["code"] == "invalid_query"
+
+
+def test_v4_projects_task_status_and_rework_history_without_changing_v3(db):
+    store = Store(db)
+    task = store.upsert_task("task history", source_id="history")
+    store.block_task(task)
+    assert store.unblock_task(task)
+    candidate = "a" * 40
+    rework = store.add_audit_event(
+        "task.remediation_queued",
+        {"task_id": task, "candidate_sha": candidate, "stage": "REVIEW", "finding_count": 1},
+    )
+    store.close()
+    before = db.read_bytes()
+
+    status, body, _ = _direct_v4(
+        db,
+        "/api/v4/activity?task_id=" + task + "&include_task_history=true",
+    )
+    assert status == 200 and body["contract"] == "stagemesh.activity/4"
+    history = [entry for entry in body["entries"] if entry["kind"] == "task_transition"]
+    assert {entry["id"] for entry in history} >= {rework}
+    assert any(entry["previous_task_status"] == "BLOCKED" for entry in history)
+    assert next(entry for entry in history if entry["id"] == rework)["candidate_sha"] == candidate
+    assert body["status_counts"]["task_transition"]["REWORK_REQUIRED"] == 1
+
+    _, v3, _ = _direct_v3(db)
+    assert "task_transition" not in v3["status_counts"]
+    assert all("current_task_status" not in entry for entry in v3["entries"])
+    assert _direct_v3(db, "/api/v3/activity?include_task_history=true")[0] == 400
+    assert _direct_v3(db, "/api/v3/activity?task_status=BLOCKED")[0] == 400
+    assert db.read_bytes() == before
+
+
+def test_v4_projects_typed_retry_history_without_changing_v3(db):
+    store = Store(db)
+    task = store.upsert_task("retry history", source_id="retry-history")
+    retry = store.add_audit_event(
+        "task.auto_retried_provider_failure",
+        {"task_id": task, "attempt": 1, "of": 2},
+    )
+    store.close()
+    before = db.read_bytes()
+
+    status, body, _ = _direct_v4(
+        db,
+        "/api/v4/activity?task_id=" + task
+        + "&include_retry_history=true&retry_kind=automatic_provider",
+    )
+    assert status == 200 and body["contract"] == "stagemesh.activity/4"
+    assert [entry["id"] for entry in body["entries"]] == [retry]
+    entry = body["entries"][0]
+    assert entry["kind"] == "retry" and entry["retry_kind"] == "automatic_provider"
+    assert (entry["retry_attempt"], entry["retry_limit"], entry["retry_state"]) == (1, 2, "QUEUED")
+    assert body["status_counts"]["retry"]["automatic_provider"] == 1
+
+    _, v3, _ = _direct_v3(db)
+    assert "retry" not in v3["status_counts"]
+    assert all("retry_kind" not in item for item in v3["entries"])
+    assert _direct_v3(db, "/api/v3/activity?include_retry_history=true")[0] == 400
+    assert db.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "task_event=unknown&include_task_history=true",
+        "task_event=status_changed",
+        "task_status=UNKNOWN",
+        "include_task_history=1",
+        "include_task_history=true&include_task_history=false",
+        "retry_kind=unknown&include_retry_history=true",
+        "retry_kind=operator",
+        "include_retry_history=1",
+        "include_retry_history=true&include_retry_history=false",
+        "task_event=status_changed&include_task_history=true&retry_kind=operator&include_retry_history=true",
+    ],
+)
+def test_v4_invalid_task_history_filters_use_v4_error_envelope(db, query):
+    status, body, _ = _direct_v4(db, "/api/v4/activity?" + query)
+    assert status == 400 and body["contract"] == "stagemesh.activity/4"
     assert body["error"]["code"] == "invalid_query"
 
 
