@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from test_run_window import (  # noqa: F401 - FRESH keeps the autouse runtime probe fixture's import path stable
     FRESH,
+    IN_SYNC,
+    OK_PROVIDERS,
+    Clock,
     _no_real_runtime_probe,
     go,
     window,
 )
-from test_survivor_wave import make_store
+from test_survivor_wave import Rig, make_store
 
+import stagemesh.cli as cli_module
 import stagemesh.run_window as rw
 from stagemesh.audit import record_audit
 from stagemesh.block_kinds import (
@@ -25,6 +30,7 @@ from stagemesh.block_kinds import (
     reentry_refusal,
 )
 from stagemesh.domain import EvidenceKind, EvidenceStatus, TaskStatus
+from stagemesh.persistence import Store
 from stagemesh.survivor_wave import RunResult
 
 
@@ -153,13 +159,20 @@ def test_a_task_that_hits_the_step_cap_with_progress_is_resumed_from_its_state_a
             return RunResult("MAX_STEPS", "stopped after 8 steps")
         return rig.finish_done(task_id)
 
-    report, store, rig, _ = go(tmp_path, ["148"], {"148": behaviour})
+    report, store, rig, _ = go(
+        tmp_path, ["148"], {"148": behaviour}, max_steps_per_task=1
+    )
 
     assert rig.runs == ["148", "148"]
     (note,) = report.continued
     assert note["task_id"] == "148" and note["validation"] == "PASSED" and note["candidate_sha"] and note["continue"] is True
+    assert note["window_id"] == report.window_id
+    assert note["wave_run"] == note["child_steps"] == note["step_limit"] == 1
+    assert note["progressed"] is True
+    assert note["continuations_used"] == 0 and note["continuation_limit"] == 3
     (record,) = report.tasks
-    assert record.outcome == "done" and record.runs == 2  # one auditable record, two runs
+    assert record.outcome == "done" and record.runs == 2  # one auditable record, two wave runs
+    assert record.child_steps == 2 and record.step_budget_state == "completed"
     assert rig.prs == ["148"]  # opened once, for the finished task
     assert report.counts() == {"done": 1}
     assert store.conn.execute("SELECT COUNT(*) FROM audit_events WHERE event_type='task.max_steps_continuation'").fetchone()[0] == 1
@@ -169,11 +182,17 @@ def test_a_task_that_hits_the_step_cap_with_progress_is_resumed_from_its_state_a
 
 
 def test_a_step_capped_run_that_made_no_progress_is_not_repeated(tmp_path: Path) -> None:
-    report, _store, rig, _ = go(tmp_path, ["148"], {"148": RunResult("MAX_STEPS", "stopped after 8 steps")})
+    report, _store, rig, _ = go(
+        tmp_path,
+        ["148"],
+        {"148": RunResult("MAX_STEPS", "stopped after 1 step")},
+        max_steps_per_task=1,
+    )
 
     assert rig.runs == ["148"] and not report.continued
     (record,) = report.tasks
     assert record.outcome == "open" and "not continued: the run made no progress" in record.reason
+    assert record.runs == record.child_steps == 1 and record.step_budget_state == "no_progress"
 
 
 def test_continuations_are_bounded(tmp_path: Path) -> None:
@@ -181,11 +200,134 @@ def test_continuations_are_bounded(tmp_path: Path) -> None:
         progress(rig, task_id)  # always progressing, never finishing
         return RunResult("MAX_STEPS", "stopped after 8 steps")
 
-    report, _store, rig, _ = go(tmp_path, ["148"], {"148": behaviour}, max_continuations=2)
+    report, _store, rig, _ = go(
+        tmp_path,
+        ["148"],
+        {"148": behaviour},
+        max_steps_per_task=1,
+        max_continuations=2,
+    )
 
     assert rig.runs == ["148"] * 3  # the first run plus two continuations
     (record,) = report.tasks
     assert record.outcome == "open" and record.runs == 3 and "2 continuation(s) already used (limit 2)" in record.reason
+    assert record.child_steps == 3 and record.step_budget_state == "continuation_limit_exhausted"
+
+
+def test_default_staged_steps_finish_inside_one_wave_without_spending_an_outer_continuation(tmp_path: Path) -> None:
+    def behaviour(rig, task_id: str) -> RunResult:  # type: ignore[no-untyped-def]
+        if len(rig.runs) == 1:
+            progress(rig, task_id)
+            return RunResult("MAX_STEPS", "one child step yielded")
+        return rig.finish_done(task_id)
+
+    report, _store, rig, _ = go(tmp_path, ["148"], {"148": behaviour})
+
+    assert rig.runs == ["148", "148"]
+    assert not report.continued
+    (record,) = report.tasks
+    assert record.outcome == "done" and record.runs == 1
+    assert record.child_steps == 2 and record.step_limit == 8
+    assert record.step_budget_state == "completed"
+
+
+def test_default_staged_budget_reports_child_steps_separately_from_outer_continuations(tmp_path: Path) -> None:
+    def behaviour(rig, task_id: str) -> RunResult:  # type: ignore[no-untyped-def]
+        progress(rig, task_id)
+        return RunResult("MAX_STEPS", "one child step yielded")
+
+    report, _store, rig, _ = go(
+        tmp_path, ["148"], {"148": behaviour}, max_continuations=2
+    )
+
+    assert rig.runs == ["148"] * 24  # three wave runs, each bounded to eight child steps
+    assert len(report.continued) == 2
+    (record,) = report.tasks
+    assert record.outcome == "open" and record.runs == 3
+    assert record.child_steps == 24 and record.step_limit == 8
+    assert record.step_budget_state == "continuation_limit_exhausted"
+    assert "3 wave run(s), 24 child step(s), step limit 8" in rw.format_window_report(report)
+
+
+def test_default_staged_no_progress_stops_after_one_bounded_wave(tmp_path: Path) -> None:
+    report, _store, rig, _ = go(
+        tmp_path,
+        ["148"],
+        {"148": RunResult("MAX_STEPS", "one child step yielded")},
+    )
+
+    assert rig.runs == ["148"] * 8
+    assert not report.continued
+    (record,) = report.tasks
+    assert record.outcome == "open" and record.runs == 1
+    assert record.child_steps == 8 and record.step_limit == 8
+    assert record.step_budget_state == "no_progress"
+
+
+def test_capped_task_restart_preserves_candidate_evidence_and_prior_window_receipts(tmp_path: Path) -> None:
+    def first_window(rig, task_id: str) -> RunResult:  # type: ignore[no-untyped-def]
+        progress(rig, task_id)
+        return RunResult("MAX_STEPS", "one child step yielded")
+
+    first, store, rig, _ = go(
+        tmp_path,
+        ["148"],
+        {"148": first_window},
+        max_steps_per_task=1,
+        max_continuations=0,
+    )
+    project = store.db_path.parent.parent
+    candidate_count = store.conn.execute(
+        "SELECT COUNT(*) FROM candidates WHERE task_id='148'"
+    ).fetchone()[0]
+    evidence_count = store.conn.execute(
+        "SELECT COUNT(*) FROM evidence WHERE task_id='148'"
+    ).fetchone()[0]
+    receipt_rows = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type='task.max_steps_continuation' ORDER BY created_at"
+    ).fetchall()
+    assert rig.runs == ["148"] and len(receipt_rows) == 1
+    receipt = json.loads(receipt_rows[0]["payload"])
+    assert receipt["window_id"] == first.window_id
+    assert receipt["child_steps"] == receipt["step_limit"] == 1
+    assert receipt["progressed"] is True and receipt["continue"] is False
+    store.close()
+
+    reopened = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    reopened.migrate()
+    second_rig = Rig(project)
+    hooks = second_rig.hooks()
+    hooks.repo_state = lambda: IN_SYNC
+    second = rw.run_window(
+        reopened,
+        project,
+        cli_module.load_config(project),
+        rw.WindowOptions(
+            tasks=["148"],
+            max_steps_per_task=1,
+            max_continuations=0,
+            report_path=tmp_path / "out" / "restart.json",
+        ),
+        hooks,
+        base_ref="refs/heads/main",
+        staging_ref="refs/heads/wave/staging",
+        runtime=FRESH,
+        list_prs=lambda _project: [],
+        provider_check=OK_PROVIDERS,
+        clock=Clock(),
+    )
+
+    assert second.window_id != first.window_id and second_rig.runs == ["148"]
+    assert second.counts() == {"done": 1}
+    assert reopened.conn.execute(
+        "SELECT COUNT(*) FROM candidates WHERE task_id='148'"
+    ).fetchone()[0] == candidate_count + 1
+    assert reopened.conn.execute(
+        "SELECT COUNT(*) FROM evidence WHERE task_id='148'"
+    ).fetchone()[0] > evidence_count
+    assert reopened.conn.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE event_type='task.max_steps_continuation'"
+    ).fetchone()[0] == len(receipt_rows)
 
 
 def test_a_continued_task_does_not_count_against_the_task_limit(tmp_path: Path) -> None:

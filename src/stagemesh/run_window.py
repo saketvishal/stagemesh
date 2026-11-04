@@ -187,13 +187,18 @@ class WindowReport:
         """One record per task: the latest run of it, with how many runs the window gave it."""
         latest: dict[str, Any] = {}
         runs: dict[str, int] = {}
+        child_steps: dict[str, int] = {}
         for wave in self.waves:
             for task in wave.tasks:
                 if task.outcome in ("skipped", "not_started") and task.task_id in latest:
                     continue
                 runs[task.task_id] = runs.get(task.task_id, 0) + 1
+                child_steps[task.task_id] = child_steps.get(task.task_id, 0) + task.child_steps
                 latest[task.task_id] = task
-        return [replace(task, runs=runs[task_id]) for task_id, task in latest.items()]
+        return [
+            replace(task, runs=runs[task_id], child_steps=child_steps[task_id])
+            for task_id, task in latest.items()
+        ]
 
     @property
     def stopped_early(self) -> bool:
@@ -433,7 +438,18 @@ def _meaningful_progress(store: Store, task_id: str, before: Any) -> bool:
     return before is not None and made_progress(before, progress_state(store, task_id))[0]
 
 
-def continuation(store: Store, task_id: str, used: int, limit: int, progressed: bool) -> dict[str, Any]:
+def continuation(
+    store: Store,
+    task_id: str,
+    used: int,
+    limit: int,
+    progressed: bool,
+    *,
+    window_id: str,
+    wave_run: int,
+    child_steps: int,
+    step_limit: int,
+) -> dict[str, Any]:
     """Should a task that ran out of steps get another run from its recorded state? Decided by the recovery rules, and audited.
 
     Nothing is restarted: the next run resumes the stage the task is in, with its candidate, evidence lineage and (when review findings
@@ -461,6 +477,13 @@ def continuation(store: Store, task_id: str, used: int, limit: int, progressed: 
         "integration": status(EvidenceKind.INTEGRATION),
         "open_findings": open_findings,
         "attempt": used + 1,
+        "window_id": window_id,
+        "wave_run": wave_run,
+        "child_steps": child_steps,
+        "step_limit": step_limit,
+        "progressed": progressed,
+        "continuations_used": used,
+        "continuation_limit": limit,
     }
     ctx = RecoveryContext(
         stage=str(state["stage"]),
@@ -1188,11 +1211,35 @@ def run_window(
                 resume.pop(record.task_id, None)
                 if record.outcome == "open" and record.stop_reason == "MAX_STEPS":
                     count = sum(1 for entry in report.continued if entry["task_id"] == record.task_id)
-                    note = continuation(store, record.task_id, count, options.max_continuations, _meaningful_progress(store, record.task_id, before.get(record.task_id)))
+                    progressed = _meaningful_progress(store, record.task_id, before.get(record.task_id))
+                    wave_run = sum(
+                        1
+                        for previous_wave in report.waves
+                        if any(task.task_id == record.task_id for task in previous_wave.tasks)
+                    )
+                    note = continuation(
+                        store,
+                        record.task_id,
+                        count,
+                        options.max_continuations,
+                        progressed,
+                        window_id=report.window_id,
+                        wave_run=wave_run,
+                        child_steps=record.child_steps,
+                        step_limit=options.max_steps_per_task,
+                    )
                     if note["continue"]:
+                        record.step_budget_state = "outer_continuation_scheduled"
                         resume[record.task_id] = count + 1
                         report.continued.append(note)
                     else:
+                        record.step_budget_state = (
+                            "continuation_limit_exhausted"
+                            if count >= options.max_continuations
+                            else "no_progress"
+                            if not progressed
+                            else "continuation_refused"
+                        )
                         record.reason = f"{record.reason}; not continued: {note['why']}"
             if wave.stopped_early or not wave.ok:
                 report.stop_reason = wave.stop_reason or "the wave reported a violation"
@@ -1402,6 +1449,11 @@ def format_window_report(report: WindowReport) -> str:
     for task in report.tasks:
         landing = {"pr_opened": " -> PR opened", "locally_integrated": " -> integrated locally", "staged_not_published": " -> staged, no PR", "pr_failed": " -> PR NOT opened", "fast_forward_merged": " -> fast-forward merged"}.get(task.landing or "", "")
         lines.append(f"  {task.task_id}: {task.outcome}{landing} - {task.title}")
+        lines.append(
+            f"      bounded work: {task.runs} wave run(s), {task.child_steps} child step(s)"
+            + (f", step limit {task.step_limit}" if task.step_limit is not None else "")
+            + (f", state {task.step_budget_state}" if task.step_budget_state else "")
+        )
         capability_report = report.capability_usage.get(task.task_id) or {}
         if capability_report.get("status") == "available":
             capability_rows = capability_report.get("capabilities") or []

@@ -107,6 +107,9 @@ class TaskRecord:
     infrastructure_signature: str | None = None
     tool_failure: dict[str, Any] | None = None
     runs: int = 1  # how many times a run window ran this task (more than one after a step-cap continuation)
+    child_steps: int = 0  # staged one-step child dispatches, separate from outer wave runs
+    step_limit: int | None = None
+    step_budget_state: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -679,6 +682,14 @@ def run_wave(
                 except Exception as exc:  # noqa: BLE001 - a crashed runner is an infrastructure signal, not a task verdict
                     result = RunResult("RUNNER_CRASH", f"{type(exc).__name__}: {exc}", 3)
                 record.stop_reason = result.stop_reason
+                record.child_steps = steps[task_id]
+                record.step_limit = max_steps
+                if result.stop_reason == "MAX_STEPS":
+                    record.step_budget_state = (
+                        "internal_step_limit" if steps[task_id] >= max_steps else "child_step_yielded"
+                    )
+                elif result.stop_reason == "DONE":
+                    record.step_budget_state = "completed"
                 _snapshot(store, record, started_at[task_id])
                 _classify(store, record, result)
                 if result.stop_reason in {"STOP_MONITOR_FAILED", "STOP_CLEANUP_INCOMPLETE"}:

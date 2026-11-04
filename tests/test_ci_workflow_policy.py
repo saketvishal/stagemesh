@@ -85,6 +85,8 @@ def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:
         recovery = _step(job, "Autonomous recovery ledger")
         assert "tests/test_autonomous_recovery.py" in recovery
         assert "tests/test_recovery_ledger.py" in recovery
+        delivery = _step(job, "Delivery and window regressions")
+        assert "tests/test_autonomous_window.py" in delivery
         assert focused_condition in _step(job, "Stabilization matrix")
         operator = _step(job, "Operator activity contract and read-only API")
         assert focused_condition in operator

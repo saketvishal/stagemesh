@@ -488,6 +488,10 @@ Missing, skipped, pending, failed or uncertain required checks never count as gr
 above 1 is refused for automatic merging. Command-line required check names add
 to the project's list and cannot remove its required gates.
 
+Run-window child steps, wave runs, outer continuations, restart behavior, audit
+receipts, and their independent CI acceptance checks are defined in
+[docs/run-window-budgets.md](docs/run-window-budgets.md).
+
 Both policies reuse supervised exact-candidate fast-forward landing. The client
 proves ancestry, pins repository URLs, and atomically compares the remote main
 with the previously verified base before updating it to the reviewed SHA. A
