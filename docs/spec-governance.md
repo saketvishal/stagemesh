@@ -77,6 +77,51 @@ Use `owner_decision_required` to label a genuine unresolved product decision; it
 an answer. A `waiver_request` must contain a non-empty actor and a reason of at most 500 characters. It is visible for review and never
 erases malformed, stale, structural, validator, or behavioral-evidence failures.
 
+## Decision provenance and risk policy
+
+Every added, modified, removed, or superseded requirement names an `owner_role` and at least one `decision_refs` entry. References may
+be bounded project-relative paths with optional anchors or HTTPS URLs without embedded credentials. StageMesh validates their form but
+does not fetch them and does not infer that a document or actor approved a decision. Supersession is explicit, and the replacement must
+be a distinct active requirement. The manifest also reports deterministic added, modified, removed, superseded, and unchanged counts;
+the unchanged-ID sample is bounded.
+
+Projects may opt into provider-neutral risk classes:
+
+```json
+{
+  "routing": {"require_independent_review": true},
+  "spec_governance": {
+    "adapter": "openspec",
+    "version": "layout-v1",
+    "risk_classes": {
+      "ordinary": {
+        "required_owner_roles": ["product-owner"],
+        "required_validation_gates": [],
+        "require_independent_review": false
+      },
+      "sensitive": {
+        "required_owner_roles": ["product-owner", "security-owner"],
+        "required_validation_gates": ["security-tests"],
+        "require_independent_review": true
+      }
+    }
+  }
+}
+```
+
+When risk classes are configured, each material requirement delta must declare one configured `risk_class`. Exact-candidate validation
+then requires one approval record per required role, including `requirement_id`, bounded `actor`, `role`, a decision reference already
+declared on that requirement, the exact candidate revision, and the current policy fingerprint. `spec-audit --json` reports the
+fingerprint and configured class names; it contains no approval secret and changes whenever the canonical policy changes. Named gates
+must appear in the validator's actually executed gate set—the manifest cannot self-certify them. A class that requires independent
+review is rejected at configuration time if the normal StageMesh independent-review lifecycle is disabled; the risk gate does not
+create a second reviewer lifecycle or treat an approval record as code review.
+
+Pre-implementation checks validate the declared class and policy shape without demanding evidence that can only exist after a candidate
+is built. Exact-candidate checks fail closed for missing roles, stale candidate or policy identity, undeclared decision references,
+missing executed gates, and unknown classes. Lower-risk classes inherit only their own requirements. Waivers remain visible but cannot
+bypass any of these failures.
+
 ## Optional pinned OpenSpec validation
 
 Projects that already installed and reviewed OpenSpec may opt into a local command and exact version pin:

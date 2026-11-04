@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 
 from stagemesh.spec_integrity import (
-    CustomSpecAdapter, OpenSpecAdapter, structural_impact_manifest,
+    CustomSpecAdapter,
+    OpenSpecAdapter,
+    structural_impact_manifest,
 )
 from stagemesh.spec_refs import SpecAdapterError
 
@@ -49,9 +51,9 @@ class SpecAdapterTests(unittest.TestCase):
 
     def test_manifest_classifies_changes_and_preserves_revision_identity(self):
         path = "openspec/specs/auth/spec.md"
-        self.write(path, "### Requirement: Login\nOld.\n### Requirement: Retire\nGone.\n")
+        self.write(path, "### Requirement: Login\nOld.\n### Requirement: Retire\nGone.\n### Requirement: Stay\nSame.\n")
         before = self.discover()
-        self.write(path, "### Requirement: Login\nNew.\n### Requirement: Add\nAdded.\n")
+        self.write(path, "### Requirement: Login\nNew.\n### Requirement: Add\nAdded.\n### Requirement: Stay\nSame.\n")
         result = self.impact(before, self.discover(), [path, "src/unknown.py", path])
         self.assertEqual(result["schema_version"], 1)
         self.assertEqual(result["assessment"], "structural-only")
@@ -62,7 +64,103 @@ class SpecAdapterTests(unittest.TestCase):
                          [("added", "requirement-add"), ("modified", "requirement-login"),
                           ("removed", "requirement-retire")])
         self.assertEqual(result["unmapped_files"], ["src/unknown.py"])
+        self.assertEqual(result["classification_counts"], {
+            "added": 1, "modified": 1, "removed": 1, "superseded": 0, "unchanged": 1,
+        })
+        self.assertEqual(result["unchanged_requirement_ids"], [path + "#requirement-stay"])
+        self.assertEqual(result["unchanged_requirements_omitted"], 0)
         self.assertEqual(json.loads(json.dumps(result)), result)
+
+    def test_explicit_supersession_and_decision_provenance_are_deterministic(self):
+        path = "openspec/specs/navigation/spec.md"
+        self.write(path, "### Requirement: Drawer\nUse a drawer.\n")
+        before = self.discover()
+        self.write(path, "### Requirement: Bottom Tabs\nUse bottom tabs.\n")
+        after = self.discover()
+        old = path + "#requirement-drawer"
+        new = path + "#requirement-bottom-tabs"
+        result = structural_impact_manifest(
+            before,
+            after,
+            [path],
+            base_revision="base",
+            candidate_revision="candidate",
+            supersessions={old: new},
+            change_provenance={
+                old: {"owner_role": "product-owner", "decision_refs": ["docs/decisions/nav.md#approved"]},
+                new: {"owner_role": "product-owner", "decision_refs": ["https://example.invalid/decisions/nav"]},
+            },
+        )
+        records = {item["requirement_id"]: item for item in result["requirements"]}
+        self.assertEqual(records[old]["change"], "superseded")
+        self.assertEqual(records[old]["superseded_by"], new)
+        self.assertEqual(records[new]["change"], "added")
+        self.assertEqual(records[new]["owner_role"], "product-owner")
+        self.assertEqual(result["classification_counts"]["superseded"], 1)
+        self.assertEqual(result["classification_counts"]["removed"], 0)
+
+        with self.assertRaises(SpecAdapterError):
+            structural_impact_manifest(
+                before,
+                after,
+                [path],
+                base_revision="base",
+                candidate_revision="candidate",
+                supersessions={new: old},
+            )
+        with self.assertRaises(SpecAdapterError):
+            structural_impact_manifest(
+                before,
+                after,
+                [path],
+                base_revision="base",
+                candidate_revision="candidate",
+                supersessions={old: "MISSING"},
+            )
+
+        for protected_field in ("requirement_id", "owner_id", "path", "change", "superseded_by"):
+            with self.subTest(protected_field=protected_field), self.assertRaises(SpecAdapterError):
+                structural_impact_manifest(
+                    before,
+                    after,
+                    [path],
+                    base_revision="base",
+                    candidate_revision="candidate",
+                    change_provenance={old: {protected_field: "untrusted"}},
+                )
+
+        with self.assertRaises(SpecAdapterError):
+            structural_impact_manifest(
+                before,
+                after,
+                [path],
+                base_revision="base",
+                candidate_revision="candidate",
+                change_provenance={"UNKNOWN": {
+                    "owner_role": "product-owner",
+                    "decision_refs": ["docs/decisions/nav.md#approved"],
+                }},
+            )
+        for invalid in ({1: {}}, {old: []}):
+            with self.subTest(invalid=invalid), self.assertRaises(SpecAdapterError):
+                structural_impact_manifest(
+                    before,
+                    after,
+                    [path],
+                    base_revision="base",
+                    candidate_revision="candidate",
+                    change_provenance=invalid,
+                )
+        for invalid in ({1: new}, {old: 1}):
+            with self.subTest(invalid=invalid), self.assertRaises(SpecAdapterError):
+                structural_impact_manifest(
+                    before,
+                    after,
+                    [path],
+                    base_revision="base",
+                    candidate_revision="candidate",
+                    supersessions=invalid,
+                )
 
     def test_removed_file_and_title_rename_are_not_semantic_matches(self):
         path = "openspec/specs/a/spec.md"

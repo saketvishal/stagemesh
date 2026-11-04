@@ -32,12 +32,26 @@ def _manifest(**overrides: object) -> dict[str, object]:
         "changed_files": [],
         "owners": [_owner("auth", "openspec/specs/auth/spec.md", "AUTH-LOGIN", "Users must log in.")],
         "requirements": [],
+        "classification_counts": {
+            "added": 0, "modified": 0, "removed": 0, "superseded": 0, "unchanged": 0,
+        },
+        "unchanged_requirement_ids": [],
+        "unchanged_requirements_omitted": 0,
         "unmapped_files": [],
         "unresolved_references": [],
         "sync_status": "in_sync",
         "validation_status": "passed",
     }
     manifest.update(overrides)
+    if "classification_counts" not in overrides:
+        requirements = manifest["requirements"]
+        manifest["classification_counts"] = {
+            label: sum(
+                1 for item in requirements
+                if isinstance(item, dict) and item.get("change") == label
+            )
+            for label in ("added", "modified", "removed", "superseded")
+        } | {"unchanged": len(manifest["unchanged_requirement_ids"])}
     return manifest
 
 
@@ -95,6 +109,8 @@ def test_requirement_update_with_stale_browser_evidence_blocks_exact_candidate()
                     "owner_id": "auth",
                     "path": "openspec/specs/auth/spec.md",
                     "change": "modified",
+                    "owner_role": "product-owner",
+                    "decision_refs": ["docs/decisions/auth.md#approved"],
                 }
             ],
             behavioral_evidence=[
@@ -135,6 +151,8 @@ def test_benign_scoped_requirement_change_passes_with_exact_behavioral_evidence(
                     "owner_id": "auth",
                     "path": "openspec/specs/auth/spec.md",
                     "change": "modified",
+                    "owner_role": "product-owner",
+                    "decision_refs": ["docs/decisions/auth.md#approved"],
                 }
             ],
             behavioral_evidence=[

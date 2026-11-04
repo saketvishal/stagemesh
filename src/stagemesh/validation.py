@@ -97,6 +97,10 @@ class Validator:
         try:
             bound = contract_for_candidate(store, task_id, candidate_sha, project)
             contract = bound.contract
+            from .config import load_config
+
+            project_config = load_config(project)
+            spec_config = project_config.spec_governance
             try:
                 inspected_files = tuple(changed_files(project, candidate_sha, bound.baseline_sha))
             except (GitError, OSError):
@@ -236,6 +240,11 @@ class Validator:
                     expected_candidate_revision=candidate_sha,
                     expected_base_revision=bound.baseline_sha,
                     expected_changed_files=inspected_files,
+                    risk_policy=spec_config.risk_policy() if spec_config is not None else None,
+                    risk_policy_fingerprint=(
+                        spec_config.risk_policy_fingerprint if spec_config is not None else None
+                    ),
+                    executed_gates=executed,
                 )
                 if isinstance(prerequisite_manifest, dict):
                     declared_behavioral_gates = {

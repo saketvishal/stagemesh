@@ -92,6 +92,88 @@ def test_spec_governance_config_requires_exact_pins_and_safe_argument_list(tmp_p
             load_config(project)
 
 
+def test_spec_risk_policy_is_strict_deterministic_and_independent_review_compatible(
+    tmp_path: Path,
+) -> None:
+    risk_classes = {
+        "sensitive": {
+            "required_owner_roles": ["security-owner", "product-owner"],
+            "required_validation_gates": ["security-tests"],
+            "require_independent_review": True,
+        },
+        "ordinary": {
+            "required_owner_roles": ["product-owner"],
+            "required_validation_gates": [],
+            "require_independent_review": False,
+        },
+    }
+    project, _ = _project(
+        tmp_path,
+        {
+            "spec_governance": {
+                "adapter": "openspec",
+                "version": "layout-v1",
+                "risk_classes": risk_classes,
+            }
+        },
+    )
+    policy = load_config(project).spec_governance
+    assert policy is not None
+    assert policy.risk_classes["sensitive"].required_owner_roles == (
+        "security-owner", "product-owner",
+    )
+    fingerprint = policy.risk_policy_fingerprint
+    assert fingerprint is not None and fingerprint.startswith("sha256:")
+
+    reordered = {
+        "ordinary": risk_classes["ordinary"],
+        "sensitive": {
+            **risk_classes["sensitive"],
+            "required_owner_roles": ["product-owner", "security-owner"],
+        },
+    }
+    _write(project, ".stagemesh/config.json", json.dumps({
+        "spec_governance": {
+            "adapter": "openspec", "version": "layout-v1", "risk_classes": reordered,
+        }
+    }))
+    assert load_config(project).spec_governance.risk_policy_fingerprint == fingerprint  # type: ignore[union-attr]
+
+    invalid_configs = (
+        {
+            "routing": {"require_independent_review": False},
+            "spec_governance": {
+                "adapter": "openspec", "version": "layout-v1",
+                "risk_classes": {"sensitive": risk_classes["sensitive"]},
+            },
+        },
+        {
+            "spec_governance": {
+                "adapter": "openspec", "version": "layout-v1",
+                "risk_classes": {"sensitive": {
+                    "required_owner_roles": ["security-owner", "security-owner"]
+                }},
+            }
+        },
+        {
+            "spec_governance": {
+                "adapter": "openspec", "version": "layout-v1",
+                "risk_classes": {"Sensitive Class": {"required_owner_roles": ["owner"]}},
+            }
+        },
+        {
+            "spec_governance": {
+                "adapter": "openspec", "version": "layout-v1",
+                "risk_classes": {"ordinary": {"required_owner_roles": [], "unknown": True}},
+            }
+        },
+    )
+    for invalid in invalid_configs:
+        _write(project, ".stagemesh/config.json", json.dumps(invalid))
+        with pytest.raises(ConfigValidationError):
+            load_config(project)
+
+
 def test_read_only_audit_distinguishes_authority_pending_and_structural_failures(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -241,7 +323,13 @@ def test_spec_audit_cli_is_idempotent_json_and_text_and_uses_blocking_exit_statu
 ) -> None:
     project, revision = _project(
         tmp_path,
-        {"spec_governance": {"adapter": "openspec", "version": "layout-v1"}},
+        {"spec_governance": {
+            "adapter": "openspec", "version": "layout-v1",
+            "risk_classes": {"ordinary": {
+                "required_owner_roles": ["product-owner"],
+                "required_validation_gates": [],
+            }},
+        }},
     )
     before = {path.relative_to(project).as_posix(): path.read_bytes() for path in project.rglob("*") if path.is_file()}
 
@@ -250,8 +338,12 @@ def test_spec_audit_cli_is_idempotent_json_and_text_and_uses_blocking_exit_statu
     assert payload["project_revision"] == revision
     assert payload["status"] == "passed"
     assert payload["openspec_validation"] is None
+    assert payload["risk_policy"]["classes"] == ["ordinary"]
+    assert payload["risk_policy"]["fingerprint"].startswith("sha256:")
     assert main(["--project", str(project), "spec-audit"]) == 0
-    assert "spec governance audit: PASSED" in capsys.readouterr().out
+    text_report = capsys.readouterr().out
+    assert "spec governance audit: PASSED" in text_report
+    assert "risk policy: sha256:" in text_report
     after = {path.relative_to(project).as_posix(): path.read_bytes() for path in project.rglob("*") if path.is_file()}
     assert after == before
 
