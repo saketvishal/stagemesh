@@ -422,6 +422,49 @@ def _loads(raw: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def latest_tool_failure(store: Store, task_id: str, *, since: float | None = None) -> dict[str, Any] | None:
+    """Return one bounded, already-redacted tool-failure projection, optionally limited to the current run."""
+    query = (
+        "SELECT payload, created_at FROM audit_events WHERE event_type=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+    )
+    params: list[object] = [TOOL_FAILURE_EVENT, task_id]
+    if since is not None:
+        query += "AND created_at>=? "
+        params.append(since)
+    rows = store.conn.execute(query + "ORDER BY created_at DESC, rowid DESC LIMIT 50", params).fetchall()
+    for row in rows:
+        payload = _loads(row["payload"])
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        command = evidence.get("command") if isinstance(evidence.get("command"), dict) else {}
+        recovery = evidence.get("recovery") if isinstance(evidence.get("recovery"), dict) else {}
+
+        def bounded(value: object, limit: int) -> str:
+            return _redact_evidence(str(value))[:limit]
+
+        projected_recovery: dict[str, str] = {}
+        for key, limit in (("action", 100), ("execution_status", 100), ("operator_action", 500)):
+            if recovery.get(key) is not None:
+                projected_recovery[key] = bounded(recovery[key], limit)
+        return {
+            "at": row["created_at"],
+            "execution_id": bounded(payload.get("execution_id") or "", 200) or None,
+            "kind": bounded(evidence.get("kind") or "unknown", 100),
+            "command": {
+                "executable": bounded(command.get("executable") or "", 200),
+                "text": bounded(command.get("text") or "", 200),
+            },
+            "cwd": bounded(evidence.get("cwd"), 500) if evidence.get("cwd") is not None else None,
+            "status": bounded(evidence.get("status") or "unknown", 100),
+            "excerpt": bounded(evidence.get("excerpt") or "", 600),
+            "next_action": bounded(evidence.get("next_action") or "Inspect the tool failure evidence.", 500),
+            "recovery": projected_recovery,
+        }
+    return None
+
+
 def _gate_output(finding: dict[str, Any]) -> str:
     return f"{finding.get('stdout') or ''}\n{finding.get('stderr') or ''}"
 

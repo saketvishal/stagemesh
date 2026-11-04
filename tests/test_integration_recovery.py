@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from test_parallel import Rig, ScriptedExecutor
 
+from stagemesh import coordinator as coordinator_module
 from stagemesh import serialized_integration
 from stagemesh.contracts import bind_contract as make_bound_contract
 from stagemesh.contracts import changed_files
@@ -32,10 +33,11 @@ from stagemesh.integration_recovery import (
     integration_blocker,
 )
 from stagemesh.persistence import Store
+from stagemesh.recovery import RecoveryRefusal
 from stagemesh.serialized_integration import RECONSTRUCTED_EVENT, SerializedIntegrator
 from stagemesh.survivor_wave import blocked_needs_decision
 from stagemesh.workspace_guard import owned_workspace
-from stagemesh.workspaces import record_task_baseline
+from stagemesh.workspaces import record_task_baseline, task_workspace
 
 TASK = "A"
 
@@ -360,6 +362,33 @@ def test_a_task_scoped_merge_conflict_is_redone_against_what_landed_and_lands(tm
     messages = [row["message"] for row in rig.store.conn.execute("SELECT message FROM findings WHERE task_id=?", (TASK,))]
     assert any("shared.txt" in message for message in messages)  # the provider is told which files to preserve
     assert not events(rig, BLOCKER_EVENT)
+
+
+def test_refused_recovery_restores_the_failed_candidate_workspace_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {TASK: ("shared.txt", "from A\n")}
+    rig = Rig(tmp_path, [TASK], files=files)
+    coord = coordinator(rig, AppendingExecutor(files))
+    advance_until(rig, coord, Stage.INTEGRATE)
+    candidate = rig.store.latest_candidate(TASK)["sha"]
+    failed_workspace = task_workspace(rig.project, TASK)
+    land_on_main(rig, "shared.txt", "from elsewhere\n")
+
+    def refuse(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RecoveryRefusal("controlled_refusal", "controlled refusal after allocating recovery generation")
+
+    monkeypatch.setattr(coordinator_module, "advance_baseline", refuse)
+    coord.tick()
+
+    assert task_workspace(rig.project, TASK) == failed_workspace
+    assert GitWorkspace(failed_workspace).head() == candidate
+    allocated = events(rig, "integration.recovery_workspace_allocated")
+    rolled_back = events(rig, "integration.recovery_workspace_allocation_rolled_back")
+    assert len(allocated) == len(rolled_back) == 1
+    assert rolled_back[0]["restored_workspace"] == str(failed_workspace)
+    assert rolled_back[0]["retained_recovery_workspace"] == allocated[0]["recovery_workspace"]
+    assert not events(rig, "integration.recovery_workspace_replaced")
 
 
 def test_a_conflict_that_comes_back_after_redoing_the_task_is_a_design_conflict_for_the_operator(tmp_path: Path) -> None:

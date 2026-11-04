@@ -13,6 +13,7 @@ import stagemesh.cli as cli_module
 import stagemesh.run_window as rw
 from stagemesh import readiness
 from stagemesh.contract_binding import bind_task_contract
+from stagemesh.diagnosis import TOOL_FAILURE_EVENT
 from stagemesh.domain import ExecutionKind, Stage
 from stagemesh.runtime_freshness import RuntimeFreshness
 from stagemesh.survivor_wave import ORPHAN_EVENT, RepoState, RunResult
@@ -332,6 +333,80 @@ def test_window_report_marks_corrupt_capability_registry_unavailable(tmp_path: P
     assert capability_report["status"] == "unavailable"
     assert "cannot load .stagemesh/capabilities.json" in capability_report["reason"]
     assert "capabilities: unavailable" in rw.format_window_report(report)
+
+
+def test_window_report_projects_only_current_bounded_tool_failure_evidence(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
+    historical = store.add_audit_event(
+        TOOL_FAILURE_EVENT,
+        {
+            "task_id": "1",
+            "execution_id": "old-execution",
+            "evidence": {
+                "kind": "missing_tool",
+                "command": {"executable": "old", "text": "old"},
+                "status": "exit 127",
+                "next_action": "Old action must not appear.",
+            },
+        },
+    )
+    store.conn.execute("UPDATE audit_events SET created_at=0 WHERE id=?", (historical,))
+    store.conn.commit()
+
+    def permission_failure(rig: Rig, task_id: str) -> RunResult:
+        worker = rig.worker_store()
+        try:
+            worker.add_audit_event(
+                TOOL_FAILURE_EVENT,
+                {
+                    "task_id": task_id,
+                    "execution_id": "current-execution",
+                    "evidence": {
+                        "kind": "permission",
+                        "command": {"executable": "runner", "text": "runner --password=window-secret"},
+                        "cwd": str(project),
+                        "status": "exit 1",
+                        "excerpt": "EACCES: permission denied; token=window-secret",
+                        "next_action": "Grant the workspace permission explicitly.",
+                        "recovery": {"action": "stop", "operator_action": "Grant permission."},
+                    },
+                },
+            )
+            worker.add_audit_event(TOOL_FAILURE_EVENT, {"task_id": task_id, "evidence": []})
+        finally:
+            worker.close()
+        return RunResult("CURRENT_PROBLEM", "tool execution failed")
+
+    rig.behaviour["1"] = permission_failure
+    report = rw.run_window(
+        store,
+        project,
+        config,
+        options,
+        hooks,
+        base_ref="refs/heads/main",
+        staging_ref="refs/heads/wave/staging",
+        **kwargs,
+    )
+
+    failure = report.tasks[0].tool_failure
+    assert failure == {
+        "at": failure["at"],
+        "execution_id": "current-execution",
+        "kind": "permission",
+        "command": {"executable": "runner", "text": "runner --password=[redacted]"},
+        "cwd": str(project),
+        "status": "exit 1",
+        "excerpt": "EACCES: permission denied; token=[redacted]",
+        "next_action": "Grant the workspace permission explicitly.",
+        "recovery": {"action": "stop", "operator_action": "Grant permission."},
+    }
+    written = json.loads(options.report_path.read_text(encoding="utf-8"))
+    assert written["tasks"][0]["tool_failure"] == failure
+    rendered = rw.format_window_report(report)
+    assert "tool failure: permission (exit 1); next: Grant the workspace permission explicitly." in rendered
+    assert "Old action must not appear" not in rendered
+    assert "window-secret" not in json.dumps(written)
 
 
 def test_an_empty_backlog_is_a_clean_window_with_nothing_to_do(tmp_path: Path) -> None:

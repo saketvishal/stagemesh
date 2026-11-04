@@ -31,7 +31,7 @@ from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .efficiency import BudgetPolicy, record_provider_call, take_call_usage
 from .execution import Executor, FakeExecutor
 from .execution_ownership import execution_tree_unresolved
-from .git import GitWorkspace
+from .git import GitError, GitWorkspace
 from .integration import Integrator
 from .integration_recovery import (
     DEFAULT_MAX_RECOVERIES,
@@ -92,7 +92,11 @@ from .workspace_guard import (
     WorkspaceMutation,
     verify_candidate_workspace,
 )
-from .workspaces import NO_IMPLEMENTATION_CHANGE
+from .workspaces import (
+    NO_IMPLEMENTATION_CHANGE,
+    advance_worktree_generation,
+    restore_worktree_generation,
+)
 
 
 def _is_workspace_mutation_reason(reason: str | None) -> bool:
@@ -959,6 +963,22 @@ class Coordinator:
         self.store.upsert_finding(finding_identity(sha, message, None), task_id, sha, "error", message)
         self.store.advance_task(task_id, Stage.IMPLEMENT)  # a baseline cannot be moved while the task is at INTEGRATE
         try:
+            old_workspace, recovery_workspace = advance_worktree_generation(self.project, task_id)
+        except (GitError, OSError) as exc:
+            self.store.advance_task(task_id, Stage.INTEGRATE)
+            return f"cannot allocate an isolated integration-recovery worktree ({str(exc)[:200]})"
+        record_audit(
+            self.store,
+            "integration.recovery_workspace_allocated",
+            {
+                "task_id": task_id,
+                "candidate_sha": sha,
+                "preserved_workspace": str(old_workspace),
+                "recovery_workspace": str(recovery_workspace),
+                "integration_ref": ref,
+            },
+        )
+        try:
             advance_baseline(self.store, self.project, task_id, ref, reason=f"integration recovery: {failure.category}", yes=True)
         except RecoveryRefusal as exc:
             self.store.advance_task(task_id, Stage.INTEGRATE)
@@ -975,7 +995,36 @@ class Coordinator:
                     conflict_files = files or failure.files
                     return RecoveryDecision(RecoveryAction.BLOCK_HUMAN_DECISION, "rules", f"reconstructing the task-owned delta on the current {ref} still conflicts in {', '.join(conflict_files) or 'the patch'}; automatic recovery cannot decide which side wins")
                 return f"reconstructing the task-owned delta on the current {ref} was refused ({code}: {reason[:200]})"
+            try:
+                restored = restore_worktree_generation(self.project, task_id, old_workspace, recovery_workspace)
+                record_audit(
+                    self.store,
+                    "integration.recovery_workspace_allocation_rolled_back",
+                    {
+                        "task_id": task_id,
+                        "candidate_sha": sha,
+                        "restored_workspace": str(restored),
+                        "retained_recovery_workspace": str(recovery_workspace),
+                        "reason": f"{exc.code}: {str(exc)[:200]}",
+                    },
+                )
+            except (GitError, OSError) as rollback_error:
+                return (
+                    f"integration recovery baseline move was refused ({exc.code}: {str(exc)[:160]}) and the workspace "
+                    f"generation rollback also failed ({str(rollback_error)[:160]}); both worktrees were retained"
+                )
             return f"restarting on the current {ref} was refused ({exc.code}: {str(exc)[:200]})"
+        record_audit(
+            self.store,
+            "integration.recovery_workspace_replaced",
+            {
+                "task_id": task_id,
+                "candidate_sha": sha,
+                "preserved_workspace": str(old_workspace),
+                "recovery_workspace": str(recovery_workspace),
+                "integration_ref": ref,
+            },
+        )
         record_task_owner_state(self.store, task_id, "integration_recovery_redo_on_current_base", self.project)
         return None
 

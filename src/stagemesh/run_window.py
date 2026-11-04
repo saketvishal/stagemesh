@@ -1420,6 +1420,11 @@ def format_window_report(report: WindowReport) -> str:
             lines.append("      capabilities: unavailable")
         if task.reason and task.outcome not in ("done",):
             lines.append(f"      why: {task.reason}")
+        if task.tool_failure:
+            lines.append(
+                f"      tool failure: {task.tool_failure['kind']} ({task.tool_failure['status']}); "
+                f"next: {task.tool_failure['next_action']}"
+            )
         if task.pr_url:
             lines.append(f"      {task.pr_url}")
         if task.pr_error:

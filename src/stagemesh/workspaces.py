@@ -59,6 +59,31 @@ def advance_worktree_generation(project: Path, task_id: str) -> tuple[Path, Path
     return old, root / f"{key}-g{generation}"
 
 
+def restore_worktree_generation(project: Path, task_id: str, old: Path, new: Path) -> Path:
+    """Roll back only a failed generation switch; neither worktree is removed or reset."""
+    root = worktree_root(project)
+    key = _task_key(task_id)
+    old = Path(old).resolve()
+    new = Path(new).resolve()
+    with _WORKTREE_CREATION:
+        current = task_workspace(project, task_id, root).resolve()
+        if current != new or old.parent != root or new.parent != root:
+            raise GitError(f"worktree generation changed concurrently for task {task_id}; refusing rollback")
+        if old.name == key:
+            old_generation = 0
+        else:
+            match = _GENERATION_DIR.fullmatch(old.name)
+            if match is None or not old.name.startswith(f"{key}-g"):
+                raise GitError(f"previous worktree path is not a generation owned by task {task_id}: {old}")
+            old_generation = int(old.name.rsplit("-g", 1)[1])
+        marker = root / f"{key}.generation"
+        if old_generation:
+            marker.write_text(str(old_generation), encoding="utf-8")
+        else:
+            marker.unlink(missing_ok=True)
+    return task_workspace(project, task_id, root)
+
+
 def prepare_task_workspace(project: Path, task_id: str) -> Path:
     root = Path(project).resolve()
     workspace = GitWorkspace(root)

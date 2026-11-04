@@ -5,12 +5,19 @@ import json
 from pathlib import Path
 
 from test_parallel import Rig, ScriptedExecutor
-from test_single_task_stale_rebase import TASK, _advance_until, _land_on_main, _single_task_coordinator, _tip
+from test_single_task_stale_rebase import (
+    TASK,
+    _advance_until,
+    _land_on_main,
+    _single_task_coordinator,
+    _tip,
+)
 
 from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.contracts import changed_files
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.git import GitWorkspace
+from stagemesh.workspaces import task_workspace
 
 
 def _follow_up_candidate(rig: Rig, worktree: Path, rel: str) -> str:
@@ -76,18 +83,30 @@ def test_failed_integration_never_marks_task_done_and_preserves_candidate_and_wo
     coord = _single_task_coordinator(rig, executor)
     _advance_until(rig, coord, Stage.INTEGRATE)
     candidate = rig.store.latest_candidate(TASK)["sha"]
+    failed_candidate_worktree = executor.worktrees[TASK]
     tip = _land_on_main(rig, "shared.txt", "from elsewhere\n")
-    for _ in range(8):
+    replacement = None
+    for _ in range(4):
         coord.tick()
+        row = rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='integration.recovery_workspace_replaced'",
+        ).fetchone()
+        if row is not None:
+            replacement = json.loads(row["payload"])
+            break
 
+    assert replacement is not None
     assert _tip(rig) == tip
     assert rig.store.get_task(TASK)["status"] != TaskStatus.DONE
     assert not rig.store.has_evidence(TASK, candidate, EvidenceKind.INTEGRATION) or not rig.store.has_bound_evidence(
         TASK, candidate, EvidenceKind.INTEGRATION, rig.store.contract_binding(TASK, candidate)["digest"], EvidenceStatus.PASSED
     )
-    worktree = executor.worktrees[TASK]
-    assert GitWorkspace(worktree).head() == candidate  # the valuable change is preserved, not reset
+    recovery_worktree = Path(replacement["recovery_workspace"])
+    assert recovery_worktree != failed_candidate_worktree
+    assert GitWorkspace(failed_candidate_worktree).head() == candidate  # the valuable change remains inspectable
+    assert task_workspace(rig.project, TASK) == recovery_worktree
     assert GitWorkspace(rig.project).run("cat-file", "-e", f"{candidate}^{{commit}}", check=False).returncode == 0
+    assert replacement["preserved_workspace"] == str(failed_candidate_worktree)
     diagnostic = next(
         f
         for row in rig.store.conn.execute("SELECT payload FROM evidence WHERE task_id=? AND kind=?", (TASK, EvidenceKind.INTEGRATION))

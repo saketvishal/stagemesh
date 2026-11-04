@@ -9,9 +9,9 @@ import pytest
 from test_survivor_wave import _commit_on, _main_ref, _with_origin, make_store
 
 import stagemesh.cli as cli_module
+from stagemesh import readiness
 from stagemesh.audit import record_audit
 from stagemesh.block_kinds import BlockKind, record_block
-from stagemesh import readiness
 from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.runtime_freshness import RuntimeFreshness
 
@@ -179,7 +179,17 @@ def test_doctor_prints_and_exports_the_readiness_section_without_touching_github
     assert cli_module.main(["--project", str(project), "doctor", "--no-network", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["readiness"]["runtime"]["stale"] is True and data["readiness"]["wave_prs"]["available"] is False
-    assert set(data["readiness"]) >= {"runtime", "wave_prs", "main", "activity", "worktrees", "needs_decision", "providers", "verdict"}
+    assert set(data["readiness"]) >= {
+        "runtime",
+        "wave_prs",
+        "main",
+        "activity",
+        "worktrees",
+        "needs_decision",
+        "tool_failures",
+        "providers",
+        "verdict",
+    }
 
 
 # --- live acceptance readiness -------------------------------------------------------------------------------------------------------
@@ -323,6 +333,66 @@ def test_the_ledger_separates_retired_and_parked_tasks_from_real_work(tmp_path: 
     assert [t["task_id"] for t in ledger["live_tasks"]] == ["T-4"]  # neither the closed nor the parked task is listed as work
     text = "\n".join(readiness.format_readiness(data))
     assert "1 retired (source closed); 1 parked" in text and "1 blocked" in text and "T-4" in text
+
+
+def test_doctor_readiness_projects_tool_failures_for_live_tasks_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh.diagnosis import TOOL_FAILURE_EVENT
+    from stagemesh.domain import Stage
+
+    monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
+    store, project = make_store(tmp_path, ["T-live", "T-done", "T-retired"])
+    store.advance_task("T-done", Stage.DONE)
+    retired = store.get_task("T-retired")
+    store.cache_source(retired["source"], retired["source_id"], {"retirement_reason": "source closed"}, "CLOSED")
+    store.block_task("T-retired")
+
+    def record(task_id: str, kind: str) -> None:
+        store.add_audit_event(
+            TOOL_FAILURE_EVENT,
+            {
+                "task_id": task_id,
+                "execution_id": f"execution-{task_id}",
+                "evidence": {
+                    "kind": kind,
+                    "command": {"executable": "runner", "text": "runner check"},
+                    "status": "exit 1",
+                    "next_action": f"Repair {task_id} explicitly.",
+                },
+            },
+        )
+
+    record("T-live", "permission")
+    record("T-done", "missing_tool")
+    record("T-retired", "service_unavailable")
+    store.add_audit_event(TOOL_FAILURE_EVENT, {"task_id": "T-live", "evidence": []})
+
+    data = readiness.build_readiness(
+        store,
+        project,
+        cli_module.load_config(project),
+        list_prs=None,
+        runtime=FRESH,
+    )
+
+    assert data["tool_failures"] == [
+        {
+            "task_id": "T-live",
+            "title": "task T-live",
+            "at": data["tool_failures"][0]["at"],
+            "execution_id": "execution-T-live",
+            "kind": "permission",
+            "command": {"executable": "runner", "text": "runner check"},
+            "cwd": None,
+            "status": "exit 1",
+            "excerpt": "",
+            "next_action": "Repair T-live explicitly.",
+            "recovery": {},
+        }
+    ]
+    assert data["tool_failures_omitted"] == 0
+    text = "\n".join(readiness.format_readiness(data))
+    assert "T-live permission (exit 1): Repair T-live explicitly." in text
+    assert "T-done missing_tool" not in text and "T-retired service_unavailable" not in text
 
 
 def _ledger_with_retired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sources: dict[str, str]):
