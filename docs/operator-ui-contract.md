@@ -428,6 +428,35 @@ an `UNKNOWN` row. The dashboard task pane consumes only this contract; task link
 from activity, intervals, failures and pending decisions share the same view,
 with an explicit action to enter the separately labelled retained-history filter.
 
+## Execution detail snapshot
+
+`GET /api/v1/execution?execution_id=...` uses
+`stagemesh.execution-detail/1` and requires exactly one non-empty,
+percent-encoded execution identifier. It shares the same loopback, Bearer,
+`GET`-only, no-store and SQLite read-only/query-only boundary. Missing executions
+return a generic `execution_not_found` error without echoing the identifier.
+
+The response separates execution kind/status/provider, current task facts,
+candidate identity, recorded timing, allowlisted outcome, claim ownership,
+current runtime/cleanup state and exact-candidate evidence. `started_at` and
+`updated_at` remain recorded timestamps. `terminal_at` and
+`recorded_duration_seconds` exist only for SUCCEEDED or FAILED rows with valid
+finite ordered timestamps; RUNNING and UNKNOWN never receive an invented finish
+or duration. Duration is recorded wall time, never billing or provider usage.
+
+Only fixed application result codes are returned, with a bounded classification.
+Unrecognized result text is marked available-but-unprojected and never echoed.
+Evidence correlation requires the same task and exact candidate SHA; it is capped
+at 100 typed rows with explicit truncation/correlation metadata. Claims expose
+only safe identifier, stage, lease timestamps and active/released state. Process
+classification runs only for a current RUNNING execution. Historical rows are
+`NOT_CURRENT`; executable, PID, command, environment, worktree path, raw result,
+audit/evidence payload, finding and URL fields are excluded.
+
+The dashboard execution pane consumes only this contract. Execution links in the
+activity table, active-execution status and recent failures share the same model;
+Back/Escape restore the originating view and control.
+
 ## Known gaps against #134
 
 V4 adds durable task block/reopen/DONE and candidate-bound rework occurrences from

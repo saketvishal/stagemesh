@@ -84,6 +84,7 @@ def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
     windows, _, linux = workflow.partition("\n  linux:")
     for module in (
         "test_operator_ui_contract.py", "test_operator_api.py", "test_task_detail_api.py",
+        "test_execution_detail_api.py",
         "test_activity.py", "test_api_server.py",
     ):
         assert module in windows, f"windows job omits {module}"
