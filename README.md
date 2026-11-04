@@ -142,6 +142,11 @@ unknown JSONL shapes fail closed. The default remains attachment-only and never 
 Use `stagemesh capabilities policy observed-load-required --plan --json` to preview the bounded registry change, then remove `--plan`
 to apply it atomically. Task and run reports expose the effective policy alongside usage evidence.
 
+Projects may also opt into a read-only, version-pinned specification authority audit with `stagemesh spec-audit`. It distinguishes
+active, historical, and pending OpenSpec material, reports structural blockers separately from semantic uncertainty, and can invoke an
+already-installed exact-version OpenSpec validator without installing, syncing, or archiving anything. See
+[docs/spec-governance.md](docs/spec-governance.md) for configuration, CI use, adoption, rollback, and limits.
+
 `codex`, `claude`, `grok` and `agy` are built-in registry entries; any other name can be added under `providers`, as a plain command string
 or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `priority` (lower first) and `weight`:
 
