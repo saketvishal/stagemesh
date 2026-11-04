@@ -621,8 +621,15 @@ def test_cli_continue_staged_routes_invoke_distinct_review_provider(tmp_path: Pa
     payload = _review_payload(project)
     assert log.read_text(encoding="utf-8").splitlines() == ["codex", "claude"]
     assert payload["implementer_provider"] == "codex"
-    assert payload["review_provider"] == "claude"
-    assert payload["review_execution_provider"] == "claude"
+    roles = payload["review_roles"]
+    normal = roles["normal"]
+    adverse = roles["adverse"]
+    assert normal["provider"] == "claude"
+    assert normal["role"] == "normal"
+    assert adverse["provider"] == payload["review_provider"]
+    assert adverse["provider"] == payload["review_execution_provider"]
+    assert adverse["provider"] != normal["provider"]
+    assert adverse["execution_id"] != normal["execution_id"]
     assert payload["review_execution_invoked"] is True
     assert payload["independent_reviewer"] is True
 
