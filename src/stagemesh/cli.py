@@ -270,11 +270,12 @@ def command_init(args: argparse.Namespace) -> int:
     store.migrate()
     if args.task:
         store.upsert_task(args.task)
+    source_sync: dict[str, str] = {"status": "synced"}
     try:
         config = load_config(project)
         _sync_all_sources(store, project, config, getattr(args, "task", None))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - initialization remains usable while an external task source is unavailable.
+        source_sync = {"status": "deferred", "error_type": type(exc).__name__[:80]}
     schema_version = store.schema_version()
     store.close()
     profile_status, profile_detail = ensure_profile(project)
@@ -289,6 +290,12 @@ def command_init(args: argparse.Namespace) -> int:
         except RegistryConflictError as exc:
             print(f"registry conflict: {exc}", file=sys.stderr)
             return 2
+    if source_sync["status"] == "deferred":
+        print(
+            f"warning: task-source sync deferred ({source_sync['error_type']}); "
+            "check the source configuration or retry initialization",
+            file=sys.stderr,
+        )
     if args.json:
         print(
             json.dumps(
@@ -300,6 +307,7 @@ def command_init(args: argparse.Namespace) -> int:
                     "registered": registered,
                     "profile": profile_status,
                     "github_task_source": "configured" if configured_github_source else "unchanged",
+                    "task_source_sync": source_sync,
                 },
                 indent=2,
                 sort_keys=True,
