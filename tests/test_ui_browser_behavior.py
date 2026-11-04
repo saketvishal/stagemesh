@@ -112,6 +112,7 @@ DRIVER = r"""
       out.taskUrl = control.log.filter((entry) => entry.includes("task_event=status_changed")).slice(-1)[0];
       $("task_event").value = "";
       $("retry_kind").value = "operator";
+      $("retry_state").value = "FAILED";
       $("retry_kind").dispatchEvent(new Event("change"));
       await until(() => control.log.some((entry) => entry.includes("retry_kind=operator")), "retry filters");
       out.retryUrl = control.log.filter((entry) => entry.includes("retry_kind=operator")).slice(-1)[0];
@@ -347,7 +348,8 @@ def test_v4_filter_controls_emit_bounded_encoded_queries(fixture_base, tmp_path:
     assert "task_status=OPEN" in task and "source_status=CLOSED" in task
     assert "include_source_history=true" in task and "include_task_history=true" in task
     retry = result["retryUrl"]
-    assert "retry_kind=operator" in retry and "include_retry_history=true" in retry
+    assert "retry_kind=operator" in retry and "retry_state=FAILED" in retry
+    assert "include_retry_history=true" in retry
     assert "task_event=" not in retry
 
 

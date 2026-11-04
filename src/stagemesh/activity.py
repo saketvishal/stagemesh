@@ -15,7 +15,7 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from .domain import ExecutionStatus, Stage, TaskStatus
+from .domain import ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .persistence import Store
 from .redaction import redact_url_credentials
 
@@ -23,6 +23,7 @@ ActivityKind = Literal["task", "execution", "audit", "source", "task_transition"
 ActivityState = Literal["open", "closed"]
 TimeBasis = Literal["activity", "opened", "updated", "completed"]
 RetryKind = Literal["automatic_provider", "blocked_reentry", "remediation", "operator"]
+RetryState = Literal["QUEUED", "CLAIMED", "RUNNING", "SUCCEEDED", "FAILED", "UNKNOWN", "SUPERSEDED"]
 
 STATES: tuple[str, ...] = ("open", "closed")
 TIME_BASES: tuple[str, ...] = ("activity", "opened", "updated", "completed")
@@ -31,6 +32,7 @@ MAX_LIMIT = 200
 MAX_SCAN = 1000  # retained rows per source and across the combined projection
 MAX_TITLE_CHARS = 200
 RETRY_KINDS: tuple[str, ...] = ("automatic_provider", "blocked_reentry", "remediation", "operator")
+RETRY_STATES: tuple[str, ...] = ("QUEUED", "CLAIMED", "RUNNING", "SUCCEEDED", "FAILED", "UNKNOWN", "SUPERSEDED")
 _KIND_ORDER = {"task_transition": 0, "retry": 1, "source": 2, "audit": 3, "execution": 4, "task": 5}
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 # Fixed application outcomes only: identifier-shaped provider text may still be a secret.
@@ -67,6 +69,7 @@ class ActivityQuery:
     task_status: str | None = None
     include_task_history: bool = False
     retry_kind: RetryKind | None = None
+    retry_state: RetryState | None = None
     include_retry_history: bool = False
 
 
@@ -94,7 +97,7 @@ class ActivityEntry:
     current_task_status: str | None = None
     rework_required: bool = False
     retry_kind: RetryKind | None = None
-    retry_state: Literal["QUEUED"] | None = None
+    retry_state: RetryState | None = None
     retry_attempt: int | None = None
     retry_limit: int | None = None
 
@@ -159,8 +162,16 @@ def validate_query(query: ActivityQuery) -> ActivityQuery:
         )
     if query.retry_kind is not None and not query.include_retry_history:
         raise ActivityQueryError("activity retry_kind requires include_retry_history")
-    if query.task_event is not None and query.retry_kind is not None:
-        raise ActivityQueryError("activity task_event and retry_kind cannot be combined")
+    if query.retry_state is not None and query.retry_state not in RETRY_STATES:
+        raise ActivityQueryError(
+            "activity retry_state must be one of: " + ", ".join(RETRY_STATES)
+        )
+    if query.retry_state is not None and not query.include_retry_history:
+        raise ActivityQueryError("activity retry_state requires include_retry_history")
+    if query.task_event is not None and (
+        query.retry_kind is not None or query.retry_state is not None
+    ):
+        raise ActivityQueryError("activity task_event and retry filters cannot be combined")
     for field, value in (("since", query.since), ("until", query.until)):
         if value is None:
             continue
@@ -183,13 +194,14 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
     query = validate_query(query or ActivityQuery())
     entries: list[ActivityEntry] = []
     truncated = False
+    retry_filtered = query.retry_kind is not None or query.retry_state is not None
     # Task and audit rows carry no provider; a provider filter selects executions only.
     sources = []
-    if query.task_event is None and query.retry_kind is None and query.provider is None and query.time_basis != "completed":
+    if query.task_event is None and not retry_filtered and query.provider is None and query.time_basis != "completed":
         sources.append(_task_entries)
-    if query.task_event is None and query.retry_kind is None:
+    if query.task_event is None and not retry_filtered:
         sources.append(_execution_entries)
-    if (query.task_event is None and query.retry_kind is None and query.provider is None and query.state != "open" and query.time_basis != "opened"
+    if (query.task_event is None and not retry_filtered and query.provider is None and query.state != "open" and query.time_basis != "opened"
             and (query.stage is None or (query.time_basis == "completed" and query.stage == Stage.DONE.value))):
         sources.append(_audit_entries)
     if (
@@ -197,18 +209,18 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
         and query.provider is None
         and query.time_basis in {"activity", "updated"}
         and query.task_event is None
-        and query.retry_kind is None
+        and not retry_filtered
     ):
         sources.append(_source_entries)
     if (
         query.include_task_history
         and query.provider is None
         and query.time_basis in {"activity", "updated"}
+        and not retry_filtered
     ):
         sources.append(_task_transition_entries)
     if (
         query.include_retry_history
-        and query.provider is None
         and query.time_basis in {"activity", "updated"}
         and query.task_event is None
     ):
@@ -250,6 +262,7 @@ def _status_counts(entries: list[ActivityEntry]) -> dict[str, dict[str, int]]:
             "UNKNOWN": 0,
         },
         "retry": {**{kind: 0 for kind in RETRY_KINDS}, "UNKNOWN": 0},
+        "retry_outcome": {state: 0 for state in RETRY_STATES},
     }
     for entry in entries:
         group = counts[entry.kind]
@@ -260,6 +273,8 @@ def _status_counts(entries: list[ActivityEntry]) -> dict[str, dict[str, int]]:
         )
         status = observed if observed in group else ("EVENT" if entry.kind == "audit" else "UNKNOWN")
         group[status] += 1
+        if entry.kind == "retry" and entry.retry_state in counts["retry_outcome"]:
+            counts["retry_outcome"][entry.retry_state] += 1
     return counts
 
 
@@ -395,6 +410,8 @@ def _audit_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
     """Audit events are history only (always closed); only the event type and task id are exposed."""
     params: list[Any] = []
     clauses = _time_clause("a.created_at", query, params)
+    clauses.append("a.event_type != ?")
+    params.append("task.created")
     hidden_typed_events: list[str] = []
     if query.include_task_history:
         # Typed task occurrences replace their generic audit rows only in the opt-in feed.
@@ -633,7 +650,7 @@ def _task_transition_entries(store: Store, query: ActivityQuery) -> tuple[list[A
 
 
 def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEntry], bool]:
-    """Typed queued retry occurrences from an explicit allowlist of durable events."""
+    """Typed retries and exact linked execution outcomes from durable evidence only."""
     event_kinds = {
         "task.auto_retried_provider_failure": "automatic_provider",
         "task.block_reentered": "blocked_reentry",
@@ -658,6 +675,12 @@ def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
     if query.stage is not None:
         clauses.append("t.stage = ?")
         params.append(query.stage)
+    if query.provider is not None:
+        clauses.append("e.actor = ?")
+        params.append(query.provider)
+    if query.retry_state is not None:
+        clauses.append("COALESCE(r.state, 'QUEUED') = ?")
+        params.append(query.retry_state)
     if query.state == "open":
         clauses.append("t.status != ?")
         params.append(TaskStatus.DONE.value)
@@ -669,8 +692,11 @@ def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
     rows = store.conn.execute(
         "SELECT a.id, a.event_type, a.payload, a.created_at, t.id AS task_id, "
         "t.stage AS task_stage, t.status AS task_status, t.project, t.source, t.source_id, "
-        "s.status AS source_status FROM audit_events a "
+        "s.status AS source_status, r.state AS retry_state, e.kind AS execution_kind, "
+        "e.actor, e.result FROM audit_events a "
         f"LEFT JOIN tasks t ON t.id = {task_id_sql} "
+        "LEFT JOIN retry_attempts r ON r.retry_event_id=a.id "
+        "LEFT JOIN executions e ON e.id=r.execution_id "
         f"LEFT JOIN source_cache s ON s.source=t.source AND s.source_id=t.source_id{_where(clauses)} "
         "ORDER BY a.created_at DESC, a.id LIMIT ?",
         (*params, MAX_SCAN + 1),
@@ -695,6 +721,9 @@ def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
             if row["task_status"] in {status.value for status in TaskStatus}
             else None
         )
+        retry_state = str(row["retry_state"] or "QUEUED")
+        if retry_state not in RETRY_STATES:
+            continue
         entries.append(
             ActivityEntry(
                 kind="retry",
@@ -703,7 +732,7 @@ def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
                 state="closed" if current_task_status in {None, TaskStatus.DONE.value} else "open",
                 task_id=task_id,
                 stage=_task_stage_value(payload.get("stage")) or _task_stage_value(row["task_stage"]),
-                status="QUEUED",
+                status=retry_state,
                 event_type="task.retry_queued",
                 candidate_sha=candidate_sha,
                 project=_safe_project(row["project"]),
@@ -712,7 +741,14 @@ def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
                 source_status=_safe_code(row["source_status"]),
                 current_task_status=current_task_status,
                 retry_kind=kind,  # type: ignore[arg-type]
-                retry_state="QUEUED",
+                provider=_safe_code(row["actor"]),
+                execution_kind=(
+                    row["execution_kind"]
+                    if row["execution_kind"] in {kind.value for kind in ExecutionKind}
+                    else None
+                ),
+                result_code=row["result"] if row["result"] in _SAFE_RESULTS else None,
+                retry_state=retry_state,  # type: ignore[arg-type]
                 retry_attempt=attempt,
                 retry_limit=limit,
             )

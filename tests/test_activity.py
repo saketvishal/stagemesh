@@ -656,9 +656,124 @@ def test_typed_retry_history_uses_only_allowlisted_durable_events(store: Store):
     assert (by_id[automatic].retry_attempt, by_id[automatic].retry_limit) == (2, 3)
     assert by_id[remediation].retry_kind == "remediation"
     assert by_id[remediation].candidate_sha == candidate
-    assert all(entry.retry_state == "QUEUED" and entry.provider is None for entry in retries)
+    assert by_id[automatic].retry_state == "SUPERSEDED"
+    assert by_id[remediation].retry_state == "QUEUED"
+    assert all(entry.provider is None for entry in retries)
     assert page.status_counts["retry"]["automatic_provider"] == 1
     assert page.status_counts["retry"]["remediation"] == 1
+    assert page.status_counts["retry_outcome"]["SUPERSEDED"] == 1
+    assert page.status_counts["retry_outcome"]["QUEUED"] == 1
+
+
+def test_retry_execution_outcome_is_durably_correlated_and_filterable(store: Store):
+    task = _task(store, "retry outcome", 1)
+    initial = _execution(store, task, 2, "codex", ExecutionStatus.SUCCEEDED)
+    retry = store.add_audit_event(
+        "task.operator_retry_requested",
+        {"task_id": task, "stage": "PLAN", "candidate_sha": "a" * 40},
+    )
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    execution = store.start_execution(
+        task_id=task,
+        claim_id=claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        actor="codex",
+    )
+    store.finish_execution(execution, ExecutionStatus.FAILED, result="provider_timeout")
+
+    path = Path(store.conn.execute("PRAGMA database_list").fetchone()[2])
+    restarted = Store(path)
+    try:
+        page = query_activity(
+            restarted,
+            ActivityQuery(
+                task_id=task,
+                provider="codex",
+                include_retry_history=True,
+                retry_state="FAILED",
+            ),
+        )
+    finally:
+        restarted.close()
+
+    assert _ids(page) == [retry]
+    entry = page.entries[0]
+    assert entry.retry_kind == "operator" and entry.retry_state == "FAILED"
+    assert entry.status == "FAILED" and entry.current_task_status == "CLAIMED"
+    assert entry.execution_kind == "IMPLEMENTATION" and entry.result_code == "provider_timeout"
+    assert entry.candidate_sha == "a" * 40 and entry.provider == "codex"
+    assert initial != execution  # the initial execution was never relabeled as this retry
+    assert page.status_counts["retry_outcome"]["FAILED"] == 1
+
+
+def test_released_retry_claim_returns_to_queued_without_fabricating_execution(store: Store):
+    task = _task(store, "released retry", 1)
+    retry = store.add_audit_event("task.block_reentered", {"task_id": task, "stage": "PLAN"})
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    store.release_claim(claim)
+
+    page = query_activity(
+        store,
+        ActivityQuery(task_id=task, include_retry_history=True, retry_state="QUEUED"),
+    )
+
+    assert _ids(page) == [retry]
+    assert page.entries[0].execution_kind is page.entries[0].provider is None
+
+
+def test_retry_outcome_redacts_unallowlisted_actor_result_and_candidate(store: Store):
+    task = _task(store, "private retry", 1)
+    retry = store.add_audit_event(
+        "task.operator_retry_requested",
+        {"task_id": task, "candidate_sha": "token-secret"},
+    )
+    claim = store.acquire_claim(task, "worker-a")
+    assert claim is not None
+    execution = store.start_execution(
+        task_id=task,
+        claim_id=claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        actor="token-secret",
+    )
+    store.finish_execution(execution, ExecutionStatus.FAILED, result="private-result")
+
+    page = query_activity(
+        store,
+        ActivityQuery(task_id=task, include_retry_history=True, retry_state="FAILED"),
+    )
+
+    assert _ids(page) == [retry]
+    entry = page.entries[0]
+    assert entry.provider is entry.result_code is entry.candidate_sha is None
+    assert "secret" not in repr(entry) and "private-result" not in repr(entry)
+
+
+def test_retry_correlation_migration_is_restart_safe(tmp_path: Path):
+    path = tmp_path / "upgrade.sqlite3"
+    store = Store(path)
+    store.migrate()
+    store.conn.executescript(
+        "DROP TABLE retry_attempts; "
+        "DELETE FROM schema_migrations WHERE version>=7; "
+        "DELETE FROM migration_audit WHERE version>=7;"
+    )
+    store.close()
+
+    upgraded = Store(path)
+    try:
+        upgraded.migrate()
+        columns = {
+            row["name"] for row in upgraded.conn.execute("PRAGMA table_info(retry_attempts)")
+        }
+        assert upgraded.schema_version() >= 7
+        assert {"retry_event_id", "task_id", "kind", "state", "claim_id", "execution_id"} <= columns
+        assert upgraded.conn.execute(
+            "SELECT COUNT(*) FROM migration_audit WHERE version=7"
+        ).fetchone()[0] == 1
+    finally:
+        upgraded.close()
 
 
 def test_retry_kind_filter_and_malformed_retry_metadata_fail_closed(store: Store):
@@ -703,6 +818,8 @@ def test_malformed_task_transition_payload_is_not_exposed(store: Store, payload:
         ActivityQuery(include_task_history="yes"),  # type: ignore[arg-type]
         ActivityQuery(retry_kind="unknown", include_retry_history=True),  # type: ignore[arg-type]
         ActivityQuery(retry_kind="operator"),
+        ActivityQuery(retry_state="not-a-state", include_retry_history=True),  # type: ignore[arg-type]
+        ActivityQuery(retry_state="FAILED"),
         ActivityQuery(include_retry_history="yes"),  # type: ignore[arg-type]
         ActivityQuery(
             task_event="status_changed",

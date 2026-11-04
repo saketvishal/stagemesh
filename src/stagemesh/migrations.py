@@ -68,6 +68,26 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        7,
+        "durable retry execution correlation",
+        """
+        CREATE TABLE IF NOT EXISTS retry_attempts (
+            retry_event_id TEXT PRIMARY KEY REFERENCES audit_events(id),
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            kind TEXT NOT NULL,
+            state TEXT NOT NULL,
+            claim_id TEXT REFERENCES claims(id),
+            execution_id TEXT REFERENCES executions(id),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS one_retry_per_claim
+            ON retry_attempts(claim_id) WHERE claim_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS one_retry_per_execution
+            ON retry_attempts(execution_id) WHERE execution_id IS NOT NULL;
+        """,
+    ),
 ]
 
 

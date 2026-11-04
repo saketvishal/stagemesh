@@ -300,17 +300,56 @@ The CLI exposes `--task-status`, `--task-event` and `--task-history` and uses th
 V4 serializer for JSON.
 
 V4 also supports typed retry occurrences with `include_retry_history` set to
-true and an optional exact `retry_kind` of `automatic_provider`, `blocked_reentry`,
-`remediation` or `operator`. A retry entry uses `kind=retry`, a fixed
-`event_type=task.retry_queued`, `status=QUEUED`, `retry_state` set to `QUEUED`, and
-the allowlisted `retry_kind`. Bounded positive `retry_attempt` and `retry_limit` are
+true, an optional exact `retry_kind` of `automatic_provider`, `blocked_reentry`,
+`remediation` or `operator`, and an optional exact `retry_state` of `QUEUED`,
+`CLAIMED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN` or `SUPERSEDED`. A retry
+entry uses `kind=retry`, a fixed `event_type=task.retry_queued`, and the allowlisted
+kind/state. Bounded positive `retry_attempt` and `retry_limit` are
 present only when both are valid and the attempt does not exceed the limit.
 `candidate_sha` is emitted only when the durable event carries a valid candidate
-identifier. Current task state remains in `current_task_status`; a queued retry
-does not claim that its later execution passed or failed. `status_counts.retry`
-uses the four fixed retry kinds plus `UNKNOWN`. Generic audit rows for the same
-allowlisted events are replaced only when retry history is explicitly enabled.
-The CLI equivalents are `--retry-history` and `--retry-kind`.
+identifier. Current task state remains in `current_task_status`. Migration 7
+records the exact retry-event -> claim -> first execution relationship at those
+transactional boundaries; only that linked execution can change the retry outcome.
+An initial execution is never relabeled by ordinal position. A new queued retry
+marks an older unstarted retry `SUPERSEDED`, and releasing its claim before an
+execution returns it to `QUEUED`. Execution kind, safe actor and allowlisted result
+code come from the linked execution row; provider text is never interpreted.
+`status_counts.retry` partitions kinds and `status_counts.retry_outcome` partitions
+states. Generic audit rows for the same allowlisted events are replaced only when
+retry history is explicitly enabled. The CLI equivalents are `--retry-history`,
+`--retry-kind` and `--retry-state`.
+
+## V4 recorded periods and series
+
+`GET /api/v4/periods` is a separate bounded report because an interval is not a
+point event. It requires RFC 3339 `since` and `until`; accepts `bucket=day|week`,
+an IANA `timezone` (default `UTC`), and exact `task_id`, `project` and `source`
+filters plus active-interval `limit` (1-200) and `offset` (0-999). The matching
+CLI is `stagemesh activity-periods --since ... --until ...` with `--bucket`,
+`--timezone`, `--task`, `--activity-project`, `--source`, `--limit` and `--offset`.
+
+The response contains `active_intervals` and `series`. Each interval carries the
+recorded `active_from`, nullable `active_until`, current task status/stage and
+bounded task/source attribution. An interval overlaps the requested half-open
+window when its start is before `until` and its end is absent or after `since`.
+BLOCKED and CLAIMED remain active work; only a recorded transition to DONE closes
+an interval, and a recorded DONE-to-non-DONE transition opens a new one.
+`total_intervals`, `limit`, `offset` and nullable `next_offset` make interval
+pagination explicit. The series and task counts cover the complete bounded query,
+not only the current interval page.
+
+Each day/week series bucket has UTC `start`/`end` instants derived from local
+calendar boundaries in the selected timezone, so 23/25-hour daylight-saving days
+remain correct. `opened_occurrences` includes the recorded creation and every
+recorded reopen; `completed_occurrences` includes every exact transition to DONE.
+`opened_tasks` and `completed_tasks` are unique within that bucket, so a repeated
+occurrence never silently inflates its unique-task count.
+
+Only tasks with one `task.created` anchor, a continuous valid status chain and a
+final recorded status matching the task row contribute. Earlier or inconsistent
+history is counted in `unavailable_tasks`, never reconstructed. `considered_tasks`
+is bounded to 200 after exact filters; `truncated=true` requires a narrower query.
+The report is read-only and returns no titles, audit payloads or provider output.
 
 ## Known gaps against #134
 
@@ -321,9 +360,8 @@ release, confirmed-stale recovery and safe unknown-execution fencing add
 The shipped loopback dashboard now requests V4 and exposes its project, time-basis,
 source/task status, source/task history, task-event and retry filters. It renders
 `current_task_status` separately from `source_status` and treats historical status
-as event detail, not present state. Active-at-any-point intervals,
-opened-versus-completed series, execution-outcome correlation for queued retries,
-and cross-store aggregation remain outside this slice.
+as event detail, not present state. The dashboard has not yet rendered the separate
+period-series route. Cross-store aggregation remains outside this slice.
 Earlier task/source changes were not recorded and cannot be reconstructed from
 current state. The parent objective is not complete merely because this projection is.
 
@@ -350,8 +388,8 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
 7. **Projection growth:** #450 introduces `/api/v2` and `stagemesh.activity/2` for explicit period semantics,
    recorded project attribution and partitioned counts. `/api/v1` remains an unchanged compatibility adapter.
    The shipped dashboard adopts V4 explicitly. V3 adds linked-source fields and opt-in transition
-   occurrences; V4 adds typed task status/rework occurrences. Every version preserves earlier response shapes.
-   No database migration is involved.
+   occurrences; V4 adds typed task status/rework/retry occurrences. Every version preserves earlier response shapes.
+   Migration 7 adds only the durable retry-to-execution correlation table; activity queries remain read-only.
 8. **Health and version route:** `GET /api/v1/health`. Implemented (#446).
 9. **Dependencies: none.** The server is standard library; the UI is dependency-free HTML, CSS and JavaScript shipped as
    package data (#448), so no Node toolchain is needed to build or install StageMesh.

@@ -58,6 +58,9 @@
   <label>Retry kind
     <select id="retry_kind"><option value="">All</option><option value="automatic_provider">Automatic provider</option><option value="blocked_reentry">Blocked re-entry</option><option value="remediation">Remediation</option><option value="operator">Operator</option></select>
   </label>
+  <label>Retry state
+    <select id="retry_state"><option value="">All</option><option>QUEUED</option><option>CLAIMED</option><option>RUNNING</option><option>SUCCEEDED</option><option>FAILED</option><option>UNKNOWN</option><option>SUPERSEDED</option></select>
+  </label>
   <label class="inline"><input id="source_history" type="checkbox"> Source history</label>
   <label class="inline"><input id="task_history" type="checkbox"> Task history</label>
   <label class="inline"><input id="retry_history" type="checkbox"> Retry history</label>

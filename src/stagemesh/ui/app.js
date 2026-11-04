@@ -48,7 +48,7 @@
 
   function queryString(offset) {
     const q = new URLSearchParams();
-    for (const key of ["state", "stage", "time_basis", "source_status", "task_status", "task_event", "retry_kind"]) {
+    for (const key of ["state", "stage", "time_basis", "source_status", "task_status", "task_event", "retry_kind", "retry_state"]) {
       if ($(key).value) q.set(key, $(key).value);
     }
     if ($("task").value.trim()) q.set("task_id", $("task").value.trim());
@@ -57,7 +57,7 @@
     if ($("source").value.trim()) q.set("source", $("source").value.trim());
     if ($("source_history").checked) q.set("include_source_history", "true");
     if ($("task_history").checked || $("task_event").value) q.set("include_task_history", "true");
-    if ($("retry_history").checked || $("retry_kind").value) q.set("include_retry_history", "true");
+    if ($("retry_history").checked || $("retry_kind").value || $("retry_state").value) q.set("include_retry_history", "true");
     const [since, until] = periodRange();
     if (since && !isNaN(since)) q.set("since", since.toISOString());
     if (until && !isNaN(until)) q.set("until", until.toISOString());
@@ -161,7 +161,7 @@
       } else td.textContent = "—";
       cell(tr, e.stage); cell(tr, e.current_task_status || e.status); cell(tr, e.source_status); cell(tr, e.provider);
       cell(tr, e.title || [
-        e.execution_kind, e.event_type, e.result_code, e.retry_kind,
+        e.execution_kind, e.event_type, e.result_code, e.retry_kind, e.retry_state,
         e.rework_required && "rework required", e.previous_task_status && (e.previous_task_status + " → " + e.status),
         e.previous_source_status && (e.previous_source_status + " → " + e.source_status),
         e.candidate_sha && e.candidate_sha.slice(0, 12),
@@ -221,7 +221,7 @@
   $("filters").addEventListener("submit", (e) => e.preventDefault());
   for (const id of [
     "period", "since", "until", "state", "stage", "time_basis", "source_status", "task_status",
-    "task_event", "retry_kind", "source_history", "task_history", "retry_history",
+    "task_event", "retry_kind", "retry_state", "source_history", "task_history", "retry_history",
   ]) $(id).addEventListener("change", () => {
     for (const el of document.querySelectorAll(".custom")) el.hidden = $("period").value !== "custom";
     reload();

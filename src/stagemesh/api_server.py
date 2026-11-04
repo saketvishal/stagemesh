@@ -24,6 +24,12 @@ from urllib.parse import unquote_to_bytes, urlsplit
 
 from . import __version__
 from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
+from .activity_periods import (
+    ActivityPeriodError,
+    ActivityPeriodQuery,
+    ActivityPeriodReport,
+    query_activity_periods,
+)
 
 CONTRACT = "stagemesh.activity/1"
 CONTRACT_V2 = "stagemesh.activity/2"
@@ -34,7 +40,8 @@ _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", 
 _PARAMS_V2 = _PARAMS | {"project", "time_basis"}
 _PARAMS_V3 = _PARAMS_V2 | {"source", "source_status", "include_source_history"}
 _PARAMS_V4 = _PARAMS_V3 | {
-    "task_event", "task_status", "include_task_history", "retry_kind", "include_retry_history",
+    "task_event", "task_status", "include_task_history", "retry_kind", "retry_state",
+    "include_retry_history",
 }
 _INT = re.compile(r"^[0-9]{1,9}$")
 _MAX_QUERY_CHARS = 2048
@@ -146,7 +153,7 @@ def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
     kwargs: dict[str, Any] = {}
     for name in (
         "state", "task_id", "stage", "provider", "project", "time_basis", "source", "source_status",
-        "task_event", "task_status", "retry_kind",
+        "task_event", "task_status", "retry_kind", "retry_state",
     ):
         if name in one:
             kwargs[name] = one[name]
@@ -169,6 +176,43 @@ def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
         if name in one:
             kwargs[name] = _integer(name, one[name])
     return ActivityQuery(**kwargs)
+
+
+def parse_period_query(raw: str) -> ActivityPeriodQuery:
+    allowed = {
+        "since", "until", "bucket", "timezone", "task_id", "project", "source", "limit", "offset"
+    }
+    if len(raw) > _MAX_QUERY_CHARS:
+        raise _invalid("query string is too long")
+    if not _URL_SAFE.match(raw):
+        raise _invalid("query string must be percent-encoded ASCII")
+    one: dict[str, str] = {}
+    for segment in raw.split("&") if raw else ():
+        name, sep, value = segment.partition("=")
+        if not segment or not sep or not name:
+            raise _invalid("malformed query string")
+        name = _decode(name)
+        if name not in allowed:
+            raise _invalid("unknown parameter")
+        if name in one:
+            raise _invalid(f"{name} must not be repeated")
+        one[name] = _decode(value)
+    if "since" not in one or "until" not in one:
+        raise _invalid("periods requires since and until")
+    kwargs: dict[str, Any] = {}
+    for name in ("limit", "offset"):
+        if name in one:
+            kwargs[name] = _integer(name, one[name])
+    return ActivityPeriodQuery(
+        since=_timestamp("since", one["since"]),
+        until=_timestamp("until", one["until"]),
+        bucket=one.get("bucket", "day"),  # type: ignore[arg-type]
+        timezone=one.get("timezone", "UTC"),
+        task_id=one.get("task_id"),
+        project=one.get("project"),
+        source=one.get("source"),
+        **kwargs,
+    )
 
 
 def _entry(entry: ActivityEntry, *, version: int = 1) -> dict[str, Any]:
@@ -202,12 +246,45 @@ def serialize_page(page: ActivityPage, *, version: int = 1) -> dict[str, Any]:
         if version < 4:
             counts = {
                 name: values for name, values in counts.items()
-                if name not in {"task_transition", "retry"}
+                if name not in {"task_transition", "retry", "retry_outcome"}
             }
         if version == 2:
             counts = {name: values for name, values in counts.items() if name != "source"}
         body.update(time_basis=page.time_basis, status_counts=counts)
     return body
+
+
+def serialize_period_report(report: ActivityPeriodReport) -> dict[str, Any]:
+    def instant(value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    return {
+        "since": instant(report.since),
+        "until": instant(report.until),
+        "bucket": report.bucket,
+        "timezone": report.timezone,
+        "active_intervals": [
+            {
+                **asdict(interval),
+                "active_from": instant(interval.active_from),
+                "active_until": instant(interval.active_until),
+            }
+            for interval in report.active_intervals
+        ],
+        "total_intervals": report.total_intervals,
+        "limit": report.limit,
+        "offset": report.offset,
+        "next_offset": report.next_offset,
+        "series": [
+            {**asdict(bucket), "start": instant(bucket.start), "end": instant(bucket.end)}
+            for bucket in report.series
+        ],
+        "unavailable_tasks": report.unavailable_tasks,
+        "considered_tasks": report.considered_tasks,
+        "truncated": report.truncated,
+    }
 
 
 class ActivityApi:
@@ -238,6 +315,8 @@ class ActivityApi:
         except ApiError as exc:
             status, body, extra = _error(exc, contract)
         except ActivityQueryError as exc:
+            status, body, extra = _error(ApiError(400, "invalid_query", str(exc)), contract)
+        except ActivityPeriodError as exc:
             status, body, extra = _error(ApiError(400, "invalid_query", str(exc)), contract)
         except (sqlite3.Error, OSError):
             status, body, extra = _error(ApiError(503, "store_unavailable", "activity store is unavailable"), contract)
@@ -277,6 +356,14 @@ class ActivityApi:
             finally:
                 store.conn.close()
             return _json(200, serialize_page(page, version=version), contract)
+        if path == "/api/v4/periods":
+            query = parse_period_query(parts.query)
+            store = self._open()
+            try:
+                report = query_activity_periods(store, query)
+            finally:
+                store.conn.close()
+            return _json(200, serialize_period_report(report), contract)
         raise ApiError(404, "not_found", "unknown route")
 
     def _authenticate(self, header: str) -> None:

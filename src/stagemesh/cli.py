@@ -1443,6 +1443,7 @@ def command_activity(args: argparse.Namespace) -> int:
             task_status=args.task_status,
             include_task_history=args.task_history,
             retry_kind=args.retry_kind,
+            retry_state=args.retry_state,
             include_retry_history=args.retry_history,
         )
         connection = sqlite3.connect(f"{activity_db.as_uri()}?mode=ro", uri=True)
@@ -1461,6 +1462,57 @@ def command_activity(args: argparse.Namespace) -> int:
         print(json.dumps(serialize_page(page, version=4), indent=2, sort_keys=True))
     else:
         print(_format_activity_page(page))
+    return 0
+
+
+def command_activity_periods(args: argparse.Namespace) -> int:
+    from .activity_periods import ActivityPeriodError, ActivityPeriodQuery, query_activity_periods
+    from .api_server import serialize_period_report
+
+    project = Path(args.project).resolve()
+    activity_db = db_path(project)
+    if not activity_db.is_file():
+        print("activity periods error: activity store does not exist; run stagemesh init first", file=sys.stderr)
+        return 2
+    try:
+        query = ActivityPeriodQuery(
+            since=_activity_instant(args.since, "since"),
+            until=_activity_instant(args.until, "until"),
+            bucket=args.bucket,
+            timezone=args.timezone,
+            task_id=args.task_id,
+            project=args.activity_project,
+            source=args.source,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        connection = sqlite3.connect(f"{activity_db.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            report = query_activity_periods(SimpleNamespace(conn=connection), query)
+        finally:
+            connection.close()
+    except (ActivityPeriodError, ActivityQueryError) as exc:
+        print(f"activity periods error: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, sqlite3.Error):
+        print("activity periods error: activity store is unavailable", file=sys.stderr)
+        return 2
+    payload = serialize_period_report(report)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(
+        f"activity periods: {len(report.active_intervals)} active intervals; "
+        f"{report.unavailable_tasks} tasks unavailable; timezone={report.timezone} bucket={report.bucket}"
+    )
+    for bucket in payload["series"]:
+        print(
+            f"{bucket['start']} opened={bucket['opened_occurrences']} "
+            f"completed={bucket['completed_occurrences']}"
+        )
+    if report.truncated:
+        print("warning: task scan was truncated; narrow the project/task/source filter")
     return 0
 
 
@@ -5084,6 +5136,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact typed retry occurrence kind",
     )
     activity.add_argument(
+        "--retry-state",
+        choices=("QUEUED", "CLAIMED", "RUNNING", "SUCCEEDED", "FAILED", "UNKNOWN", "SUPERSEDED"),
+        help="Exact durable retry execution state",
+    )
+    activity.add_argument(
         "--retry-history",
         action="store_true",
         help="Include typed automatic, remediation and operator retry occurrences",
@@ -5096,6 +5153,21 @@ def build_parser() -> argparse.ArgumentParser:
     activity.add_argument("--offset", type=int, default=0)
     activity.add_argument("--json", action="store_true")
     activity.set_defaults(func=command_activity)
+    activity_periods = sub.add_parser(
+        "activity-periods",
+        help="Read recorded active intervals and opened/completed series without reconstructing legacy history",
+    )
+    activity_periods.add_argument("--since", required=True, metavar="ISO8601")
+    activity_periods.add_argument("--until", required=True, metavar="ISO8601")
+    activity_periods.add_argument("--bucket", choices=("day", "week"), default="day")
+    activity_periods.add_argument("--timezone", default="UTC", help="IANA timezone, for example America/Chicago")
+    activity_periods.add_argument("--task", dest="task_id")
+    activity_periods.add_argument("--activity-project", help="Exact stored task project")
+    activity_periods.add_argument("--source", help="Exact stored task source")
+    activity_periods.add_argument("--limit", type=int, default=50, help="Active intervals per page (1-200)")
+    activity_periods.add_argument("--offset", type=int, default=0, help="Active interval page offset (0-999)")
+    activity_periods.add_argument("--json", action="store_true")
+    activity_periods.set_defaults(func=command_activity_periods)
 
     efficiency = sub.add_parser(
         "efficiency",

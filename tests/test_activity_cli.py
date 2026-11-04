@@ -139,11 +139,13 @@ def test_activity_cli_filters_and_displays_typed_retry_history(
 
     assert cli_module.main([
         "--project", str(project), "activity", "--task", task_id,
-        "--retry-kind", "automatic_provider", "--retry-history", "--json",
+        "--retry-kind", "automatic_provider", "--retry-state", "QUEUED",
+        "--retry-history", "--json",
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert [entry["id"] for entry in payload["entries"]] == [retry]
     assert payload["entries"][0]["retry_kind"] == "automatic_provider"
+    assert payload["entries"][0]["retry_state"] == "QUEUED"
     assert payload["entries"][0]["retry_attempt"] == 1
 
     assert cli_module.main([

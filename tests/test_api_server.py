@@ -210,7 +210,7 @@ def test_v4_projects_typed_retry_history_without_changing_v3(db):
     status, body, _ = _direct_v4(
         db,
         "/api/v4/activity?task_id=" + task
-        + "&include_retry_history=true&retry_kind=automatic_provider",
+        + "&include_retry_history=true&retry_kind=automatic_provider&retry_state=QUEUED",
     )
     assert status == 200 and body["contract"] == "stagemesh.activity/4"
     assert [entry["id"] for entry in body["entries"]] == [retry]
@@ -218,12 +218,63 @@ def test_v4_projects_typed_retry_history_without_changing_v3(db):
     assert entry["kind"] == "retry" and entry["retry_kind"] == "automatic_provider"
     assert (entry["retry_attempt"], entry["retry_limit"], entry["retry_state"]) == (1, 2, "QUEUED")
     assert body["status_counts"]["retry"]["automatic_provider"] == 1
+    assert body["status_counts"]["retry_outcome"]["QUEUED"] == 1
 
     _, v3, _ = _direct_v3(db)
     assert "retry" not in v3["status_counts"]
+    assert "retry_outcome" not in v3["status_counts"]
     assert all("retry_kind" not in item for item in v3["entries"])
     assert _direct_v3(db, "/api/v3/activity?include_retry_history=true")[0] == 400
     assert db.read_bytes() == before
+
+
+def test_v4_periods_reports_recorded_active_intervals_and_series_read_only(db):
+    store = Store(db)
+    task = store.upsert_task("period task", source_id="period-task", project="team/alpha")
+    at = datetime(2026, 3, 8, 7, tzinfo=UTC).timestamp()
+    store.conn.execute("UPDATE tasks SET created_at=?, updated_at=? WHERE id=?", (at, at, task))
+    store.conn.execute(
+        "UPDATE audit_events SET created_at=? WHERE event_type='task.created' "
+        "AND json_extract(payload, '$.task_id')=?",
+        (at, task),
+    )
+    store.conn.commit()
+    store.close()
+    before = db.read_bytes()
+
+    status, body, _ = _direct_v4(
+        db,
+        "/api/v4/periods?since=2026-03-07T06:00:00Z&until=2026-03-10T05:00:00Z"
+        "&timezone=America%2FChicago&project=team%2Falpha",
+    )
+    assert status == 200 and body["contract"] == "stagemesh.activity/4"
+    assert [item["task_id"] for item in body["active_intervals"]] == [task]
+    assert [item["opened_occurrences"] for item in body["series"]] == [0, 1, 0]
+    assert [
+        (
+            datetime.fromisoformat(item["end"].replace("Z", "+00:00"))
+            - datetime.fromisoformat(item["start"].replace("Z", "+00:00"))
+        ).total_seconds() / 3600
+        for item in body["series"]
+    ] == [24, 23, 24]
+    assert body["unavailable_tasks"] == 0 and db.read_bytes() == before
+    assert _direct_v3(db, "/api/v3/periods?since=2026-03-07T06:00:00Z&until=2026-03-10T05:00:00Z")[0] == 404
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",
+        "since=2026-01-01T00:00:00Z",
+        "since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00Z&bucket=month",
+        "since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00Z&timezone=Not%2FAZone",
+        "since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00Z&bogus=1",
+    ],
+)
+def test_v4_periods_invalid_queries_use_v4_error_envelope(db, query):
+    status, body, _ = _direct_v4(db, "/api/v4/periods" + ("?" + query if query else ""))
+    assert status == 400 and body["contract"] == "stagemesh.activity/4"
+    assert body["error"]["code"] == "invalid_query"
 
 
 @pytest.mark.parametrize(
@@ -236,6 +287,8 @@ def test_v4_projects_typed_retry_history_without_changing_v3(db):
         "include_task_history=true&include_task_history=false",
         "retry_kind=unknown&include_retry_history=true",
         "retry_kind=operator",
+        "retry_state=not-a-state&include_retry_history=true",
+        "retry_state=FAILED",
         "include_retry_history=1",
         "include_retry_history=true&include_retry_history=false",
         "task_event=status_changed&include_task_history=true&retry_kind=operator&include_retry_history=true",
