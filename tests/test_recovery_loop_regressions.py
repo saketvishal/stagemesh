@@ -4,10 +4,13 @@ import pytest
 
 from stagemesh.audit import record_audit
 from stagemesh.contracts import GateCommand, run_gate
-from stagemesh.diagnosis import _classify, _no_progress, IMPLEMENTATION_DEFECT, VALIDATION_GATE
+from stagemesh.diagnosis import IMPLEMENTATION_DEFECT, VALIDATION_GATE, _classify, _no_progress
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.persistence import Store
-from stagemesh.recovery import _auto_revalidation_already_tried, auto_reintegrate_blocked_runtime_failures
+from stagemesh.recovery import (
+    _auto_revalidation_already_tried,
+    auto_reintegrate_blocked_runtime_failures,
+)
 
 
 @pytest.mark.parametrize("output", ["test_timeout failed", "AssertionError: account not found", "expected no such file"])
@@ -79,6 +82,7 @@ def test_integration_runtime_retry_is_bounded_and_preserves_candidate(tmp_path, 
 
 def test_five_tasks_integrate_with_three_concurrent_workers(tmp_path):
     import threading
+
     from test_parallel import Rig, ScriptedExecutor
 
     tasks = ["A", "B", "C", "D", "E"]
@@ -93,8 +97,14 @@ def test_five_tasks_integrate_with_three_concurrent_workers(tmp_path):
 
 def test_rebase_runtime_error_is_not_a_content_conflict(tmp_path, monkeypatch):
     import json
+
     from test_parallel import Rig, ScriptedExecutor
-    from test_single_task_stale_rebase import _single_task_coordinator, _advance_until, _land_on_main
+    from test_single_task_stale_rebase import (
+        _advance_until,
+        _land_on_main,
+        _single_task_coordinator,
+    )
+
     from stagemesh.git import GitWorkspace
 
     rig = Rig(tmp_path, ["A"])
@@ -132,10 +142,15 @@ def test_rebase_runtime_error_is_not_a_content_conflict(tmp_path, monkeypatch):
 
 def test_review_clone_failure_preserves_the_underlying_error(tmp_path, monkeypatch):
     import json
-    from stagemesh.providers import RuntimeCommandAdapter
-    from stagemesh.capacity import CapacityKind
 
-    monkeypatch.setattr(RuntimeCommandAdapter, "check_capacity", lambda self: CapacityKind.AVAILABLE)
+    from stagemesh.capacity import CapacityKind
+    from stagemesh.providers import RuntimeCommandAdapter
+
+    monkeypatch.setattr(
+        RuntimeCommandAdapter,
+        "check_stage_capacity",
+        lambda self, capability: CapacityKind.AVAILABLE,
+    )
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 128, "", "MSYS shell failed: 0xC0000022"))
     adapter = RuntimeCommandAdapter("reviewer", ("tool",))
     result = json.loads(adapter.review_candidate("review", tmp_path, "candidate"))
