@@ -77,6 +77,7 @@ _FULL_EXACT_PATHS = frozenset(
         "src/stagemesh/profile.py",
         "src/stagemesh/security.py",
         "src/stagemesh/validation.py",
+        "src/stagemesh/validation_services.py",
         "src/stagemesh/validation_plan.py",
         "scripts/ci_validation_plan.py",
         "scripts/check_ci_range.py",

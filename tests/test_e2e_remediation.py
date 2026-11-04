@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from stagemesh.diagnosis import diagnose
 from stagemesh.domain import EvidenceStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
@@ -51,7 +52,12 @@ def evaluation(tmp_path):
 
 
 def test_docs_only_selection_still_runs_explicit_e2e_services(tmp_path):
-    from test_validation_selection_reuse import TASK, _candidate_after_unrelated_ui_work, _contract, _setup
+    from test_validation_selection_reuse import (
+        TASK,
+        _candidate_after_unrelated_ui_work,
+        _contract,
+        _setup,
+    )
 
     marker = tmp_path / "explicit-e2e-ran"
     project, store = _setup(tmp_path, _contract(tmp_path / "unit-count"))
@@ -172,6 +178,162 @@ def test_environment_values_invalidate_service_identity(evaluation, monkeypatch)
     assert "private-target-after-change" not in json.dumps(second.to_dict())
 
 
+@pytest.mark.parametrize(
+    "kind,requirement",
+    [
+        (
+            "browser",
+            {
+                "id": "home-empty-mobile",
+                "kind": "browser",
+                "target": "/home",
+                "state": "empty",
+                "viewport": "390x844",
+            },
+        ),
+        (
+            "api",
+            {
+                "id": "health-ok",
+                "kind": "api",
+                "target": "/api/health",
+                "method": "GET",
+                "expected_status": 200,
+            },
+        ),
+    ],
+)
+def test_declared_evaluation_coverage_requires_exact_policy_bound_results(
+    evaluation, kind, requirement
+):
+    _project, _store, _task, _sha, configure, validate = evaluation
+    code = (
+        "import json,os,pathlib; "
+        "pathlib.Path('evaluation-result.json').write_text(json.dumps({"
+        "'policy_fingerprint':os.environ['STAGEMESH_E2E_POLICY_FINGERPRINT'],"
+        f"'checks':[{{'id':{requirement['id']!r},'status':'PASS'}}]}}))"
+    )
+    configure(
+        code,
+        kind=kind,
+        requirements=[requirement],
+        result_manifest="evaluation-result.json",
+    )
+
+    status, payload = validate()
+
+    assert status is EvidenceStatus.PASSED
+    metadata = payload["e2e_evaluations"][0]["metadata"]
+    assert metadata["policy_fingerprint"]
+    assert metadata["requirements"] == [{"id": requirement["id"], "status": "PASS"}]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"policy_fingerprint": "forged", "checks": [{"id": "desktop", "status": "PASS"}]},
+        {"policy_fingerprint": "ENV", "checks": []},
+        {"policy_fingerprint": "ENV", "checks": [{"id": "desktop", "status": "FAIL"}]},
+    ],
+)
+def test_forged_omitted_or_failed_coverage_cannot_pass(evaluation, payload):
+    _project, _store, _task, _sha, configure, validate = evaluation
+    encoded = repr(payload)
+    code = (
+        "import json,os,pathlib; data="
+        + encoded
+        + "; data['policy_fingerprint'] = "
+        "os.environ['STAGEMESH_E2E_POLICY_FINGERPRINT'] if data['policy_fingerprint']=='ENV' else data['policy_fingerprint']; "
+        "pathlib.Path('evaluation-result.json').write_text(json.dumps(data))"
+    )
+    configure(
+        code,
+        kind="browser",
+        requirements=[
+            {
+                "id": "desktop",
+                "kind": "browser",
+                "target": "/",
+                "state": "ready",
+                "viewport": "1280x720",
+            }
+        ],
+        result_manifest="evaluation-result.json",
+    )
+
+    status, evidence = validate()
+
+    assert status is EvidenceStatus.FAILED
+    assert any(
+        "evaluation result" in finding.get("stderr", "")
+        for finding in evidence["findings"]
+    )
+
+
+def test_independent_evaluator_identity_is_bound_and_must_differ_from_implementer(
+    evaluation,
+):
+    _project, _store, _task, _sha, configure, validate = evaluation
+    configure(evaluator="test", require_independent=True)
+
+    status, payload = validate()
+
+    assert status is EvidenceStatus.FAILED
+    assert any(
+        "independent evaluator" in finding.get("stderr", "")
+        for finding in payload["findings"]
+    )
+
+
+def test_distinct_independent_evaluator_identity_is_recorded(evaluation):
+    _project, _store, _task, _sha, configure, validate = evaluation
+    configure(evaluator="reviewer", require_independent=True)
+
+    status, payload = validate()
+
+    assert status is EvidenceStatus.PASSED
+    metadata = payload["e2e_evaluations"][0]["metadata"]
+    assert metadata["evaluator"] == "reviewer"
+    assert metadata["independent"] is True
+
+
+def test_managed_service_requires_health_and_records_confirmed_cleanup(evaluation):
+    _project, _store, _task, _sha, configure, validate = evaluation
+    configure(
+        startup_command=[sys.executable, "-c", "import time; time.sleep(60)"],
+        health_command=[sys.executable, "-c", "pass"],
+        startup_timeout_seconds=5,
+    )
+
+    status, payload = validate()
+
+    assert status is EvidenceStatus.PASSED
+    assert payload["e2e_evaluations"][0]["metadata"]["lifecycle"] == {
+        "managed": True,
+        "started": True,
+        "healthy": True,
+        "cleanup_confirmed": True,
+    }
+
+
+def test_repeated_e2e_failure_signature_is_correlated_for_operator(evaluation):
+    project, store, task, _sha, configure, validate = evaluation
+    configure("import sys; print('stable failure', file=sys.stderr); sys.exit(2)")
+
+    first_status, first = validate()
+    second_status, second = validate()
+    report = task_doctor(store, project, task)
+
+    assert first_status is second_status is EvidenceStatus.FAILED
+    first_signature = first["e2e_evaluations"][0]["metadata"]["failure_signature"]
+    second_signature = second["e2e_evaluations"][0]["metadata"]["failure_signature"]
+    assert first_signature == second_signature
+    assert report["e2e"]["repeated_failure_count"] == 2
+    assert "repeated-failure=2" in format_doctor(report)
+    diagnosis = diagnose(store, task, project)
+    assert diagnosis is not None and diagnosis.repeated and diagnosis.repeat_count == 2
+
+
 def test_service_change_during_evaluation_cannot_pass(evaluation):
     project, store, task, sha, configure, validate = evaluation
     config = project / ".stagemesh" / "config.json"
@@ -246,7 +408,9 @@ def test_npm_cmd_metadata_is_checked_against_candidate_and_after_evaluation(eval
 
 
 def test_host_npm_global_prefix_preserves_docs_only_validation_selection(tmp_path, monkeypatch):
-    from test_validation_selection_reuse import test_unrelated_historical_ui_work_does_not_broaden_automatic_selection
+    from test_validation_selection_reuse import (
+        test_unrelated_historical_ui_work_does_not_broaden_automatic_selection,
+    )
 
     monkeypatch.setenv("NPM_CONFIG_PREFIX", str(tmp_path / "global-npm-install"))
     test_unrelated_historical_ui_work_does_not_broaden_automatic_selection(tmp_path)

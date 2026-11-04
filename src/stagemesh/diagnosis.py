@@ -105,10 +105,13 @@ class Failure:
     diagnosis_required: bool = False  # a timeout whose evidence points away from the code (or proves nothing): diagnose before any retry
     timeout_notes: tuple[str, ...] = ()  # what the captured output supports about each timeout, never more
     inconclusive_validation: bool = False
+    failure_signatures: tuple[str, ...] = ()
 
     def same_as(self, other: Failure) -> bool:
         if self.stage != other.stage or self.codes != other.codes or self.gates != other.gates:
             return False
+        if self.failure_signatures or other.failure_signatures:
+            return bool(set(self.failure_signatures) & set(other.failure_signatures))
         return _jaccard(self.tokens, other.tokens) >= (0.4 if self.stage == "REVIEW" else 0.5)
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,6 +126,11 @@ class Failure:
             "environment_unavailable": self.environment_unavailable,
             **({"paths": list(self.paths[:20])} if self.paths else {}),
             **({"timeout_notes": list(self.timeout_notes)} if self.timeout_notes else {}),
+            **(
+                {"failure_signatures": list(self.failure_signatures)}
+                if self.failure_signatures
+                else {}
+            ),
         }
 
 
@@ -613,6 +621,16 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
             line for finding in gate_findings[:2] for line in _gate_output(finding).strip().splitlines()[-6:]
         )[-700:]
         paths = tuple(dict.fromkeys(str(f["path"]) for f in findings if f.get("path")))
+        signatures = tuple(
+            sorted(
+                {
+                    str(finding["failure_signature"]).casefold()
+                    for finding in gate_findings
+                    if isinstance(finding.get("failure_signature"), str)
+                    and re.fullmatch(r"[0-9a-fA-F]{64}", str(finding["failure_signature"]))
+                }
+            )
+        )
         failures.append(
             Failure(
                 stage, sha, float(row["created_at"]), _classify(kind, codes, gate_findings), tuple(sorted(codes)),
@@ -622,6 +640,7 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
                 diagnosis_required=any(name in NON_CODE_TIMEOUTS and name != TIMEOUT_SERVICE_UNAVAILABLE for name in timeout_classes),
                 timeout_notes=tuple(timeout_notes),
                 inconclusive_validation=bool(gate_findings) and all(_inconclusive_timeout(f) for f in gate_findings),
+                failure_signatures=signatures,
             )
         )
     return failures

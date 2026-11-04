@@ -67,6 +67,9 @@ jobs:
       - name: Provider output security boundaries
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_provider_output_security.py
+      - name: E2E loop security boundaries
+        if: ${{ steps.validation-plan.outputs.mode == 'full' }}
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_e2e_loop_security.py tests/test_e2e_remediation.py tests/test_task_detail_api.py
       - name: Autonomous recovery ledger
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_autonomous_recovery.py tests/test_recovery_ledger.py
@@ -146,6 +149,9 @@ jobs:
       - name: Provider output security boundaries
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_provider_output_security.py
+      - name: E2E loop security boundaries
+        if: ${{ steps.validation-plan.outputs.mode == 'full' }}
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_e2e_loop_security.py tests/test_e2e_remediation.py tests/test_task_detail_api.py
       - name: Autonomous recovery ledger
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_autonomous_recovery.py tests/test_recovery_ledger.py

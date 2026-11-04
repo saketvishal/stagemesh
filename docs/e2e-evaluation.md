@@ -7,6 +7,30 @@ redacted failure details to remediation. Environment/startup failures remain
 distinct from assertions. The coordinator's existing retry budget applies;
 the evaluation runner does not install tools or start inferred services.
 
+## Declared coverage and independent evaluation
+
+An explicit service can declare `requirements`, a candidate-relative
+`result_manifest`, an `evaluator`, and `require_independent`. Browser requirements
+bind a target, named state, and viewport; API requirements bind a target, method,
+and expected status. The evaluation command receives only the policy fingerprint
+and must write a fresh, bounded JSON manifest containing that exact fingerprint
+and one PASS result for every declared requirement. Missing, duplicate, unknown,
+failed, stale, or forged results fail closed. When independence is required, the
+configured evaluator must differ from the provider that produced the candidate.
+
+Services that need a local application may also declare both `startup_command`
+and `health_command`, with a bounded `startup_timeout_seconds`. StageMesh starts
+only that declared command inside the disposable candidate checkout, requires the
+declared health command to pass, and accepts no evaluation verdict unless owned
+process-tree cleanup is confirmed. It never infers or installs a service.
+
+Operator and task-detail surfaces expose only allowlisted policy fingerprints,
+evaluator identifiers, requirement IDs/statuses, lifecycle booleans, and stable
+failure signatures. Targets, commands, raw output, and result-manifest contents
+are not copied into those projections. Repeated identical failures are correlated
+by signature and feed the existing repeated-failure diagnosis and remediation
+budget, making the stop decision visible without exposing raw evidence.
+
 ## npm package identity
 
 For an npm script, put its package directory in the service's `cwd`:

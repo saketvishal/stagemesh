@@ -13,6 +13,7 @@ FULL_GROUPS = (
     "Existing queue stop compatibility",
     "Execution budgets and review ownership",
     "Provider output security boundaries",
+    "E2E loop security boundaries",
     "Autonomous recovery ledger",
     "Continuous driver control and recovery",
     "Validation environment and fallback progress",
@@ -88,6 +89,9 @@ def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:
         assert "tests/test_recovery_ledger.py" in recovery
         provider_security = _step(job, "Provider output security boundaries")
         assert "tests/test_provider_output_security.py" in provider_security
+        e2e_security = _step(job, "E2E loop security boundaries")
+        assert "tests/test_e2e_loop_security.py" in e2e_security
+        assert "tests/test_e2e_remediation.py" in e2e_security
         delivery = _step(job, "Delivery and window regressions")
         assert "tests/test_autonomous_window.py" in delivery
         assert focused_condition in _step(job, "Stabilization matrix")

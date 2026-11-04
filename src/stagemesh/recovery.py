@@ -68,7 +68,11 @@ from .spec_planning import (
 )
 from .timing import format_task_summary, task_timing
 from .validation import Validator
-from .validation_services import ValidationServiceError, discover_validation_services
+from .validation_services import (
+    ValidationServiceError,
+    discover_validation_services,
+    e2e_policy_projection,
+)
 
 REBIND_EVENT = "task.contract_rebound"
 REBASELINE_EVENT = "task.rebaselined"
@@ -1285,6 +1289,8 @@ def _e2e_summary(
         "evaluations": [],
         "artifact_root": None,
         "artifact_paths": [],
+        "policy": {"status": "pending", "policies": [], "failure_signatures": []},
+        "repeated_failure_count": 0,
         "first_actionable_error": None,
         "reason": "no exact-candidate E2E evaluation evidence is recorded" if required else "no browser or API evaluation service is configured",
     }
@@ -1298,6 +1304,7 @@ def _e2e_summary(
     if row is None:
         return summary
     payload = _loads(row["payload"])
+    policy = e2e_policy_projection(payload)
     raw_evaluations = payload.get("e2e_evaluations")
     if not isinstance(raw_evaluations, list):
         single = payload.get("e2e_evidence")
@@ -1350,11 +1357,27 @@ def _e2e_summary(
         ):
             first_error = {
                 key: str(finding[key])[:600]
-                for key in ("code", "message", "failure_kind", "stderr")
+                for key in ("code", "message", "failure_kind", "stderr", "failure_signature")
                 if finding.get(key) is not None
             }
             break
     results = {item["result"] for item in evaluations}
+    signatures = set(policy["failure_signatures"])
+    repeated_failure_count = 0
+    if signatures:
+        counts = dict.fromkeys(signatures, 0)
+        rows = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND kind=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 50",
+            (task_id, EvidenceKind.VALIDATION),
+        ).fetchall()
+        for historic in rows:
+            historic_signatures = set(
+                e2e_policy_projection(_loads(historic["payload"]))["failure_signatures"]
+            )
+            for signature in signatures & historic_signatures:
+                counts[signature] += 1
+        repeated_failure_count = max(counts.values(), default=0)
     stale = bool(fingerprints and fingerprints != {services.fingerprint})
     summary.update(
         at=row["created_at"],
@@ -1362,6 +1385,8 @@ def _e2e_summary(
         evaluations=evaluations,
         artifact_paths=artifacts[:32],
         first_actionable_error=first_error,
+        policy=policy,
+        repeated_failure_count=repeated_failure_count,
         status=(
             "stale"
             if stale
@@ -1526,6 +1551,17 @@ def format_doctor(report: dict[str, Any]) -> str:
         f"  e2e: {e2e.get('status', 'unknown')}"
         + (f"; evaluations={len(e2e['evaluations'])}" if e2e.get("evaluations") else "")
         + (f"; artifacts={len(e2e['artifact_paths'])}" if e2e.get("artifact_paths") else "")
+        + (
+            f"; policy={e2e['policy']['status']}; declared-checks="
+            f"{sum(len(item['requirements']) for item in e2e['policy']['policies'])}"
+            if (e2e.get("policy") or {}).get("policies")
+            else ""
+        )
+        + (
+            f"; repeated-failure={e2e['repeated_failure_count']}"
+            if e2e.get("repeated_failure_count")
+            else ""
+        )
         + (f"; reason={e2e['reason']}" if e2e.get("reason") else "")
     )
     d = report["diagnosis"]
