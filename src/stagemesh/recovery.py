@@ -112,7 +112,7 @@ def _resume_at_validate(store: Store, task_id: str, task: Any) -> dict[str, Any]
     if current["stage"] == Stage.IMPLEMENT and cand is not None:
         sha = str(cand["sha"])
         bound = store.contract_binding(task_id, sha)
-        digest = str(bound["digest"]) if bound is not None and "digest" in bound.keys() else None
+        digest = str(bound["digest"]) if bound is not None else None
         if digest and store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED):
             target_stage = Stage.REVIEW
             reason = "operator repair: resume validated candidate at review"
@@ -142,7 +142,7 @@ def resume_task(
     if cand is not None:
         sha = str(cand["sha"])
         bound = store.contract_binding(task_id, sha)
-        digest = str(bound["digest"]) if bound is not None and "digest" in bound.keys() else None
+        digest = str(bound["digest"]) if bound is not None else None
         stage = Stage(current["stage"])
         if digest and store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED):
             review_passed = store.has_bound_evidence(
@@ -925,6 +925,7 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
             if diagnosis
             else None
         ),
+        "remediation_budget": store.task_remediation_summary(task_id),
         "recent_repairs": _recent_repairs(store, task_id),
         "integration_recoveries": _integration_recoveries(store, task_id),
         "integration_blocker": _integration_blocker(store, task_id),
@@ -1529,6 +1530,22 @@ def format_doctor(report: dict[str, Any]) -> str:
     )
     d = report["diagnosis"]
     lines.append(f"  diagnosis: {d['category']} at {d['stage']}: {d['summary']}" if d else "  diagnosis: none")
+    budget = report.get("remediation_budget") or {}
+    lines.append(
+        f"  remediation budget: current={budget.get('current_attempts', 0)}; "
+        f"cumulative={budget.get('cumulative_attempts', 0)}"
+    )
+    for stage in budget.get("stages", []):
+        latest = stage.get("latest") or {}
+        correlation = (
+            f"; retry={latest.get('retry_state') or 'unbound'}"
+            + (f"; execution={latest['execution_id']}" if latest.get("execution_id") else "")
+        )
+        lines.append(
+            f"    - {stage['stage']}: epoch={stage['current_epoch']}; "
+            f"current={stage['current_attempts']}; cumulative={stage['cumulative_attempts']}"
+            f"{correlation}"
+        )
     if report.get("block"):
         lines.append(f"  block: {report['block']['kind']}: {report['block']['reason']}" + (" (run-window reconsiders it automatically)" if report["block"]["automatic_reentry"] else ""))
     for recovery in report.get("integration_recoveries", []):

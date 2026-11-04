@@ -312,6 +312,8 @@ A `stale_baseline` stops the task at once, and a repeated `contract_scope`, `val
 before the implementation provider is called again: none of them can be fixed by more code. Findings are stored verbatim, shown in
 `continue`, `queue-run` and `diagnose`, and quoted unabridged (with the candidate sha) in the next implementation prompt.
 
+The exact ordinary, reopened, and exhaustion-round limits—and the durable epoch and retry evidence shown by `task-doctor`—are documented in [docs/recovery-budgets.md](docs/recovery-budgets.md).
+
 ### Workspace ownership and external-mutation detection
 
 Each task's worktree is written by one StageMesh execution at a time. An execution claims the worktree with an owner file in its private

@@ -245,6 +245,8 @@ class Store:
                 stage TEXT NOT NULL,
                 candidate_sha TEXT NOT NULL,
                 cleared INTEGER NOT NULL DEFAULT 0,
+                budget_epoch INTEGER NOT NULL DEFAULT 0,
+                retry_event_id TEXT,
                 created_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS external_evidence (
@@ -1611,12 +1613,91 @@ class Store:
         stage = _validate_text(stage, "remediation stage")
         candidate_sha = _validate_text(candidate_sha, "candidate sha")
         remediation_id = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO task_remediations(id, task_id, stage, candidate_sha, created_at) VALUES (?, ?, ?, ?, ?)",
-            (remediation_id, task_id, stage, candidate_sha, time.time()),
-        )
-        self.conn.commit()
+        with self.conn:
+            history = self.conn.execute(
+                "SELECT MAX(budget_epoch) AS last_epoch, "
+                "SUM(CASE WHEN cleared=0 THEN 1 ELSE 0 END) AS active "
+                "FROM task_remediations WHERE task_id=? AND stage=?",
+                (task_id, stage),
+            ).fetchone()
+            last_epoch = history["last_epoch"]
+            active = int(history["active"] or 0)
+            budget_epoch = 0 if last_epoch is None else int(last_epoch) + (0 if active else 1)
+            self.conn.execute(
+                "INSERT INTO task_remediations("
+                "id, task_id, stage, candidate_sha, budget_epoch, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?)",
+                (remediation_id, task_id, stage, candidate_sha, budget_epoch, time.time()),
+            )
         return remediation_id
+
+    def task_remediation(self, remediation_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM task_remediations WHERE id=?",
+            (_validate_text(remediation_id, "remediation id"),),
+        ).fetchone()
+
+    def bind_task_remediation_retry(self, remediation_id: str, retry_event_id: str) -> None:
+        """Bind one budget debit to the typed retry row created by its queue audit event."""
+        remediation_id = _validate_text(remediation_id, "remediation id")
+        retry_event_id = _validate_text(retry_event_id, "retry event id")
+        with self.conn:
+            if self.conn.execute(
+                "SELECT 1 FROM retry_attempts WHERE retry_event_id=?",
+                (retry_event_id,),
+            ).fetchone() is None:
+                raise StoreValidationError("retry event does not have typed retry evidence")
+            updated = self.conn.execute(
+                "UPDATE task_remediations SET retry_event_id=? "
+                "WHERE id=? AND retry_event_id IS NULL",
+                (retry_event_id, remediation_id),
+            ).rowcount
+            if updated != 1:
+                raise StoreValidationError("remediation does not exist or is already bound")
+
+    def task_remediation_summary(self, task_id: str) -> dict[str, Any]:
+        """Return current and cumulative budget evidence without mutating retry state."""
+        task_id = _validate_text(task_id, "task id")
+        rows = self.conn.execute(
+            "SELECT tr.*, ra.state AS retry_state, ra.claim_id, ra.execution_id "
+            "FROM task_remediations tr "
+            "LEFT JOIN retry_attempts ra ON ra.retry_event_id=tr.retry_event_id "
+            "WHERE tr.task_id=? ORDER BY tr.stage, tr.created_at, tr.rowid",
+            (task_id,),
+        ).fetchall()
+        by_stage: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            by_stage.setdefault(str(row["stage"]), []).append(row)
+        stages: list[dict[str, Any]] = []
+        for stage, stage_rows in sorted(by_stage.items()):
+            active = [row for row in stage_rows if not bool(row["cleared"])]
+            latest = stage_rows[-1]
+            stages.append(
+                {
+                    "stage": stage,
+                    "current_epoch": int((active[-1] if active else latest)["budget_epoch"]),
+                    "epoch_count": len({int(row["budget_epoch"]) for row in stage_rows}),
+                    "current_attempts": len(active),
+                    "cleared_attempts": len(stage_rows) - len(active),
+                    "cumulative_attempts": len(stage_rows),
+                    "latest": {
+                        "remediation_id": str(latest["id"]),
+                        "candidate_sha": str(latest["candidate_sha"]),
+                        "budget_epoch": int(latest["budget_epoch"]),
+                        "cleared": bool(latest["cleared"]),
+                        "retry_event_id": latest["retry_event_id"],
+                        "retry_state": latest["retry_state"],
+                        "claim_id": latest["claim_id"],
+                        "execution_id": latest["execution_id"],
+                    },
+                }
+            )
+        return {
+            "task_id": task_id,
+            "current_attempts": sum(stage["current_attempts"] for stage in stages),
+            "cumulative_attempts": len(rows),
+            "stages": stages,
+        }
 
     def task_remediation_count(self, task_id: str, stage: str) -> int:
         row = self.conn.execute(

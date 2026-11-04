@@ -1111,13 +1111,31 @@ class Coordinator:
         # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.
         if self.store.task_remediation_count(task_id, str(failed_stage)) >= self.remediation_policy.max_attempts:
             if diagnosis is not None and self._reopen_budget_once(task_id, failed_stage, diagnosis):
-                self.store.add_task_remediation(task_id, str(failed_stage), sha)
-                return self._queue_remediation(task_id, sha, failed_stage, findings, budget_reopened=True)
+                remediation_id = self.store.add_task_remediation(task_id, str(failed_stage), sha)
+                return self._queue_remediation(
+                    task_id,
+                    sha,
+                    failed_stage,
+                    findings,
+                    remediation_id,
+                    budget_reopened=True,
+                )
             return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, "remediation_budget_exhausted")
-        self.store.add_task_remediation(task_id, str(failed_stage), sha)
-        return self._queue_remediation(task_id, sha, failed_stage, findings)
+        remediation_id = self.store.add_task_remediation(task_id, str(failed_stage), sha)
+        return self._queue_remediation(task_id, sha, failed_stage, findings, remediation_id)
 
-    def _queue_remediation(self, task_id: str, sha: str, failed_stage: Stage, findings: list, **extra: Any) -> int:
+    def _queue_remediation(
+        self,
+        task_id: str,
+        sha: str,
+        failed_stage: Stage,
+        findings: list,
+        remediation_id: str | None = None,
+        **extra: Any,
+    ) -> int:
+        remediation = self.store.task_remediation(remediation_id) if remediation_id is not None else None
+        if remediation_id is not None and remediation is None:
+            raise RuntimeError(f"remediation ledger row disappeared: {remediation_id}")
         for finding in findings:
             self.remediation_policy.record_attempt(
                 self.store,
@@ -1130,7 +1148,15 @@ class Coordinator:
                 },
             )
         self.store.advance_task(task_id, Stage.IMPLEMENT)
-        record_audit(
+        ledger_payload = (
+            {
+                "remediation_id": remediation_id,
+                "budget_epoch": int(remediation["budget_epoch"]),
+            }
+            if remediation is not None
+            else {}
+        )
+        retry_event_id = record_audit(
             self.store,
             "task.remediation_queued",
             {
@@ -1138,9 +1164,12 @@ class Coordinator:
                 "candidate_sha": sha,
                 "stage": failed_stage,
                 "finding_count": len(findings),
+                **ledger_payload,
                 **extra,
             },
         )
+        if remediation_id is not None:
+            self.store.bind_task_remediation_retry(remediation_id, retry_event_id)
         record_task_owner_state(self.store, task_id, "remediation_queued", self.project)
         return 1
 
@@ -1156,7 +1185,12 @@ class Coordinator:
             previous = payload.get("signature")
             if isinstance(previous, dict):
                 previous = {**previous, "summary": normalize(str(previous.get("summary", "")))}
-            if payload.get("task_id") == task_id and previous == signature:
+            previous_stage = payload.get("stage")
+            if previous_stage is None and isinstance(previous, dict):
+                previous_stage = previous.get("stage")
+            # One reopening is the task/stage boundary. A diagnosis whose repeat
+            # wording changes after the first epoch must not manufacture another.
+            if payload.get("task_id") == task_id and previous_stage == str(failed_stage):
                 return False
         cleared = self.store.clear_task_remediations(task_id, str(failed_stage))
         record_audit(
