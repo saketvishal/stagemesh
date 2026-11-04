@@ -68,6 +68,7 @@ def test_ui_source_is_csp_safe_and_never_injects_html():
     assert "history.replaceState" in js and "location.hash" in js  # token read once, then removed from the address bar
     assert "Authorization" in js and "/api/v5/activity" in js
     assert "/api/v5/health" in js and "/api/v5/periods" in js and "/api/v1/operator" in js
+    assert "/api/v1/task?task_id=" in js
     assert "include_task_history" in js and "include_retry_history" in js and "retry_state" in js
     assert "include_evidence_history" in js and "evidence_status" in js
 
@@ -84,7 +85,8 @@ def test_ui_covers_contract_states_and_filters():
     assert 'aria-live="polite"' in html
     for marker in (
         "This week", "This month", 'id="series-table"', 'id="interval-table"', 'id="drill"',
-        'id="status-view"', "Recorded pending decisions", "Provider selections",
+        'id="status-view"', 'id="task-view"', "Recorded pending decisions", "Provider selections",
+        "Recorded lifecycle timeline", "Validation, review and integration evidence",
     ):
         assert marker in html, marker
 

@@ -360,6 +360,11 @@ def _pending_decision_rows(store: Store) -> list[Mapping[str, object]]:
     return pending
 
 
+def pending_decision_rows(store: Store) -> tuple[Mapping[str, object], ...]:
+    """Public read-only projection used by task-scoped operator surfaces."""
+    return tuple(_pending_decision_rows(store))
+
+
 def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
     rows: list[Mapping[str, object]] = []
     for execution in store.running_executions():

@@ -30,7 +30,7 @@ from .activity_periods import (
     ActivityPeriodReport,
     query_activity_periods,
 )
-from .operator import OperatorReport, operator_report
+from .operator import OperatorReport, operator_report, pending_decision_rows
 from .persistence import Store
 from .redaction import redact_output
 
@@ -41,6 +41,8 @@ CONTRACT_V4 = "stagemesh.activity/4"
 CONTRACT_V5 = "stagemesh.activity/5"
 OPERATOR_CONTRACT = "stagemesh.operator/1"
 OPERATOR_DETAIL_LIMIT = 100
+TASK_DETAIL_CONTRACT = "stagemesh.task-detail/1"
+TASK_DETAIL_LIMIT = 200
 LOOPBACK = "127.0.0.1"
 _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", "limit", "offset"})
 _PARAMS_V2 = _PARAMS | {"project", "time_basis"}
@@ -228,6 +230,21 @@ def parse_period_query(raw: str) -> ActivityPeriodQuery:
         source=one.get("source"),
         **kwargs,
     )
+
+
+def parse_task_detail_query(raw: str) -> str:
+    if len(raw) > _MAX_QUERY_CHARS or not _URL_SAFE.match(raw):
+        raise _invalid("task detail query must be percent-encoded ASCII")
+    segments = raw.split("&") if raw else []
+    if len(segments) != 1:
+        raise _invalid("task detail requires exactly one task_id")
+    name, sep, value = segments[0].partition("=")
+    if not sep or _decode(name) != "task_id":
+        raise _invalid("task detail requires exactly one task_id")
+    task_id = _decode(value)
+    if not task_id.strip() or len(task_id) > 200:
+        raise _invalid("task_id must be a non-empty string of 200 characters or fewer")
+    return task_id
 
 
 def _entry(entry: ActivityEntry, *, version: int = 1) -> dict[str, Any]:
@@ -480,6 +497,105 @@ def serialize_operator_report(report: OperatorReport) -> dict[str, Any]:
     }
 
 
+def serialize_task_detail(store: Store, task_id: str) -> dict[str, Any]:
+    task = store.get_task(task_id)
+    if task is None:
+        raise ApiError(404, "task_not_found", "task was not found")
+    page = query_activity(
+        store,
+        ActivityQuery(
+            task_id=task_id,
+            include_source_history=True,
+            include_task_history=True,
+            include_retry_history=True,
+            include_evidence_history=True,
+            limit=TASK_DETAIL_LIMIT,
+        ),
+    )
+    timeline = [_entry(entry, version=5) for entry in page.entries]
+    current_entry = next((entry for entry in timeline if entry["kind"] == "task"), {})
+    candidate = store.latest_candidate(task_id)
+    candidate_sha = None if candidate is None else _safe_sha(candidate["sha"])
+    dependencies = [
+        {
+            "task_id": _safe_text(row["id"]),
+            "stage": _safe_text(row["stage"], 40) or "UNKNOWN",
+            "status": _safe_text(row["status"], 40) or "UNKNOWN",
+        }
+        for row in store.conn.execute(
+            "SELECT t.id,t.stage,t.status FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id "
+            "WHERE d.task_id=? ORDER BY t.id LIMIT ?",
+            (task_id, TASK_DETAIL_LIMIT),
+        )
+    ]
+    pending = []
+    for row in pending_decision_rows(store):
+        if row.get("task_id") not in {task_id, None}:
+            continue
+        pending.append(
+            {
+                "task_id": _safe_text(row.get("task_id")),
+                "kind": row.get("kind")
+                if row.get("kind") in {"human_decision", "delivery_permission", "approval_coverage"}
+                else "unknown",
+                "status": row.get("status") if row.get("status") in {"RECORDED", "UNKNOWN"} else "UNKNOWN",
+                "candidate_sha": _safe_sha(row.get("candidate_sha")),
+                "detail": _safe_text(row.get("detail"), 400) or "detail unavailable",
+                "recorded_at": _safe_number(row.get("recorded_at")),
+            }
+        )
+    created = store.conn.execute(
+        "SELECT created_at FROM audit_events WHERE event_type='task.created' "
+        "AND json_extract(payload, '$.task_id')=? ORDER BY created_at LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return {
+        "observed_at": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "task": {
+            "id": _safe_text(task["id"]),
+            "title": current_entry.get("title") or _safe_text(task["title"], 300),
+            "stage": _safe_text(task["stage"], 40) or "UNKNOWN",
+            "status": _safe_text(task["status"], 40) or "UNKNOWN",
+            "project": current_entry.get("project"),
+            "created_at": _safe_number(task["created_at"]),
+            "updated_at": _safe_number(task["updated_at"]),
+        },
+        "source": {
+            "kind": current_entry.get("source"),
+            "id": current_entry.get("source_id"),
+            "status": current_entry.get("source_status"),
+        },
+        "candidate": None
+        if candidate is None
+        else {
+            "sha": candidate_sha,
+            "produced_by": _safe_text(candidate["produced_by"], 80),
+            "durable_handoff": bool(candidate["durable_handoff"]),
+            "created_at": _safe_number(candidate["created_at"]),
+        },
+        "dependencies": dependencies,
+        "pending_decisions": pending,
+        "timeline": timeline,
+        "evidence": [entry for entry in timeline if entry["kind"] == "evidence"],
+        "retries": [
+            entry
+            for entry in timeline
+            if entry["kind"] == "retry" or entry.get("rework_required") is True
+        ],
+        "history": {
+            "recorded_creation": created is not None,
+            "total": page.total,
+            "limit": page.limit,
+            "truncated": page.truncated or page.next_offset is not None,
+            "note": (
+                "Recorded history may be incomplete before durable lifecycle events were introduced."
+                if created is None
+                else "Recorded retained lifecycle history only; absence does not prove an event never occurred."
+            ),
+        },
+    }
+
+
 class ActivityApi:
     """Transport-independent request handling, so tests need no sockets."""
 
@@ -498,7 +614,9 @@ class ActivityApi:
     def handle(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
         contract = CONTRACT
         try:
-            if urlsplit(target).path == "/api/v1/operator":
+            if urlsplit(target).path == "/api/v1/task":
+                contract = TASK_DETAIL_CONTRACT
+            elif urlsplit(target).path == "/api/v1/operator":
                 contract = OPERATOR_CONTRACT
             elif urlsplit(target).path.startswith("/api/v5/"):
                 contract = CONTRACT_V5
@@ -541,6 +659,14 @@ class ActivityApi:
         if not path.startswith("/api/"):
             return self._static(path)  # the shell carries no data, so it needs no credential
         self._authenticate(lowered.get("authorization", ""))
+        if path == "/api/v1/task":
+            task_id = parse_task_detail_query(parts.query)
+            store = self._open()
+            try:
+                detail = serialize_task_detail(store, task_id)
+            finally:
+                store.conn.close()
+            return _json(200, detail, TASK_DETAIL_CONTRACT)
         if path == "/api/v1/operator":
             if parts.query:
                 raise ApiError(400, "invalid_query", "operator takes no parameters")

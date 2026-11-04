@@ -18,6 +18,8 @@
   let lastGood = null, timer = null, generation = 0;
   let loadedPages = 1, wantedPages = 1, periodLoadedPages = 1, periodWantedPages = 1;
   let inflight = false, drillState = null;
+  let detailSnapshot = null, detailTaskId = null, detailGeneration = 0;
+  let detailReturnView = "activity", detailOpener = null;
 
   function setMessage(text, level) {
     const el = $("message");
@@ -214,6 +216,39 @@
     reload();
   }
 
+  async function openTask(taskId, opener) {
+    const mine = ++detailGeneration;
+    detailReturnView = $("status-view").hidden ? "activity" : "status";
+    detailOpener = opener || document.activeElement;
+    detailTaskId = taskId;
+    $("show-task").hidden = false;
+    $("show-task").textContent = "Task " + taskId;
+    $("detail-heading").textContent = "Task " + taskId;
+    $("detail-message").textContent = "Loading task detail...";
+    setView("task");
+    try {
+      const detail = await api("/api/v1/task?task_id=" + encodeURIComponent(taskId));
+      if (mine !== detailGeneration) return;
+      detailSnapshot = detail;
+      renderTaskDetail();
+      $("close-detail").focus();
+    } catch (error) {
+      if (mine !== detailGeneration) return;
+      const stale = detailSnapshot && detailSnapshot.task.id === taskId ? " Showing the last recorded detail (stale)." : "";
+      $("detail-message").textContent = "Could not load task detail: " + error.message + "." + stale;
+      if (!stale) detailSnapshot = null;
+      renderTaskDetail();
+    }
+  }
+
+  function closeTask() {
+    detailGeneration += 1;
+    setView(detailReturnView);
+    const opener = detailOpener;
+    detailOpener = null;
+    if (opener && opener.isConnected) opener.focus();
+  }
+
   function exitDrill() {
     if (!drillState) return;
     for (const [id, value] of Object.entries(drillState)) {
@@ -239,7 +274,7 @@
         const button = document.createElement("button");
         button.type = "button"; button.textContent = entry.task_id; button.title = "Open recorded task history";
         button.dataset.key = entry.kind + ":" + entry.id;
-        button.addEventListener("click", () => enterDrill(entry.task_id));
+        button.addEventListener("click", () => openTask(entry.task_id, button));
         task.replaceChildren(button);
       } else task.textContent = "-";
       cell(row, entry.stage); cell(row, entry.current_task_status || entry.status);
@@ -284,7 +319,7 @@
       const button = document.createElement("button");
       button.type = "button"; button.textContent = interval.task_id; button.title = "Open recorded task history";
       button.dataset.intervalKey = interval.task_id + ":" + interval.active_from;
-      button.addEventListener("click", () => enterDrill(interval.task_id));
+      button.addEventListener("click", () => openTask(interval.task_id, button));
       task.replaceChildren(button);
       const start = cell(row, new Date(interval.active_from).toLocaleString()); start.title = interval.active_from;
       const end = cell(row, interval.active_until ? new Date(interval.active_until).toLocaleString() : "Still active");
@@ -326,7 +361,7 @@
     if (!taskId) { target.textContent = "-"; return target; }
     const button = document.createElement("button");
     button.type = "button"; button.textContent = taskId; button.title = "Open recorded task history";
-    button.addEventListener("click", () => enterDrill(taskId));
+    button.addEventListener("click", () => openTask(taskId, button));
     target.replaceChildren(button);
     return target;
   }
@@ -393,12 +428,68 @@
     }
   }
 
+  function renderTaskDetail() {
+    for (const id of [
+      "detail-facts", "detail-dependencies", "detail-decisions", "detail-evidence",
+      "detail-retries", "detail-timeline",
+    ]) $(id).replaceChildren();
+    const detail = detailSnapshot;
+    if (!detail || detail.task.id !== detailTaskId) return;
+    $("detail-heading").textContent = detail.task.title || ("Task " + detail.task.id);
+    $("detail-message").textContent = [
+      detail.history.note,
+      detail.history.truncated ? "Timeline truncated at " + detail.history.limit + " rows." : "Timeline within retained bounds.",
+      "Observed " + new Date(detail.observed_at).toLocaleString() + ".",
+    ].join(" ");
+    const facts = [
+      ["Task", detail.task.id], ["Stage", detail.task.stage], ["Status", detail.task.status],
+      ["Project", detail.task.project || "-"], ["Source", [detail.source.kind, detail.source.id, detail.source.status].filter(Boolean).join(" / ") || "-"],
+      ["Candidate", detail.candidate && detail.candidate.sha ? detail.candidate.sha.slice(0, 12) : "-"],
+    ];
+    for (const [label, value] of facts) {
+      const dt = document.createElement("dt"); dt.textContent = label;
+      const dd = document.createElement("dd"); dd.textContent = value;
+      $("detail-facts").append(dt, dd);
+    }
+    for (const item of detail.dependencies) {
+      const row = $("detail-dependencies").insertRow(); taskCell(row, item.task_id);
+      cell(row, item.stage); cell(row, item.status);
+    }
+    for (const item of detail.pending_decisions) {
+      const row = $("detail-decisions").insertRow(); cell(row, item.kind); cell(row, item.status);
+      cell(row, item.candidate_sha ? item.candidate_sha.slice(0, 12) : "-"); cell(row, item.detail);
+    }
+    for (const item of detail.evidence) {
+      const row = $("detail-evidence").insertRow();
+      cell(row, new Date(item.at).toLocaleString()); cell(row, item.evidence_kind);
+      cell(row, item.evidence_status); cell(row, item.candidate_sha ? item.candidate_sha.slice(0, 12) : "-");
+    }
+    for (const item of detail.retries) {
+      const row = $("detail-retries").insertRow();
+      cell(row, new Date(item.at).toLocaleString()); cell(row, item.retry_kind || "rework");
+      cell(row, item.retry_state || "REWORK_REQUIRED");
+      cell(row, item.retry_attempt ? item.retry_attempt + " of " + (item.retry_limit || "?") : "-");
+      cell(row, item.candidate_sha ? item.candidate_sha.slice(0, 12) : "-");
+    }
+    for (const item of detail.timeline) {
+      const row = $("detail-timeline").insertRow();
+      const at = cell(row, new Date(item.at).toLocaleString()); at.title = item.at;
+      cell(row, item.kind); cell(row, item.stage); cell(row, item.status || item.state); cell(row, item.provider);
+      cell(row, item.title || [
+        item.event_type, item.result_code, item.previous_task_status && (item.previous_task_status + " -> " + item.current_task_status),
+        item.previous_source_status && (item.previous_source_status + " -> " + item.source_status),
+        item.evidence_kind, item.evidence_status, item.retry_kind, item.retry_state,
+      ].filter(Boolean).join(" "));
+    }
+  }
+
   function setView(name) {
-    const status = name === "status";
-    $("activity-view").hidden = status;
-    $("status-view").hidden = !status;
-    $("show-activity").setAttribute("aria-pressed", String(!status));
-    $("show-status").setAttribute("aria-pressed", String(status));
+    $("activity-view").hidden = name !== "activity";
+    $("status-view").hidden = name !== "status";
+    $("task-view").hidden = name !== "task";
+    $("show-activity").setAttribute("aria-pressed", String(name === "activity"));
+    $("show-status").setAttribute("aria-pressed", String(name === "status"));
+    $("show-task").setAttribute("aria-pressed", String(name === "task"));
   }
 
   function render(page, periods) {
@@ -463,12 +554,16 @@
   $("period-more").addEventListener("click", loadMorePeriods);
   $("show-activity").addEventListener("click", () => setView("activity"));
   $("show-status").addEventListener("click", () => setView("status"));
+  $("show-task").addEventListener("click", () => setView("task"));
+  $("close-detail").addEventListener("click", closeTask);
+  $("detail-history").addEventListener("click", () => { if (detailTaskId) enterDrill(detailTaskId); });
   $("auto").addEventListener("change", schedule);
   document.addEventListener("keydown", (event) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     if (event.ctrlKey || event.metaKey || event.altKey || typing) return;
     if (event.key === "/") { event.preventDefault(); $("task").focus(); }
     else if (event.key === "r") refresh();
+    else if (event.key === "Escape" && !$("task-view").hidden) closeTask();
     else if (event.key === "Escape" && drillState) exitDrill();
   });
   api("/api/v5/health").then((health) => { $("version").textContent = "v" + health.version; }, () => {});
