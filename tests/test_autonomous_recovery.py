@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from test_integration_recovery import (
     TASK,
     advance_until,
@@ -219,17 +220,29 @@ def review_rig(tmp_path: Path, message: str, max_attempts: int = 2):  # type: ig
         coord.tick()
         if store.get_task("TASK-1")["status"] in (TaskStatus.BLOCKED, TaskStatus.DONE):
             break
-    return store, executor
+    return project, store, executor
 
 
-def test_review_budget_exhaustion_runs_the_recovery_ladder_and_is_not_a_founder_decision(tmp_path: Path) -> None:
+@pytest.mark.parametrize("max_attempts", [1, 2, 3])
+def test_review_budget_exhaustion_runs_the_recovery_ladder_and_is_not_a_founder_decision(
+    tmp_path: Path, max_attempts: int
+) -> None:
+    from test_diagnosis import Attempts
+
     from stagemesh.block_kinds import BlockKind, classify_block
+    from stagemesh.coordinator import Coordinator
+    from stagemesh.diagnosis import DiagnosisPolicy
+    from stagemesh.recovery import format_doctor, task_doctor
+    from stagemesh.remediation import RemediationPolicy
     from stagemesh.survivor_wave import blocked_needs_decision
 
-    store, executor = review_rig(tmp_path, "Handle the empty input case")
+    project, store, executor = review_rig(
+        tmp_path, "Handle the empty input case", max_attempts=max_attempts
+    )
 
     assert store.get_task("TASK-1")["status"] == TaskStatus.BLOCKED
-    assert executor.calls == 4  # first attempt + 2 budgeted remediations + 1 recovery round
+    # Initial implementation + ordinary epoch + reopened epoch + one exhaustion round.
+    assert executor.calls == 2 * max_attempts + 2
     (round_,) = events_of(store, "recovery.exhaustion_round")
     assert round_["action"] == "REPAIR_WORKTREE" and round_["round"] == 1
     info = classify_block(store, "TASK-1")
@@ -241,13 +254,81 @@ def test_review_budget_exhaustion_runs_the_recovery_ladder_and_is_not_a_founder_
     decisions = events_of(store, "recovery.decision")
     assert [d["action"] for d in decisions] == ["REPAIR_WORKTREE", "BLOCK_EXTERNAL"] and {d["source"] for d in decisions} == {"rules"}
 
+    ledger = store.task_remediation_summary("TASK-1")
+    assert ledger["current_attempts"] == max_attempts
+    assert ledger["cumulative_attempts"] == 2 * max_attempts
+    assert len(ledger["stages"]) == 1
+    review_budget = ledger["stages"][0]
+    assert {
+        key: review_budget[key]
+        for key in (
+            "stage",
+            "current_epoch",
+            "epoch_count",
+            "current_attempts",
+            "cleared_attempts",
+            "cumulative_attempts",
+        )
+    } == {
+        "stage": "REVIEW",
+        "current_epoch": 1,
+        "epoch_count": 2,
+        "current_attempts": max_attempts,
+        "cleared_attempts": max_attempts,
+        "cumulative_attempts": 2 * max_attempts,
+    }
+    correlated = store.conn.execute(
+        "SELECT COUNT(*) FROM task_remediations tr "
+        "JOIN retry_attempts ra ON ra.retry_event_id=tr.retry_event_id "
+        "WHERE tr.task_id=? AND ra.execution_id IS NOT NULL",
+        ("TASK-1",),
+    ).fetchone()[0]
+    assert correlated == 2 * max_attempts
+    queued = events_of(store, "task.remediation_queued")
+    assert len([event for event in queued if event.get("remediation_id")]) == 2 * max_attempts
+    assert {event["budget_epoch"] for event in queued if event.get("remediation_id")} == {0, 1}
+
+    report = task_doctor(store, project, "TASK-1")
+    assert report["remediation_budget"] == ledger
+    assert (
+        f"REVIEW: epoch=1; current={max_attempts}; cumulative={2 * max_attempts}"
+        in format_doctor(report)
+    )
+
+    # A terminal task stays fenced after reopening the same durable database.
+    before = {
+        "audits": store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+        "remediations": store.conn.execute("SELECT COUNT(*) FROM task_remediations").fetchone()[0],
+        "retries": store.conn.execute("SELECT COUNT(*) FROM retry_attempts").fetchone()[0],
+    }
+    db_path = store.db_path
+    store.close()
+    reopened = Store(db_path)
+    reopened.migrate()
+    restart_executor = Attempts()
+    restarted = Coordinator(
+        reopened,
+        project,
+        executor=restart_executor,
+        remediation_policy=RemediationPolicy(max_attempts=max_attempts),
+        diagnosis_policy=DiagnosisPolicy(stop_on_repeat=False),
+    )
+    assert [restarted.tick() for _ in range(3)] == [0, 0, 0]
+    assert restart_executor.calls == 0
+    assert before == {
+        "audits": reopened.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+        "remediations": reopened.conn.execute("SELECT COUNT(*) FROM task_remediations").fetchone()[0],
+        "retries": reopened.conn.execute("SELECT COUNT(*) FROM retry_attempts").fetchone()[0],
+    }
+    reopened.close()
+
 
 def test_a_finding_that_states_a_product_decision_is_asked_at_once_with_that_question(tmp_path: Path) -> None:
     from stagemesh.block_kinds import BlockKind, classify_block
     from stagemesh.survivor_wave import blocked_needs_decision
 
     question = "This needs a product decision: should expired matters keep their drafts for 30 or 90 days?"
-    store, executor = review_rig(tmp_path, question)
+    _, store, executor = review_rig(tmp_path, question)
 
     assert store.get_task("TASK-1")["status"] == TaskStatus.BLOCKED and executor.calls == 1  # no attempts are spent on a choice
     assert classify_block(store, "TASK-1").kind is BlockKind.HUMAN_DECISION

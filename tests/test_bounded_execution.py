@@ -132,6 +132,18 @@ def test_parent_budget_reopens_only_once_for_changing_candidate_ids(tmp_path: Pa
         assert coordinator._reopen_budget_once(TASK, Stage.VALIDATE, first)
     store.add_task_remediation(TASK, "VALIDATE", "b" * 40)
     assert not coordinator._reopen_budget_once(TASK, Stage.VALIDATE, diagnosis("b" * 40, 7))
+    changed_summary = Diagnosis(
+        TASK,
+        IMPLEMENTATION_DEFECT,
+        "VALIDATE",
+        True,
+        8,
+        2,
+        "c" * 40,
+        "a different implementation symptom appeared after the reopened epoch",
+        "repair the new symptom",
+    )
+    assert not coordinator._reopen_budget_once(TASK, Stage.VALIDATE, changed_summary)
     assert store.task_remediation_count(TASK, "VALIDATE") == 1
     assert len(_events(store, "task.parent_budget_reopened")) == 1
     store.close()

@@ -88,6 +88,14 @@ MIGRATIONS = [
             ON retry_attempts(execution_id) WHERE execution_id IS NOT NULL;
         """,
     ),
+    Migration(
+        8,
+        "remediation budget epochs and retry correlation",
+        """
+        ALTER TABLE task_remediations ADD COLUMN budget_epoch INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE task_remediations ADD COLUMN retry_event_id TEXT;
+        """,
+    ),
 ]
 
 
@@ -103,6 +111,10 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
             continue
         if migration.version == 5:
             _apply_tree_scope_migration(conn, migration)
+            current = current_schema_version(conn)
+            continue
+        if migration.version == 8:
+            _apply_task_remediation_epoch_migration(conn, migration)
             current = current_schema_version(conn)
             continue
         conn.executescript(migration.sql)
@@ -157,6 +169,34 @@ def _apply_tree_scope_migration(conn: sqlite3.Connection, migration: Migration) 
             conn.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?, ?)", (migration.version, now))
             conn.execute("INSERT OR IGNORE INTO migration_audit VALUES (?, ?, ?)",
                          (migration.version, migration.name, now))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _apply_task_remediation_epoch_migration(conn: sqlite3.Connection, migration: Migration) -> None:
+    """Publish the retry-ledger columns idempotently for fresh and interrupted upgrades."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if current_schema_version(conn) < migration.version:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_remediations)")}
+            if "budget_epoch" not in columns:
+                conn.execute(
+                    "ALTER TABLE task_remediations ADD COLUMN budget_epoch INTEGER NOT NULL DEFAULT 0"
+                )
+            if "retry_event_id" not in columns:
+                conn.execute("ALTER TABLE task_remediations ADD COLUMN retry_event_id TEXT")
+            now = time.time()
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations VALUES (?, ?)",
+                (migration.version, now),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO migration_audit VALUES (?, ?, ?)",
+                (migration.version, migration.name, now),
+            )
         conn.commit()
     except BaseException:
         conn.rollback()

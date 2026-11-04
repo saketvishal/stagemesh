@@ -23,6 +23,7 @@ POSTGRES_SCHEMA_TABLES = (
     "source_events",
     "findings",
     "remediation_attempts",
+    "task_remediations",
     "work_packets",
     "audit_events",
     "retry_attempts",
@@ -151,6 +152,16 @@ CREATE TABLE IF NOT EXISTS remediation_attempts (
     finding_id TEXT NOT NULL REFERENCES findings(id),
     status TEXT NOT NULL,
     payload JSONB NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_remediations (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    stage TEXT NOT NULL,
+    candidate_sha TEXT NOT NULL,
+    cleared BOOLEAN NOT NULL DEFAULT FALSE,
+    budget_epoch INTEGER NOT NULL DEFAULT 0,
+    retry_event_id TEXT,
     created_at DOUBLE PRECISION NOT NULL
 );
 CREATE TABLE IF NOT EXISTS work_packets (
