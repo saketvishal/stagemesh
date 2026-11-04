@@ -37,6 +37,7 @@ from .objective_roots import objective_root_reason
 from .observability import health
 from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
+from .planning_execution import PlanningExecutionError, ensure_executed_planning
 from .queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
 from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
@@ -338,12 +339,33 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
     record = store.task_contract(task_id)
     if record is not None:
         contract_hash = str(record["digest"])
+        contract_json = str(record["canonical_json"])
     else:  # not yet bound by the coordinator: the on-disk contract is what will be bound
         try:
-            contract_hash = bind_contract(project, task_id).digest
+            bound = bind_contract(project, task_id)
+            contract_hash = bound.digest
+            contract_json = bound.canonical_json
         except (OSError, ValueError, ContractError) as exc:
             raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
     baseline = store.task_baseline(task_id) or GitWorkspace(project).head()
+    try:
+        ensure_executed_planning(
+            store,
+            project,
+            task_id,
+            contract_hash,
+            contract_json,
+            baseline,
+            config,
+        )
+    except PlanningExecutionError as exc:
+        raise RunReadyRefusal(
+            "planning_execution",
+            f"task {task_id} planning execution failed: {exc}",
+            task_id=task_id,
+            next_action=exc.code,
+            planning_gate_reason=str(exc),
+        ) from exc
     spec_payload, approval = load_planning_artifacts(project, task_id)
     challenge_payload = load_planning_challenge(project, task_id)
     decision = evaluate_planning_gate(

@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .auto_plan import outside_label_selector
 from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
 from .concurrency import IntegrationLockTimeout
+from .config import ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
 from .contracts import _matches, task_contract_path
 from .diagnosis import (
@@ -71,6 +73,7 @@ from .remediation_recovery import (
     rounds,
     stalled_since_last_round,
 )
+from .research_context import research_scope_gate
 from .review import Reviewer, adverse_gate, independent_review_verified
 from .review_disposition import (
     UNRESOLVED_EVENT,
@@ -79,7 +82,6 @@ from .review_disposition import (
     reconcile_withdrawals,
     unresolved_adverse_review_findings,
 )
-from .auto_plan import outside_label_selector
 from .scheduling import Scheduler
 from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .task_completion import record_task_owner_state
@@ -252,8 +254,8 @@ class Coordinator:
             return 0
 
     def _advance_task_owned(self, task_id: str) -> int:
-        from .selection_scope import ScopeError, refresh, record_task, drains_candidate
         from .auto_plan import task_labels
+        from .selection_scope import ScopeError, drains_candidate, record_task, refresh
 
         try:
             before_refresh = self.store.get_task(task_id)
@@ -488,6 +490,49 @@ class Coordinator:
             if not self._workspace_intact(task_id, sha, "VALIDATE:before_validation"):
                 return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            try:
+                research = load_config(self.project).research
+            except ConfigValidationError as exc:
+                record_block(
+                    self.store, task_id, BlockKind.HUMAN_DECISION,
+                    f"research_scope_config_invalid: {str(exc)[:300]}",
+                    stage=str(stage), candidate_sha=sha,
+                    detail={"failure_code": "research_scope_config_invalid"},
+                )
+                return 1
+            if research is not None and research.enforce_scope:
+                scope = research_scope_gate(
+                    self.store, task_id, self.project, bound, sha, required=True,
+                )
+                record_audit(
+                    self.store,
+                    "research_scope.admission",
+                    {
+                        "task_id": task_id,
+                        "candidate_sha": sha,
+                        "baseline_sha": bound.baseline_sha,
+                        "contract_digest": bound.digest,
+                        "allowed": scope.allowed,
+                        "reason": scope.reason,
+                        "report_digest": scope.report_digest,
+                        "changed_path_count": len(scope.changed_paths),
+                        "outside_recommendation": list(scope.outside_recommendation)[:20],
+                        "no_touch_violations": list(scope.no_touch_violations)[:20],
+                    },
+                )
+                if not scope.allowed:
+                    record_block(
+                        self.store, task_id, BlockKind.HUMAN_DECISION,
+                        f"{scope.reason}: candidate paths are not admitted by the accepted research scope",
+                        stage=str(stage), candidate_sha=sha,
+                        detail={
+                            "failure_code": scope.reason,
+                            "report_digest": scope.report_digest,
+                            "outside_recommendation": list(scope.outside_recommendation)[:20],
+                            "no_touch_violations": list(scope.no_touch_violations)[:20],
+                        },
+                    )
+                    return 1
             if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest):
                 self.validator.validate(self.store, task_id, sha, self.project)
                 if not self._workspace_intact(task_id, sha, "VALIDATE:after_validation"):

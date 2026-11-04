@@ -89,9 +89,9 @@ def _gate(rig):
     return adverse_gate(store, TASK, candidate, bound.digest, policy)
 
 
-def _research_event(bound, summary, *, baseline=None, malformed=False):
+def _research_event(bound, summary, *, baseline=None, malformed=False, scoped=False):
     selected_baseline = baseline or bound.baseline_sha
-    return {
+    event = {
         "task_id": TASK,
         "researcher": "researcher",
         "outcome": "accepted",
@@ -113,6 +113,14 @@ def _research_event(bound, summary, *, baseline=None, malformed=False):
             "brief": "bounded brief",
         },
     }
+    if scoped:
+        event["scope_enforced"] = True
+        event["report"].update({
+            "version": 2,
+            "recommended_implementation_paths": ["README.md"],
+            "no_touch_paths": [],
+        })
+    return event
 
 
 def test_two_distinct_role_invocations_earn_bound_pair(role_rig):
@@ -150,6 +158,24 @@ def test_bound_research_context_reaches_both_review_roles_without_becoming_autho
     digests = {payload["research_context_digest"] for payload in payloads}
     assert len(digests) == 1 and len(digests.pop()) == 64
     assert all(payload["research_context_status"] == "bound" for payload in payloads)
+
+
+def test_research_scope_reaches_normal_and_adverse_review_as_bounded_data(role_rig):
+    _, store, candidate, _, pool, _, bound = role_rig
+    store.add_audit_event(
+        "research_stage",
+        _research_event(bound, "Scope-bearing research.", scoped=True),
+    )
+
+    assert _run(role_rig) == _run(role_rig) == EvidenceStatus.PASSED
+
+    prompts = [pool.adapters["claude"].calls[0], pool.adapters["grok"].calls[0]]
+    assert all('"recommended_implementation_paths":["README.md"]' in prompt for prompt in prompts)
+    assert all('"no_touch_paths":[]' in prompt for prompt in prompts)
+    payloads = store.bound_evidence_payloads(
+        TASK, candidate, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED,
+    )
+    assert len({payload["research_context_digest"] for payload in payloads}) == 1
 
 
 def test_stale_and_malformed_research_are_not_copied_into_review(role_rig):

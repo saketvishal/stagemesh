@@ -198,6 +198,7 @@ def _complete_codex_executable(executable: str) -> str:
 class ResearchRole:
     name: str
     command: tuple[str, ...]
+    enforce_scope: bool = False
 
 
 @dataclass(frozen=True)
@@ -734,7 +735,9 @@ class RuntimeCommandAdapter:
         failure = "research_interrupted"
         try:
             before = source_snapshot(run_path)
-            command, provider_input = _command_and_input(researcher.command_for("review"), research_request(bound))
+            command, provider_input = _command_and_input(
+                researcher.command_for("review"), research_request(bound, require_scope=role.enforce_scope),
+            )
             refused = _authorization_refusal(researcher, authority, "review", command=command)
             if refused:
                 raise ResearchBlocked("provider_not_authorized", refused)
@@ -769,7 +772,9 @@ class RuntimeCommandAdapter:
                 raise ResearchBlocked("research_mutated_source", "researcher changed the workspace")
             if timed_out or proc.returncode != 0:
                 raise ResearchBlocked("research_failed", PROVIDER_TIMEOUT if timed_out else f"exit {proc.returncode}")
-            evidence = parse_research_report(_provider_text_response(stdout), run_path, bound)
+            evidence = parse_research_report(
+                _provider_text_response(stdout), run_path, bound, require_scope=role.enforce_scope,
+            )
             outcome, failure = ExecutionStatus.SUCCEEDED, None
         except ResearchBlocked as exc:
             failure = exc.reason
@@ -788,6 +793,9 @@ class RuntimeCommandAdapter:
             "task_id": task_id, "researcher": role.name, "outcome": "accepted",
             "baseline_sha": evidence.baseline_sha, "contract_digest": evidence.contract_digest,
             "inspected_paths": list(evidence.inspected_paths), "finding_count": len(evidence.findings),
+            "scope_enforced": role.enforce_scope,
+            "recommended_path_count": len(evidence.recommended_implementation_paths),
+            "no_touch_path_count": len(evidence.no_touch_paths),
             "execution_id": execution_id, "report": dataclasses.asdict(evidence),
         })
         return research_findings_prompt(evidence)
@@ -1348,7 +1356,11 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
             )
         if config.research is not None:
             adapter = dataclasses.replace(
-                adapter, research=ResearchRole(config.research.provider, _stage_command(config.research.provider, config.research.command))
+                adapter, research=ResearchRole(
+                    config.research.provider,
+                    _stage_command(config.research.provider, config.research.command),
+                    config.research.enforce_scope,
+                )
             )
         resolved.append(adapter)
     return _mark_authorization(resolved, config)

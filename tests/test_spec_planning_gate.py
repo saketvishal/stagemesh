@@ -270,6 +270,8 @@ def test_plan_challenger_may_only_write_its_challenge():
 def test_config_opt_in_defaults_off_and_validates(tmp_path: Path):
     assert load_config(tmp_path).require_approved_spec is False
     assert load_config(tmp_path).require_plan_challenge is False
+    assert load_config(tmp_path).planner_provider is None
+    assert load_config(tmp_path).challenger_provider is None
     (tmp_path / ".stagemesh").mkdir()
     cfg = tmp_path / ".stagemesh" / "config.json"
     cfg.write_text(json.dumps({"planning_gate": {"require_approved_spec": True}}), encoding="utf-8")
@@ -372,6 +374,8 @@ def test_task_doctor_exposes_approved_planning_gate_without_spec_contents(tmp_pa
         "spec_present": True,
         "approval_present": True,
         "challenge_present": False,
+        "planner_execution": None,
+        "challenger_execution": None,
         "next_action": None,
         "reason": "",
         "approved_scope": ["src/app.py"],

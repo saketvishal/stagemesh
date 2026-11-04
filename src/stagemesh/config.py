@@ -188,13 +188,30 @@ def _adverse_review_policy(data: dict[str, object]) -> AdverseReviewPolicy:
     return AdverseReviewPolicy(tuple(sorted({item.strip().casefold() for item in severities})), behavior)
 
 
-def _planning_gate_policy(data: dict[str, object]) -> tuple[bool, bool]:
+def _planning_gate_policy(
+    data: dict[str, object], known_providers: set[str]
+) -> tuple[bool, bool, str | None, str | None]:
     """Opt-in planning policy; absent means no pre-implementation gate."""
-    unknown = set(data) - {"require_approved_spec", "require_plan_challenge"}
+    unknown = set(data) - {
+        "require_approved_spec",
+        "require_plan_challenge",
+        "planner_provider",
+        "challenger_provider",
+    }
     if unknown:
         raise ConfigValidationError(f"planning_gate has unsupported keys: {', '.join(sorted(unknown))}")
     require_spec = data.get("require_approved_spec", False)
     require_challenge = data.get("require_plan_challenge", False)
+    planner_provider = _string(data.get("planner_provider"))
+    challenger_provider = _string(data.get("challenger_provider"))
+    for field_name, provider in (
+        ("planner_provider", planner_provider),
+        ("challenger_provider", challenger_provider),
+    ):
+        if field_name in data and provider is None:
+            raise ConfigValidationError(
+                f"planning_gate.{field_name} must be a non-empty provider name"
+            )
     if not isinstance(require_spec, bool):
         raise ConfigValidationError("planning_gate.require_approved_spec must be a boolean")
     if not isinstance(require_challenge, bool):
@@ -203,7 +220,35 @@ def _planning_gate_policy(data: dict[str, object]) -> tuple[bool, bool]:
         raise ConfigValidationError(
             "planning_gate.require_plan_challenge requires require_approved_spec=true"
         )
-    return require_spec, require_challenge
+    if (planner_provider or challenger_provider) and not require_spec:
+        raise ConfigValidationError(
+            "planning_gate provider roles require require_approved_spec=true"
+        )
+    if challenger_provider and not require_challenge:
+        raise ConfigValidationError(
+            "planning_gate.challenger_provider requires require_plan_challenge=true"
+        )
+    if challenger_provider and not planner_provider:
+        raise ConfigValidationError(
+            "planning_gate.challenger_provider requires planner_provider execution proof"
+        )
+    for field_name, provider in (
+        ("planner_provider", planner_provider),
+        ("challenger_provider", challenger_provider),
+    ):
+        if provider is not None and provider not in known_providers:
+            raise ConfigValidationError(
+                f"planning_gate.{field_name} references unknown provider: {provider}"
+            )
+    if (
+        planner_provider is not None
+        and challenger_provider is not None
+        and planner_provider.casefold() == challenger_provider.casefold()
+    ):
+        raise ConfigValidationError(
+            "planning_gate planner_provider and challenger_provider must be different"
+        )
+    return require_spec, require_challenge, planner_provider, challenger_provider
 
 
 @dataclass(frozen=True)
@@ -212,12 +257,13 @@ class ResearchConfig:
 
     provider: str
     command: str
+    enforce_scope: bool = False
 
 
 def _research_config(data: dict[str, object], known_providers: set[str]) -> ResearchConfig | None:
     if not data:
         return None
-    unknown = set(data) - {"provider", "command"}
+    unknown = set(data) - {"provider", "command", "enforce_scope"}
     if unknown:
         raise ConfigValidationError(f"research has unsupported keys: {', '.join(sorted(unknown))}")
     provider, command = _string(data.get("provider")), _string(data.get("command"))
@@ -225,7 +271,10 @@ def _research_config(data: dict[str, object], known_providers: set[str]) -> Rese
         raise ConfigValidationError("research requires a provider and a read-only command")
     if provider not in known_providers:
         raise ConfigValidationError(f"research.provider references unknown provider: {provider}")
-    return ResearchConfig(provider, command)
+    enforce_scope = data.get("enforce_scope", False)
+    if not isinstance(enforce_scope, bool):
+        raise ConfigValidationError("research.enforce_scope must be a boolean")
+    return ResearchConfig(provider, command, enforce_scope)
 
 
 @dataclass(frozen=True)
@@ -258,6 +307,8 @@ class StageMeshConfig:
     adverse_review: AdverseReviewPolicy = field(default_factory=AdverseReviewPolicy)
     require_approved_spec: bool = False
     require_plan_challenge: bool = False
+    planner_provider: str | None = None
+    challenger_provider: str | None = None
     research: ResearchConfig | None = None
     driver: DriverInstallConfig | None = None
 
@@ -352,8 +403,13 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     if integration_ref and not integration_ref.startswith("refs/"):
         integration_ref = f"refs/heads/{integration_ref}"
     runtime = _runtime(project, _optional_mapping(data, "runtime"))
-    require_approved_spec, require_plan_challenge = _planning_gate_policy(
-        _optional_mapping(data, "planning_gate")
+    (
+        require_approved_spec,
+        require_plan_challenge,
+        planner_provider,
+        challenger_provider,
+    ) = _planning_gate_policy(
+        _optional_mapping(data, "planning_gate"), known
     )
     return StageMeshConfig(
         project=project,
@@ -385,6 +441,8 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
         require_approved_spec=require_approved_spec,
         require_plan_challenge=require_plan_challenge,
+        planner_provider=planner_provider,
+        challenger_provider=challenger_provider,
         research=_research_config(_optional_mapping(data, "research"), known),
         driver=_driver_install_config(_optional_mapping(data, "driver")) if "driver" in data else None,
     )

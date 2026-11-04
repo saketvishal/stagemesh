@@ -112,10 +112,31 @@ review evidence records only the delivered context digest and bound status, not
 the planning contents. Stale, malformed, unapproved, or identity-mismatched
 planning artifacts are not delivered.
 
-This artifact and its provider-name separation are a provider-neutral policy
-foundation. They are not proof that a separate agent process actually ran. An
-execution adapter must later produce independently attributable execution
-evidence before StageMesh can claim an automated independent plan challenge.
+An artifact and its provider-name separation alone are a provider-neutral policy
+foundation, not proof that a separate agent process actually ran. Only the
+optional executed-role receipts described below establish invoked planner and
+challenger processes.
+
+Projects that want executed roles may additionally set `planner_provider` and
+`challenger_provider` inside `planning_gate`. The challenger provider requires
+the planner provider, and their configured provider names and command identity
+sets must differ. Each role runs only in a disposable checkout of the exact
+baseline; it receives the frozen contract/spec as bounded data and returns one
+bounded JSON object on stdout. StageMesh alone writes a previously absent spec
+or challenge artifact in the real project. It never overwrites a manual,
+malformed, stale, or concurrently created artifact.
+The checkout is snapshotted before and after each role; any source mutation
+invalidates that execution even though the disposable checkout cannot alter the
+real project.
+
+Successful receipts bind provider command identity, execution id, baseline,
+contract and artifact digest. A challenger runs only when the current spec has
+a matching successful planner receipt. Provider failure, invalid output,
+authorization or budget refusal, cleanup uncertainty, stale input, or shared
+command identity fails closed before implementation. The executed roles still
+do not approve their own output: a human approval must bind the resulting spec
+and challenge digests. Manual planning remains supported when provider roles
+are omitted, and the whole policy remains disabled by default.
 
 ## Retries and step caps
 
@@ -198,6 +219,15 @@ When implementation recorded an accepted contextual-research report for the exac
 normal and adverse review receive the same bounded findings as explicitly advisory, untrusted data. StageMesh excludes
 stale, unresolved, malformed and oversized research instead of copying it into the review prompt, and records only a digest
 of the delivered context in review evidence. Research never widens the contract or substitutes for reviewer inspection.
+
+Projects may opt into candidate-path enforcement with `research.enforce_scope: true`. The researcher must then return
+exact, in-contract `recommended_implementation_paths` plus disjoint `no_touch_paths`. StageMesh validates those paths as
+untrusted data, binds the report to the frozen baseline and contract, and compares the exact candidate diff before validation.
+An absent/stale report, a changed path outside the recommendation, or any no-touch change blocks admission with an audited
+reason. The default remains off so existing research configurations and projects without a research role keep their current
+behavior. Version-1 evidence stays readable but cannot satisfy the opt-in scope gate. Normal and adverse reviewers receive
+the same bounded scope data and record only its delivered-context digest; task-doctor exposes counts and gate status, not
+research contents.
 
 Both roles must execute under distinct providers and configured command identities, independently of the implementer.
 Selection uses only the existing authorized provider pool, excludes actual fallback actors and their command aliases,
