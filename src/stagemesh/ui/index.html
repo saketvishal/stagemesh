@@ -3,16 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StageMesh activity</title>
+<title>StageMesh operator</title>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<a class="skip" href="#table">Skip to activity table</a>
+<a class="skip" href="#activity-view">Skip to operator content</a>
 <header>
-  <h1>StageMesh activity</h1>
+  <h1>StageMesh operator</h1>
   <span id="version" class="muted"></span>
   <span id="freshness" class="muted" role="status"></span>
 </header>
+<nav aria-label="Operator views">
+  <button type="button" id="show-activity" aria-pressed="true">Activity</button>
+  <button type="button" id="show-status" aria-pressed="false">Status</button>
+</nav>
+<main id="activity-view">
 <form id="filters" aria-label="Activity filters">
   <label>Period
     <select id="period">
@@ -112,6 +117,36 @@
     <p><button type="button" id="period-more" hidden>Load more intervals</button> <span id="period-count" class="muted"></span></p>
   </div>
 </section>
+</main>
+<main id="status-view" hidden>
+  <h2>Current recorded status</h2>
+  <p id="operator-summary" class="muted" role="status"></p>
+  <dl id="operator-metrics" class="metrics"></dl>
+  <section aria-labelledby="attention-heading">
+    <h3 id="attention-heading">Attention</h3>
+    <table><thead><tr><th scope="col">Status</th><th scope="col">Kind</th><th scope="col">Count</th></tr></thead><tbody id="attention-rows"></tbody></table>
+  </section>
+  <section aria-labelledby="pending-heading">
+    <h3 id="pending-heading">Recorded pending decisions</h3>
+    <table><thead><tr><th scope="col">Task</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Detail</th></tr></thead><tbody id="pending-rows"></tbody></table>
+  </section>
+  <section aria-labelledby="active-heading">
+    <h3 id="active-heading">Active executions and workers</h3>
+    <table><thead><tr><th scope="col">Task / worker</th><th scope="col">Stage / capabilities</th><th scope="col">Provider</th><th scope="col">Recorded state</th></tr></thead><tbody id="active-rows"></tbody></table>
+  </section>
+  <section aria-labelledby="failures-heading">
+    <h3 id="failures-heading">Recent failures</h3>
+    <table><thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Provider</th><th scope="col">Scope</th><th scope="col">Reason</th></tr></thead><tbody id="failure-rows"></tbody></table>
+  </section>
+  <section aria-labelledby="efficiency-heading">
+    <h3 id="efficiency-heading">Bounded efficiency and usage</h3>
+    <p id="efficiency-summary" class="muted"></p>
+  </section>
+  <section aria-labelledby="selection-heading">
+    <h3 id="selection-heading">Provider selections</h3>
+    <table><thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Policy</th><th scope="col">Recorded order</th><th scope="col">Eligibility</th></tr></thead><tbody id="selection-rows"></tbody></table>
+  </section>
+</main>
 <script src="/app.js"></script>
 </body>
 </html>

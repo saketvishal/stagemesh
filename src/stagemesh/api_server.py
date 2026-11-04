@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import re
 import secrets
 import sqlite3
@@ -18,7 +19,6 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from urllib.parse import unquote_to_bytes, urlsplit
 
@@ -30,12 +30,17 @@ from .activity_periods import (
     ActivityPeriodReport,
     query_activity_periods,
 )
+from .operator import OperatorReport, operator_report
+from .persistence import Store
+from .redaction import redact_output
 
 CONTRACT = "stagemesh.activity/1"
 CONTRACT_V2 = "stagemesh.activity/2"
 CONTRACT_V3 = "stagemesh.activity/3"
 CONTRACT_V4 = "stagemesh.activity/4"
 CONTRACT_V5 = "stagemesh.activity/5"
+OPERATOR_CONTRACT = "stagemesh.operator/1"
+OPERATOR_DETAIL_LIMIT = 100
 LOOPBACK = "127.0.0.1"
 _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", "limit", "offset"})
 _PARAMS_V2 = _PARAMS | {"project", "time_basis"}
@@ -305,6 +310,176 @@ def serialize_period_report(report: ActivityPeriodReport) -> dict[str, Any]:
     }
 
 
+def _safe_text(value: object, limit: int = 200) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value[: max(1000, limit * 4)]
+    value = redact_output(value).replace("\r", " ").replace("\n", " ")
+    value = re.sub(r"\b(?:https?|file)://\S+", "<url>", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?<![A-Za-z0-9])(?:[A-Za-z]:\\|/)[^\s,;]+", "<path>", value)
+    value = value[:limit]
+    return value or None
+
+
+def _safe_sha(value: object) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else None
+
+
+def _safe_number(value: object) -> int | float | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return None
+
+
+def _operator_sections(report: OperatorReport) -> dict[str, tuple[Mapping[str, object], ...]]:
+    return {section.name: section.rows for section in report.sections}
+
+
+def serialize_operator_report(report: OperatorReport) -> dict[str, Any]:
+    """Serialize a fixed, privacy-safe subset of the broader local operator report."""
+    sections = _operator_sections(report)
+
+    def pending(row: Mapping[str, object]) -> dict[str, Any]:
+        return {
+            "task_id": _safe_text(row.get("task_id")),
+            "kind": row.get("kind")
+            if row.get("kind") in {"human_decision", "delivery_permission", "approval_coverage"}
+            else "unknown",
+            "status": row.get("status") if row.get("status") in {"RECORDED", "UNKNOWN"} else "UNKNOWN",
+            "candidate_sha": _safe_sha(row.get("candidate_sha")),
+            "detail": _safe_text(row.get("detail"), 400) or "detail unavailable",
+            "recorded_at": _safe_number(row.get("recorded_at")),
+        }
+
+    def selection(row: Mapping[str, object]) -> dict[str, Any]:
+        order = row.get("order") if isinstance(row.get("order"), list) else []
+        verdicts = row.get("verdicts") if isinstance(row.get("verdicts"), list) else []
+        safe_verdicts = []
+        for verdict in verdicts[:20]:
+            if not isinstance(verdict, Mapping):
+                continue
+            safe_verdicts.append(
+                {
+                    "provider": _safe_text(verdict.get("provider"), 80) or "unknown",
+                    "eligible": verdict.get("eligible") if isinstance(verdict.get("eligible"), bool) else None,
+                    "reason": _safe_text(verdict.get("reason"), 200) or "reason unavailable",
+                }
+            )
+        return {
+            "task_id": _safe_text(row.get("task_id")),
+            "stage": _safe_text(row.get("stage"), 40) or "UNKNOWN",
+            "policy": _safe_text(row.get("policy"), 80) or "unknown",
+            "order": [_safe_text(item, 80) for item in order[:20] if _safe_text(item, 80)],
+            "verdicts": safe_verdicts,
+            "recorded_at": _safe_number(row.get("created_at")),
+        }
+
+    def worker(row: Mapping[str, object]) -> dict[str, Any]:
+        capabilities = row.get("capabilities")
+        if isinstance(capabilities, str):
+            try:
+                capabilities = json.loads(capabilities)
+            except ValueError:
+                capabilities = []
+        if not isinstance(capabilities, list):
+            capabilities = []
+        return {
+            "worker_id": _safe_text(row.get("id"), 120),
+            "provider": _safe_text(row.get("provider"), 80) or "unknown",
+            "capabilities": [
+                item for value in capabilities[:20] if (item := _safe_text(value, 80))
+            ],
+            "lease_expires_at": _safe_number(row.get("lease_expires_at")),
+        }
+
+    efficiency_rows = sections.get("Recent Efficiency And Usage", ())
+    efficiency = efficiency_rows[0] if efficiency_rows else {}
+    usage = efficiency.get("usage") if isinstance(efficiency.get("usage"), Mapping) else {}
+    attempts = efficiency.get("attempts_by_purpose")
+    attempts = attempts if isinstance(attempts, Mapping) else {}
+    safe_efficiency = {
+        "scope": _safe_text(efficiency.get("scope"), 200) or "bounded recent sample",
+        "provider_attempts": _safe_number(efficiency.get("provider_attempts")),
+        "attempts_by_purpose": {
+            purpose: _safe_number(attempts.get(purpose)) or 0
+            for purpose in ("diagnosis", "implementation", "remediation", "review", "research", "unknown")
+        },
+        "failed_provider_attempts": _safe_number(efficiency.get("failed_provider_attempts")),
+        "provider_outcome_unknown": _safe_number(efficiency.get("provider_outcome_unknown")),
+        "provider_seconds": _safe_number(efficiency.get("provider_seconds")),
+        "provider_duration_unknown": _safe_number(efficiency.get("provider_duration_unknown")),
+        "checks_executed": _safe_number(efficiency.get("checks_executed")),
+        "checks_reused": _safe_number(efficiency.get("checks_reused")),
+        "validation_seconds": _safe_number(efficiency.get("validation_seconds")),
+        "usage": {
+            key: (_safe_text(usage.get(key), 20) if key == "unit" else _safe_number(usage.get(key)))
+            for key in ("input", "output", "cached_input", "unit", "calls_reporting", "calls_unknown")
+        },
+        "billing_cost": "UNKNOWN",
+    }
+    body_sections: dict[str, list[dict[str, Any]]] = {
+        "attention": [
+            {
+                "kind": _safe_text(row.get("kind"), 80) or "unknown",
+                "count": _safe_number(row.get("count")),
+                "status": row.get("status") if row.get("status") in {"ACTION", "INFO", "REVIEW"} else "REVIEW",
+            }
+            for row in sections.get("Attention", ())
+        ],
+        "pending_decisions": [pending(row) for row in sections.get("Recorded Pending Decisions", ())],
+        "active_executions": [
+            {
+                "task_id": _safe_text(row.get("task_id")),
+                "stage": _safe_text(row.get("stage"), 40) or "UNKNOWN",
+                "provider": _safe_text(row.get("provider"), 80) or "unknown",
+                "process_state": _safe_text(row.get("process_state"), 40) or "UNKNOWN",
+                "parent_process_state": _safe_text(row.get("parent_process_state"), 40) or "UNKNOWN",
+                "cleanup_state": _safe_text(row.get("cleanup_state"), 80),
+                "stale": bool(row.get("stale")),
+            }
+            for row in sections.get("Active Executions", ())
+        ],
+        "workers": [worker(row) for row in sections.get("Workers", ())],
+        "recent_failures": [
+            {
+                "task_id": _safe_text(row.get("task_id")),
+                "stage": _safe_text(row.get("stage"), 40) or "UNKNOWN",
+                "provider": _safe_text(row.get("provider"), 80) or "unknown",
+                "candidate_sha": _safe_sha(row.get("candidate_sha")),
+                "scope": row.get("scope") if row.get("scope") in {"current", "history"} else "history",
+                "finished_at": _safe_number(row.get("finished_at")),
+                "reason": _safe_text(row.get("reason"), 400) or "reason not recorded",
+            }
+            for row in sections.get("Recent Failures", ())
+        ],
+        "efficiency": [safe_efficiency],
+        "provider_selections": [selection(row) for row in sections.get("Provider Selections", ())],
+    }
+    metrics = {
+        name: value
+        for name in (
+            "task_count", "open_task_count", "eligible_open_task_count", "blocked_task_count",
+            "running_count", "source_ready_count", "done_count", "failed_execution_count",
+            "current_failed_execution_count", "unknown_execution_count", "unresolved_validation_count",
+            "unresolved_process_tree_count", "backlog_state", "worker_count",
+            "recorded_pending_decision_count",
+        )
+        if (value := report.metrics.get(name)) is not None
+        and isinstance(value, (str, int, float))
+        and not isinstance(value, bool)
+    }
+    return {
+        "observed_at": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "summary": report.summary if report.summary in {"ok", "degraded"} else "degraded",
+        "metrics": metrics,
+        "sections": body_sections,
+        "bounded": True,
+        "detail_limit": OPERATOR_DETAIL_LIMIT,
+    }
+
+
 class ActivityApi:
     """Transport-independent request handling, so tests need no sockets."""
 
@@ -323,7 +498,9 @@ class ActivityApi:
     def handle(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
         contract = CONTRACT
         try:
-            if urlsplit(target).path.startswith("/api/v5/"):
+            if urlsplit(target).path == "/api/v1/operator":
+                contract = OPERATOR_CONTRACT
+            elif urlsplit(target).path.startswith("/api/v5/"):
                 contract = CONTRACT_V5
             elif urlsplit(target).path.startswith("/api/v4/"):
                 contract = CONTRACT_V4
@@ -364,6 +541,15 @@ class ActivityApi:
         if not path.startswith("/api/"):
             return self._static(path)  # the shell carries no data, so it needs no credential
         self._authenticate(lowered.get("authorization", ""))
+        if path == "/api/v1/operator":
+            if parts.query:
+                raise ApiError(400, "invalid_query", "operator takes no parameters")
+            store = self._open()
+            try:
+                report = operator_report(store, detail_limit=OPERATOR_DETAIL_LIMIT)
+            finally:
+                store.conn.close()
+            return _json(200, serialize_operator_report(report), OPERATOR_CONTRACT)
         if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health", "/api/v4/health", "/api/v5/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")
@@ -391,14 +577,17 @@ class ActivityApi:
         if scheme != "Bearer" or not hmac.compare_digest(value.encode(), self.token.encode()):
             raise ApiError(401, "unauthenticated", "missing or invalid credential")
 
-    def _open(self) -> Any:
+    def _open(self) -> Store:
         if not self.db_path.is_file():
             raise ApiError(503, "store_unavailable", "activity store is unavailable")
         conn = sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
-            return SimpleNamespace(conn=conn)  # query_activity only touches `.conn`
+            store = object.__new__(Store)
+            store.db_path = self.db_path
+            store.conn = conn
+            return store
         except BaseException:
             conn.close()
             raise
