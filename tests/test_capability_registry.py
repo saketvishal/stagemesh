@@ -51,6 +51,19 @@ from stagemesh.providers import (
 )
 
 
+def _refuse_provider_launch(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
+    """Fail on an agent process without intercepting read-only Git discovery."""
+    real_popen = providers_module.subprocess.Popen
+
+    def guarded_popen(command, *args, **kwargs):  # type: ignore[no-untyped-def]
+        executable = command[0] if isinstance(command, (list, tuple)) else str(command).split(maxsplit=1)[0]
+        if Path(str(executable)).name.casefold() in {"git", "git.exe"}:
+            return real_popen(command, *args, **kwargs)
+        pytest.fail(message)
+
+    monkeypatch.setattr(providers_module.subprocess, "Popen", guarded_popen)
+
+
 def _task(title: str) -> sqlite3.Row:
     with sqlite3.connect(":memory:") as db:
         db.row_factory = sqlite3.Row
@@ -740,11 +753,7 @@ def test_implementation_route_refuses_ambient_claude_plugin_configuration(
     monkeypatch.setattr(providers_module, "remediation_context", lambda *_args: None)
     monkeypatch.setattr(providers_module, "_provider_budget_refusal", lambda *_args: None)
     monkeypatch.setattr(providers_module, "require_capability_policy", lambda *_args: None)
-    monkeypatch.setattr(
-        providers_module.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("provider launched with ambient plugin config"),
-    )
+    _refuse_provider_launch(monkeypatch, "provider launched with ambient plugin config")
     lease = SimpleNamespace(path=tmp_path, check=lambda _phase: None)
     try:
         result = RuntimeCommandAdapter(
@@ -2759,11 +2768,7 @@ def test_implementation_policy_drift_refuses_before_provider_launch(
     )
     monkeypatch.setattr(providers, "remediation_context", lambda *_: None)
     monkeypatch.setattr(providers, "_provider_budget_refusal", lambda *_: None)
-    monkeypatch.setattr(
-        providers.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("provider launched after capability policy drift"),
-    )
+    _refuse_provider_launch(monkeypatch, "provider launched after capability policy drift")
     lease = SimpleNamespace(path=tmp_path, check=lambda _phase: None)
     try:
         result = RuntimeCommandAdapter("test", (sys.executable,))._execute_owned(
@@ -2831,11 +2836,7 @@ def test_review_policy_drift_refuses_before_provider_launch(
 
     monkeypatch.setattr(providers_module, "_prepare_review_checkout", prepare_review)
     monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
-    monkeypatch.setattr(
-        providers_module.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("review provider launched after policy drift"),
-    )
+    _refuse_provider_launch(monkeypatch, "review provider launched after policy drift")
     try:
         response = RuntimeCommandAdapter("test", (sys.executable,)).review_candidate(
             "Review exactly this candidate.",
