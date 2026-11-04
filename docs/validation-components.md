@@ -28,8 +28,8 @@ implementation execution (`execution.py`) is outside this audit.
 Each row names pytest targets relative to the repository root. Run
 `python -m pytest -q <targets>` with the project interpreter. These are explicit
 starting contracts for an affected behavior, not replacements for approved gates.
-A future task must bind relevant targets and broader required checks before
-execution; this document does not change frozen contracts.
+Validator binds exact mapped targets as additive gates while broader required
+checks remain authoritative; it does not rewrite frozen contracts.
 
 | Component | Direct checks and behavior | Dependent checks and boundary |
 | --- | --- | --- |
@@ -49,6 +49,8 @@ one boundary. Listing them does not claim they were all run for this slice.
 | `affected_components` | Stable names: `planning`, `validation_execution`, `review`. |
 | `direct_test_targets` | Repository-relative pytest targets from the matching direct-check rows above. |
 | `dependent_test_targets` | Repository-relative pytest targets from the matching dependent-check rows above. |
+| `full_regression_required` | Conservative policy decision for the exact scope. |
+| `full_regression_reasons` | Stable bounded rationale for either decision. A `false` decision still explains the applicable docs/config-only policy. |
 
 Each array is sorted and de-duplicated independently. A target can appear in both
 test arrays when it has both roles across affected components. Matching uses only
@@ -64,10 +66,12 @@ source roots, all three inferred arrays are empty, including for mixed scope.
 An empty array means no audited match or an incomplete map, not that validation is
 unnecessary. Existing escalation reasons, including explicit unknown-impact reasons,
 remain unchanged.
-These fields invent no commands, select no gates and claim no transitive coverage
-or execution result. Required checks and executable invariants keep their existing
-semantics, and `with_required_checks` retains the evidence fields. Validator
-evidence and CLI JSON expose the fields through their existing plan serialization.
+The three impact arrays do not claim transitive coverage. Validator may materialize
+their exact direct and dependent targets as additive audited-component pytest gates;
+it never uses them to remove or replace a declared gate. Required checks and
+executable invariants keep their existing semantics, and `with_required_checks`
+retains every evidence field. Validator evidence and CLI JSON expose the fields
+through their existing plan serialization.
 
 ## Escalation and unknown impact
 
@@ -87,9 +91,23 @@ If broader coverage is missing from a frozen contract, use the existing approved
 contract revision/rebind process; do not silently narrow or rewrite it.
 
 All three exact StageMesh source paths remain in the existing core path list.
-The machine-readable map adds evidence only; it does not change classification
-or gate selection. Provider names and client-specific suites are not introduced. Authorization,
-independent review requirements and candidate identity remain unchanged.
+The machine-readable map never lowers classification or removes a gate; it can add
+only the exact audited direct/dependent pytest targets. Provider names and
+client-specific suites are not introduced. Authorization, independent review
+requirements and candidate identity remain unchanged.
+
+## Full-regression decision boundary
+
+The decision is deliberately stricter than the three-row map. Every mapped root is
+a core validation/review boundary and therefore still requires full regression.
+An unmapped localized executable path, a mixed/unknown core scope, an executable
+provider/configuration source, an empty scope, public API impact, dependency impact,
+or an explicit escalation also requires it. Changes to `validation_plan.py` record
+the additional reason that the test-selection policy itself changed.
+
+Only documentation-only and non-executable configuration-only scopes currently
+produce `false`, and only as plan evidence. Declared gates are never removed by this
+decision. Hosted workflow consumption remains a separately reviewed follow-up.
 
 ## Measured boundary and follow-up
 

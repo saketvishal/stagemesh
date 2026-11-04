@@ -609,7 +609,7 @@ class Store:
                 payload = json.loads(row["payload"])
             except (TypeError, json.JSONDecodeError):
                 continue
-            if payload.get("contract_hash") == contract_hash:
+            if isinstance(payload, dict) and payload.get("contract_hash") == contract_hash:
                 return True
         return False
 
@@ -797,7 +797,8 @@ class Store:
         matched = []
         for row in rows:
             try:
-                if json.loads(row["payload"]).get("contract_hash") == digest:
+                payload = json.loads(row["payload"])
+                if isinstance(payload, dict) and payload.get("contract_hash") == digest:
                     matched.append(row)
             except (TypeError, json.JSONDecodeError):
                 continue

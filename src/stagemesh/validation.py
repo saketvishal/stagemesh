@@ -16,24 +16,34 @@ from .contracts import (
     scope_classification,
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
-from .focused_validation import discover_focused_gates, with_focused_gates
+from .e2e_evidence import (
+    E2EEvidenceManifest,
+    E2EEvidenceValidationError,
+    validate_e2e_evidence_manifest,
+)
+from .focused_validation import audited_component_gates, discover_focused_gates, with_focused_gates
 from .git import GitError
 from .persistence import Store
 from .process_identity import owner_execution_fields
 from .queue_control import OperatorStopRequested
 from .remediation import finding_identity
-from .validation_reuse import GATE_REUSE_POLICY_VERSION, GateReuse, candidate_tree, load_prior_passes, select_files
 from .validation_plan import (
     DOCS_ONLY,
     contract_with_browser_e2e_gates,
     derive_validation_plan,
     with_required_checks,
 )
-from .validation_services import (
-    ValidationServiceError, discover_validation_services, run_configured_evaluations,
+from .validation_reuse import (
+    GATE_REUSE_POLICY_VERSION,
+    GateReuse,
+    candidate_tree,
+    load_prior_passes,
+    select_files,
 )
-from .e2e_evidence import (
-    E2EEvidenceManifest, E2EEvidenceValidationError, validate_e2e_evidence_manifest,
+from .validation_services import (
+    ValidationServiceError,
+    discover_validation_services,
+    run_configured_evaluations,
 )
 
 
@@ -99,8 +109,12 @@ class Validator:
             selected_files = selection.selection_files
             declared_names = {gate.name for gate in contract.gates}
             contract = contract_with_browser_e2e_gates(project, contract, selected_files)
-            focused_gates = discover_focused_gates(project, selected_files, contract, candidate_sha=candidate_sha)
-            contract = with_focused_gates(contract, focused_gates)
+            conventional_gates = discover_focused_gates(project, selected_files, contract, candidate_sha=candidate_sha)
+            contract = with_focused_gates(contract, conventional_gates)
+            impact_plan = derive_validation_plan(contract, selected_files)
+            component_gates = audited_component_gates(contract, impact_plan)
+            contract = with_focused_gates(contract, component_gates)
+            focused_gates = conventional_gates + component_gates
             exploratory = tuple(gate.name for gate in contract.gates if gate.name not in declared_names)
             plan = with_required_checks(contract, derive_validation_plan(contract, selected_files))
             gate_reuse = GateReuse(candidate_tree(project, candidate_sha), bound.digest, load_prior_passes(store, task_id))
@@ -246,7 +260,12 @@ class Validator:
                 "validator": "contract",
                 **bound.evidence_payload(),
                 "validation_plan": plan.to_dict(),
-                "focused_validation": {"discovered": [gate.name for gate in focused_gates], "required_gates_replaced": False},
+                "focused_validation": {
+                    "discovered": [gate.name for gate in focused_gates],
+                    "conventional_discovered": [gate.name for gate in conventional_gates],
+                    "audited_component_discovered": [gate.name for gate in component_gates],
+                    "required_gates_replaced": False,
+                },
                 "objective": contract.objective,
                 "review_invariants": list(declarative_invariants(contract)),
                 "changed_files": list(evaluation.changed_files),

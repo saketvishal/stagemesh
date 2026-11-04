@@ -208,6 +208,8 @@ def _has_exact_bound_evidence(
             payload = json.loads(row["payload"])
         except (TypeError, json.JSONDecodeError):
             continue
+        if not isinstance(payload, dict):
+            continue
         if (
             payload.get("contract_hash") == bound.digest
             and payload.get("contract_version") == bound.version

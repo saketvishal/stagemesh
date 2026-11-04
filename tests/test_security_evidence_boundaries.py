@@ -13,7 +13,7 @@ import pytest
 from test_review_terminalization import TASK, _project_with_candidate
 
 from stagemesh.contract_binding import contract_for_candidate
-from stagemesh.domain import EvidenceKind, EvidenceStatus
+from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.integration import Integrator
 from stagemesh.review import independent_review_verified
@@ -68,6 +68,8 @@ def test_a_well_formed_bound_independent_review_is_accepted_and_lands_only_the_c
     _validation(store, candidate, bound)
     store.add_evidence(TASK, candidate, EvidenceKind.REVIEW, EvidenceStatus.PASSED, _review_payload(bound, candidate))
 
+    assert store.has_bound_evidence(TASK, candidate, EvidenceKind.REVIEW, bound.digest)
+    assert store.passed_evidence_for_digest(TASK, bound.digest)
     assert _integrate(project, store, candidate) == EvidenceStatus.PASSED
     assert _tip(git) == candidate
 
@@ -144,9 +146,9 @@ def test_non_passing_review_statuses_never_satisfy_the_gate(tmp_path: Path) -> N
     _assert_refused(project, store, candidate, git)
 
 
-# Follow-up (production defect, not fixed here): valid-JSON non-object payloads such as "[]" or "null" make
-# integration._has_bound_evidence raise AttributeError (payload.get) instead of being skipped. It still never trusts them.
-@pytest.mark.parametrize("raw", ["not json", "", '{"candidate_sha":'])
+@pytest.mark.parametrize(
+    "raw", ["not json", "", '{"candidate_sha":', "null", "[]", '"text"', "7", "true"],
+)
 def test_malformed_stored_review_payloads_are_skipped_not_trusted(tmp_path: Path, raw: str) -> None:
     project, store, candidate, git, bound = _rig(tmp_path)
     _validation(store, candidate, bound)
@@ -155,7 +157,15 @@ def test_malformed_stored_review_payloads_are_skipped_not_trusted(tmp_path: Path
     )
     store.conn.commit()
 
+    assert not store.has_bound_evidence(TASK, candidate, EvidenceKind.REVIEW, bound.digest)
+    assert store.bound_evidence_payloads(TASK, candidate, EvidenceKind.REVIEW, bound.digest) == []
+    assert "forged" not in {row["id"] for row in store.passed_evidence_for_digest(TASK, bound.digest)}
     _assert_refused(project, store, candidate, git)
+    assert store.conn.execute("SELECT COUNT(*) FROM evidence WHERE id='forged'").fetchone()[0] == 1
+    execution = store.conn.execute(
+        "SELECT status FROM executions WHERE kind=? ORDER BY rowid DESC LIMIT 1", (ExecutionKind.INTEGRATION,),
+    ).fetchone()
+    assert execution is not None and execution["status"] == ExecutionStatus.FAILED
 
 
 def test_a_forged_pass_for_another_task_or_sha_does_not_authorize_this_candidate(tmp_path: Path) -> None:
