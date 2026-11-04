@@ -255,7 +255,9 @@ def full_ci_validation_plan(
     )
 
 
-def post_merge_ci_validation_plan(changed_paths: Iterable[str]) -> CiValidationPlan:
+def post_merge_ci_validation_plan(
+    changed_paths: Iterable[str], *, protected_merge: bool = False
+) -> CiValidationPlan:
     """Return a bounded main-push plan, failing safe for CI-sensitive changes."""
     try:
         paths = tuple(sorted({_normalize_path(path) for path in changed_paths}))
@@ -266,7 +268,7 @@ def post_merge_ci_validation_plan(changed_paths: Iterable[str]) -> CiValidationP
             (), "post-merge changed path set is empty or unavailable"
         )
     protected = tuple(path for path in paths if _requires_full(path))
-    if protected:
+    if protected and not protected_merge:
         return full_ci_validation_plan(
             paths,
             "post-merge CI-sensitive boundary changed",
@@ -275,7 +277,7 @@ def post_merge_ci_validation_plan(changed_paths: Iterable[str]) -> CiValidationP
     return CiValidationPlan(
         mode=SMOKE,
         changed_paths=paths,
-        components=("post_merge_smoke",),
+        components=("protected_merge_smoke" if protected_merge else "post_merge_smoke",),
         direct_test_targets=(),
         dependent_test_targets=(),
         mandatory_checks=MANDATORY_CHECKS,
@@ -284,7 +286,11 @@ def post_merge_ci_validation_plan(changed_paths: Iterable[str]) -> CiValidationP
         windows_installer_required=False,
         runtime_coverage=False,
         reasons=(
-            "protected pull-request validation already covered the candidate",
+            (
+                "exact two-parent protected merge topology confirms pull-request validation covered the candidate"
+                if protected_merge
+                else "protected pull-request validation already covered the candidate"
+            ),
             "main push retains exact range, bootstrap, focused policy, import, and invariants",
         ),
     )

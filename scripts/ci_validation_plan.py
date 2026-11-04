@@ -50,6 +50,23 @@ def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
     return tuple(line for line in result.stdout.splitlines() if line)
 
 
+def protected_merge_push(repo: Path, base: str, head: str) -> bool:
+    """Prove this push advances main from its old tip to one two-parent merge commit."""
+    if not SHA.fullmatch(base) or not SHA.fullmatch(head):
+        return False
+    result = subprocess.run(
+        ["git", "show", "-s", "--format=%P", head],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+    )
+    parents = result.stdout.split()
+    return len(parents) == 2 and parents[0] == base
+
+
 def plan_from_inputs(
     *,
     repo: Path,
@@ -65,7 +82,8 @@ def plan_from_inputs(
     if event == "push":
         try:
             push_paths = paths or changed_paths(repo, base, head)
-            return post_merge_ci_validation_plan(push_paths)
+            trusted_merge = protected_merge_push(repo, base, head)
+            return post_merge_ci_validation_plan(push_paths, protected_merge=trusted_merge)
         except (OSError, UnicodeError, ValueError, subprocess.CalledProcessError) as exc:
             return full_ci_validation_plan(
                 (),

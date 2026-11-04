@@ -278,6 +278,47 @@ def test_main_push_keeps_full_regression_for_ci_sensitive_boundaries(path: str) 
     assert "CI-sensitive boundary changed" in plan.reasons[0]
 
 
+def test_ci_sensitive_protected_merge_push_uses_smoke_after_full_pr_validation(
+    tmp_path: Path,
+) -> None:
+    git(tmp_path, "init")
+    git(tmp_path, "config", "user.name", "Owner")
+    git(tmp_path, "config", "user.email", "owner@example.org")
+    main_branch = git(tmp_path, "branch", "--show-current")
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    base = commit(tmp_path, "base")
+    git(tmp_path, "checkout", "-b", "feature")
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: CI\n", encoding="utf-8")
+    commit(tmp_path, "ci coverage")
+    git(tmp_path, "checkout", main_branch)
+    git(tmp_path, "merge", "--no-ff", "feature", "-m", "Merge pull request")
+    head = git(tmp_path, "rev-parse", "HEAD")
+
+    plan = script.plan_from_inputs(repo=tmp_path, base=base, head=head, event="push")
+
+    assert plan.mode == SMOKE
+    assert plan.components == ("protected_merge_smoke",)
+    assert plan.changed_paths == (".github/workflows/ci.yml",)
+    assert "two-parent protected merge topology" in plan.reasons[0]
+
+
+def test_ci_sensitive_direct_push_with_one_parent_remains_full(tmp_path: Path) -> None:
+    git(tmp_path, "init")
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: before\n", encoding="utf-8")
+    base = commit(tmp_path, "base")
+    workflow.write_text("name: after\n", encoding="utf-8")
+    head = commit(tmp_path, "direct ci change")
+
+    plan = script.plan_from_inputs(repo=tmp_path, base=base, head=head, event="push")
+
+    assert plan.mode == FULL
+    assert "CI-sensitive boundary changed" in plan.reasons[0]
+
+
 def test_main_push_with_unavailable_range_fails_safe_to_full() -> None:
     plan = script.plan_from_inputs(
         repo=ROOT,
