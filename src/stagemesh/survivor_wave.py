@@ -40,7 +40,13 @@ from .contracts import (
     parse_contract,
     task_contract_path,
 )
-from .delivery_state import externally_blocked, is_permission_denial, record_external_block, record_publication
+from .delivery_state import (
+    externally_blocked,
+    is_permission_denial,
+    record_external_block,
+    record_publication,
+)
+from .diagnosis import latest_tool_failure
 from .domain import EvidenceKind, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import Store
@@ -99,6 +105,7 @@ class TaskRecord:
     resumable: bool = False  # stopped (e.g. at the step cap) with the task still OPEN: `continue` picks it up again
     integrated_candidate: str | None = None
     infrastructure_signature: str | None = None
+    tool_failure: dict[str, Any] | None = None
     runs: int = 1  # how many times a run window ran this task (more than one after a step-cap continuation)
 
     def to_dict(self) -> dict[str, Any]:
@@ -349,6 +356,7 @@ def _snapshot(store: Store, record: TaskRecord, since: float) -> None:
     record.validation = latest_evidence_status(store, record.task_id, sha, EvidenceKind.VALIDATION)
     record.review = latest_evidence_status(store, record.task_id, sha, EvidenceKind.REVIEW)
     record.integration = latest_evidence_status(store, record.task_id, sha, EvidenceKind.INTEGRATION)
+    record.tool_failure = latest_tool_failure(store, record.task_id, since=since)
     if record.final_status == TaskStatus.DONE:
         record.integrated_candidate = sha
 
@@ -947,6 +955,11 @@ def format_report(report: WaveReport) -> str:
         )
         if task.reason:
             lines.append(f"      {task.reason}")
+        if task.tool_failure:
+            lines.append(
+                f"      tool failure: {task.tool_failure['kind']} ({task.tool_failure['status']}); "
+                f"next: {task.tool_failure['next_action']}"
+            )
         if task.resumable:
             lines.append("      resumable: not a failure; `stagemesh continue --task " + task.task_id + "` picks it up")
         if task.pr_url:

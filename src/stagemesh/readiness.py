@@ -15,6 +15,7 @@ from typing import Any
 from .baseline import resolve_integration_ref
 from .config import StageMeshConfig
 from .config_migration import legacy_review_config_hint
+from .diagnosis import latest_tool_failure
 from .persistence import Store
 from .provider_acceptance import LIVE_PASSING, live_acceptance_status
 from .provider_cooldown import active_cooldowns, cooldown_parked
@@ -135,6 +136,8 @@ def build_readiness(
     parked_cooldown: list[dict[str, Any]] = []
     ledger = {"done": 0, "retired_closed": 0, "retired_operator": 0, "retired_ineligible": 0, "parked_cooldown": 0, "open": 0, "blocked": 0, "running": 0}
     live_tasks: list[dict[str, str]] = []
+    tool_failures: list[dict[str, Any]] = []
+    tool_failure_total = 0
     for row in store.tasks():
         status = str(row["status"])
         if status == "DONE":
@@ -158,11 +161,18 @@ def build_readiness(
             key = {"OPEN": "open", "RUNNING": "running"}.get(status, "blocked")
             ledger[key] += 1
             live_tasks.append({"task_id": str(row["id"]), "stage": str(row["stage"]), "status": status, "title": str(row["title"])})
+            failure = latest_tool_failure(store, str(row["id"]))
+            if failure is not None:
+                tool_failure_total += 1
+                if len(tool_failures) < 20:
+                    tool_failures.append({"task_id": str(row["id"]), "title": str(row["title"]), **failure})
         if status == "BLOCKED" and not (parked_cooldown and parked_cooldown[-1]["task_id"] == str(row["id"])):
             decision = blocked_needs_decision(store, str(row["id"]))
             if decision:
                 decisions.append({"task_id": str(row["id"]), "title": str(row["title"]), "reason": decision})
     data["ledger"] = {**ledger, "live_tasks": live_tasks, "parked_cooldown_tasks": parked_cooldown}
+    data["tool_failures"] = tool_failures
+    data["tool_failures_omitted"] = max(0, tool_failure_total - len(tool_failures))
     data["needs_decision"] = decisions
     if decisions:
         attention.append(f"{len(decisions)} task(s) need a design decision")
@@ -279,6 +289,17 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
         f"{ledger['open']} open, {ledger['blocked']} blocked, {ledger['running']} running = real work"
     )
     lines += [f"  {t['task_id']} {t['stage']}/{t['status']}: {t['title']}" for t in ledger["live_tasks"]]
+    tool_failures = data.get("tool_failures") or []
+    if tool_failures:
+        lines.append("tool failures on live tasks:")
+        lines += [
+            f"  {item['task_id']} {item['kind']} ({item['status']}): {item['next_action']}"
+            for item in tool_failures
+        ]
+        if data.get("tool_failures_omitted"):
+            lines.append(f"  ... {data['tool_failures_omitted']} additional live-task failure(s) omitted")
+    else:
+        lines.append("tool failures on live tasks: none")
     for t in ledger.get("parked_cooldown_tasks", []):
         waits = ", ".join(f"{w['provider']} {_duration(w['seconds_remaining'])} left ({w['failure_class']})" for w in t["waiting_on"])
         lines.append(f"  parked: provider cooldown - {t['task_id']} {t['stage']}/BLOCKED: {t['title']} (waiting on {waits})")

@@ -37,10 +37,10 @@ from .contracts import (
 )
 from .diagnosis import (
     STALE_BASELINE,
-    TOOL_FAILURE_EVENT,
     VALIDATION_GATE,
     diagnose,
     format_findings,
+    latest_tool_failure,
 )
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .git import GitError, GitWorkspace
@@ -538,7 +538,15 @@ def advance_baseline(
         raise RecoveryRefusal("worktree_reset_failed", f"task {task_id}: worktree is not at {new_base[:12]} after reset; the ledger was not changed; preserved: {preserved}")
     # The operator reset is authorised and everything it replaces is preserved above, so the workspace ledger is rewritten from its own head.
     previous = str(ledger["head"]) if ledger is not None else (ownership.expected_head if ownership is not None else (old_head or new_base))
-    moved = record_supervised_move(project, task_id, previous, new_base, None if latest is None else str(latest["sha"]), require_same_dirty=False)
+    moved = record_supervised_move(
+        project,
+        task_id,
+        previous,
+        new_base,
+        None if latest is None else str(latest["sha"]),
+        require_same_dirty=False,
+        initialize_missing=True,
+    )
     if not moved:
         if old_head is not None:
             execute_preserved_cleanup(
@@ -556,7 +564,12 @@ def advance_baseline(
     if ownership is not None:
         from dataclasses import replace
 
-        save_ownership(store, replace(ownership, expected_head=new_base, tracked_fingerprint=tracked_fingerprint(worktree)))
+        save_ownership(store, replace(
+            ownership,
+            worktree=str(worktree),
+            expected_head=new_base,
+            tracked_fingerprint=tracked_fingerprint(worktree),
+        ))
 
     payload: dict[str, Any] = {
         "task_id": task_id,
@@ -896,7 +909,7 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
         "capabilities": _capabilities_summary(store, project, task_id),
         "validation_failures": validation_failures,
         "review_findings": review_findings,
-        "tool_failure": _latest_tool_failure(store, task_id),
+        "tool_failure": latest_tool_failure(store, task_id),
         "research": _research_summary(store, project, task_id),
         "planning": _planning_summary(store, project, task_id),
         "adverse_review": _adverse_review_summary(store, project, task_id, candidate_sha),
@@ -997,42 +1010,6 @@ def _recent_repairs(store: Store, task_id: str, limit: int = 5) -> list[dict[str
         if payload.get("task_id") == task_id:
             out.append({"event": row["event_type"], "at": row["created_at"], "operator": payload.get("operator"), "reason": payload.get("reason")})
     return out[:limit]
-
-
-def _latest_tool_failure(store: Store, task_id: str) -> dict[str, Any] | None:
-    """Return a bounded, redacted projection of the latest durable tool failure."""
-    rows = store.conn.execute(
-        "SELECT payload, created_at FROM audit_events WHERE event_type=? "
-        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
-        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (TOOL_FAILURE_EVENT, task_id),
-    ).fetchall()
-    if not rows:
-        return None
-    payload = _loads(rows[0]["payload"])
-    evidence = payload.get("evidence")
-    if not isinstance(evidence, dict):
-        return None
-    command = evidence.get("command") if isinstance(evidence.get("command"), dict) else {}
-    recovery = evidence.get("recovery") if isinstance(evidence.get("recovery"), dict) else {}
-    return {
-        "at": rows[0]["created_at"],
-        "execution_id": str(payload.get("execution_id") or "") or None,
-        "kind": str(evidence.get("kind") or "unknown"),
-        "command": {
-            "executable": str(command.get("executable") or ""),
-            "text": str(command.get("text") or "")[:200],
-        },
-        "cwd": str(evidence.get("cwd"))[:500] if evidence.get("cwd") is not None else None,
-        "status": str(evidence.get("status") or "unknown")[:100],
-        "excerpt": str(evidence.get("excerpt") or "")[:600],
-        "next_action": str(evidence.get("next_action") or "Inspect the tool failure evidence.")[:500],
-        "recovery": {
-            key: recovery.get(key)
-            for key in ("action", "execution_status", "operator_action")
-            if recovery.get(key) is not None
-        },
-    }
 
 
 def _research_summary(store: Store, project: Path, task_id: str) -> dict[str, Any]:

@@ -798,7 +798,14 @@ def _fail_execution(lease: WorkspaceLease) -> None:
 
 
 def record_supervised_move(
-    project: Path, task_id: str, previous_head: str, new_head: str, candidate_sha: str | None, *, require_same_dirty: bool = True
+    project: Path,
+    task_id: str,
+    previous_head: str,
+    new_head: str,
+    candidate_sha: str | None,
+    *,
+    require_same_dirty: bool = True,
+    initialize_missing: bool = False,
 ) -> bool:
     """Record a checkout StageMesh itself just made on an idle task worktree.
 
@@ -807,7 +814,8 @@ def record_supervised_move(
     A reconstruct passes `require_same_dirty=False` after it has preserved and cleaned the worktree itself.
     That path still refuses leftover dirt, and it refuses an embedded repository `git clean` left behind,
     including one under an ignored path. That residual stays on disk; it is not resealed as authorized.
-    No ledger means there is nothing to contradict, so the caller may record a clean move in its own ownership row.
+    No ledger means there is nothing to contradict. Most callers record the clean move in their own ownership row; a caller that created a
+    replacement workspace may explicitly initialize its missing ledger after the same clean-state checks pass.
     """
     root = Path(project).resolve()
     if not root.is_dir():
@@ -826,6 +834,24 @@ def record_supervised_move(
     if not require_same_dirty and (seen["dirty_count"] or unexpected_embedded_repositories(target)):
         return False
     if ledger is None:
+        if not initialize_missing:
+            return True
+        if seen["dirty_count"] or unexpected_embedded_repositories(target):
+            return False
+        _atomic_write(
+            gitdir / LEDGER_FILE,
+            {
+                "version": LEDGER_VERSION,
+                "task_id": task_id,
+                "head": seen["head"],
+                "dirty": seen["dirty"],
+                "dirty_count": seen["dirty_count"],
+                "dirty_digest": seen["dirty_digest"],
+                "candidate": candidate_sha,
+                "sealed_by": None,
+                "sealed_kind": "supervisor",
+            },
+        )
         return True
     if ledger.get("head") != previous_head:
         return False
