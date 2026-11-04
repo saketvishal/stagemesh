@@ -684,3 +684,48 @@ def test_supporting_docs_and_tests_are_neutral_to_audited_evidence(scope_kind) -
         "tests/test_autonomy_review.py", "tests/test_builtin_execution_ownership.py",
         "tests/test_invariant_semantics.py",
     ]
+
+
+@pytest.mark.parametrize(
+    ("path", "required", "reason"),
+    [
+        ("README.md", False, "documentation-only scope"),
+        ("stagemesh.toml", False, "configuration-only scope"),
+        ("src/stagemesh/providers.py", True, "executable provider or configuration source"),
+        ("src/widgets/card.py", True, "localized executable source"),
+        ("src/stagemesh/review.py", True, "core lifecycle, schema, security"),
+        ("src\\stagemesh\\validation_plan.py", True, "test-selection policy changed"),
+    ],
+)
+def test_full_regression_decision_is_explicit_and_conservative(path, required, reason) -> None:
+    evidence = derive_validation_plan(ChangeContract("Plan", allowed_files=(path,)), (path,)).to_dict()
+
+    assert evidence["full_regression_required"] is required
+    assert any(reason in item for item in evidence["full_regression_reasons"])
+
+
+def test_full_regression_decision_fails_safe_for_incomplete_or_empty_scope() -> None:
+    mixed = derive_validation_plan(
+        ChangeContract("Mixed", allowed_files=("src/stagemesh/review.py", "src/unknown.py")),
+        ("src/stagemesh/review.py", "src/unknown.py"),
+    ).to_dict()
+    empty = derive_validation_plan(ChangeContract("Empty", allowed_files=()), ()).to_dict()
+
+    assert mixed["affected_components"] == []
+    assert mixed["full_regression_required"] is True
+    assert "component impact map is incomplete for the changed scope" in mixed["full_regression_reasons"]
+    assert empty["full_regression_required"] is True
+    assert "change scope is empty or unavailable" in empty["full_regression_reasons"]
+
+
+def test_required_check_enrichment_preserves_full_regression_decision() -> None:
+    contract = ChangeContract(
+        "Review", allowed_files=("src/stagemesh/review.py",),
+        required_tests=(GateCommand("full pytest", [sys.executable, "-m", "pytest"]),),
+    )
+    plan = derive_validation_plan(contract, ("src/stagemesh/review.py",))
+
+    enriched = with_required_checks(contract, plan)
+
+    assert enriched.full_regression_required is True
+    assert enriched.full_regression_reasons == plan.full_regression_reasons

@@ -24,6 +24,15 @@ prove complete affected-caller coverage: agents must inspect direct callers and
 reviewers must check the selected tests. Documentation-only paths do not trigger
 application-test discovery. Integration tests are not guessed from source names.
 
+When the validation plan has a complete exact match in the audited component map,
+StageMesh also adds separate root-level pytest gates for its direct and dependent
+test targets. Direct targets are removed from the dependent list, the contract's
+declared root pytest interpreter, environment and timeout are reused, and existing
+full-suite or exact-target gates suppress redundant additions. An unknown or mixed
+map adds nothing and retains the broader declared policy. Evidence reports
+conventional and audited-component discoveries separately; both remain additive,
+not proof that required gates or independent review can be skipped.
+
 This runtime behavior is generic: there are no client names, paths or suites in
 the selection code. Clients receive it when their installed StageMesh package is
 updated, not merely because this repository's profile changed. Running processes

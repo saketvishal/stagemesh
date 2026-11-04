@@ -111,6 +111,8 @@ class ValidationPlan:
     affected_components: tuple[str, ...] = ()
     direct_test_targets: tuple[str, ...] = ()
     dependent_test_targets: tuple[str, ...] = ()
+    full_regression_required: bool = False
+    full_regression_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -122,6 +124,8 @@ class ValidationPlan:
             "affected_components": list(self.affected_components),
             "direct_test_targets": list(self.direct_test_targets),
             "dependent_test_targets": list(self.dependent_test_targets),
+            "full_regression_required": self.full_regression_required,
+            "full_regression_reasons": list(self.full_regression_reasons),
         }
 
     @property
@@ -142,7 +146,7 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
         # Supporting docs/tests are neutral; any other unaudited path invalidates the map.
         if any(path not in _AUDITED_COMPONENTS and not path.startswith(("docs/", "tests/")) for path in scope):
             impact = []
-        return ValidationPlan(
+        plan = ValidationPlan(
             classification,
             "HIGH",
             _gate_names(contract.gates) or ("focused-tests",),
@@ -152,18 +156,69 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
             direct_test_targets=tuple(sorted({target for _, direct, _ in impact for target in direct})),
             dependent_test_targets=tuple(sorted({target for _, _, dependent in impact for target in dependent})),
         )
+        return _with_full_regression_decision(plan, contract, changed_files)
     if classification == CONFIG_OR_PROVIDER_COMMAND:
         checks = _matching_gate_names(contract.gates, ("smoke", "provider", "runtime", "focused"))
-        return ValidationPlan(classification, "LOW", checks or ("provider-smoke", "focused-runtime"), (), reasons)
+        plan = ValidationPlan(classification, "LOW", checks or ("provider-smoke", "focused-runtime"), (), reasons)
+        return _with_full_regression_decision(plan, contract, changed_files)
     if classification == DOCS_ONLY:
         checks = _matching_gate_names(contract.gates, ("docs", "static", "lint", "spell"))
-        return ValidationPlan(classification, "LOW", checks or ("docs-static",), (), reasons)
-    return ValidationPlan(
+        plan = ValidationPlan(classification, "LOW", checks or ("docs-static",), (), reasons)
+        return _with_full_regression_decision(plan, contract, changed_files)
+    plan = ValidationPlan(
         LOCALIZED_CODE,
         "MEDIUM",
         _non_broad_gate_names(contract) or ("focused-tests",),
         (),
         reasons,
+    )
+    return _with_full_regression_decision(plan, contract, changed_files)
+
+
+def _with_full_regression_decision(
+    plan: ValidationPlan, contract: ChangeContract, changed_files: tuple[str, ...],
+) -> ValidationPlan:
+    """Record a conservative policy decision without removing any declared gate."""
+    scope = tuple(path.replace("\\", "/").casefold() for path in (changed_files or contract.allowed_files))
+    policy_reasons: list[str] = []
+
+    if plan.escalation_reasons:
+        policy_reasons.extend(f"escalation: {reason}" for reason in plan.escalation_reasons)
+
+    if plan.classification == CORE_LIFECYCLE_OR_SCHEMA_SECURITY:
+        policy_reasons.append("core lifecycle, schema, security, or validation-policy boundary")
+        if not plan.affected_components:
+            policy_reasons.append("component impact map is incomplete for the changed scope")
+        if "src/stagemesh/validation_plan.py" in scope:
+            policy_reasons.append("test-selection policy changed")
+    elif plan.classification == LOCALIZED_CODE:
+        policy_reasons.append("localized executable source has no audited component impact map")
+    elif plan.classification == CONFIG_OR_PROVIDER_COMMAND:
+        executable = any(path.endswith((".py", ".js", ".jsx", ".ts", ".tsx")) for path in scope)
+        if executable:
+            policy_reasons.append("executable provider or configuration source has no audited component impact map")
+        elif not policy_reasons:
+            policy_reasons.append("configuration-only scope uses declared provider/configuration checks")
+    elif plan.classification == DOCS_ONLY and not policy_reasons:
+        policy_reasons.append("documentation-only scope uses declared documentation checks")
+
+    if not scope:
+        policy_reasons.append("change scope is empty or unavailable")
+
+    required = bool(plan.escalation_reasons) or plan.classification in {
+        CORE_LIFECYCLE_OR_SCHEMA_SECURITY,
+        LOCALIZED_CODE,
+    }
+    if plan.classification == CONFIG_OR_PROVIDER_COMMAND:
+        required = required or any(
+            path.endswith((".py", ".js", ".jsx", ".ts", ".tsx")) for path in scope
+        )
+    if not scope:
+        required = True
+    return replace(
+        plan,
+        full_regression_required=required,
+        full_regression_reasons=tuple(dict.fromkeys(policy_reasons)),
     )
 
 

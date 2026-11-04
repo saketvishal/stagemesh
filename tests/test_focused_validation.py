@@ -10,6 +10,7 @@ from stagemesh.agent_skills import skill_prompt
 from stagemesh.contracts import ChangeContract, ContractError, GateCommand, GateResult
 from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.focused_validation import (
+    audited_component_gates,
     discover_focused_gates,
     focused_test_prompt,
     with_focused_gates,
@@ -17,6 +18,7 @@ from stagemesh.focused_validation import (
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.validation import Validator
+from stagemesh.validation_plan import derive_validation_plan
 
 
 def write(root: Path, path: str, text: str = "") -> None:
@@ -124,6 +126,78 @@ def test_declared_coverage_avoids_duplicate_checks_without_removing_required_gat
     assert result.spec_refs == ("spec.md",)
 
 
+def test_audited_component_targets_become_distinct_additive_gates() -> None:
+    required = GateCommand(
+        "required-review", [".venv/Scripts/python.exe", "-m", "pytest", "-k", "legacy"],
+        env=(("REVIEW_DB", "scratch"),), timeout_seconds=91,
+    )
+    contract = ChangeContract(
+        "Change review", allowed_files=("src/stagemesh/review.py",), required_tests=(required,),
+    )
+    plan = derive_validation_plan(contract, ("src\\stagemesh\\review.py",))
+
+    gates = audited_component_gates(contract, plan)
+
+    assert [gate.name for gate in gates] == [
+        "auto-focused:audited-direct:.", "auto-focused:audited-dependent:.",
+    ]
+    assert gates[0].command == [
+        ".venv/Scripts/python.exe", "-m", "pytest", "-q",
+        "tests/test_review_reliability.py", "tests/test_review_terminalization.py",
+    ]
+    assert gates[1].command == [
+        ".venv/Scripts/python.exe", "-m", "pytest", "-q",
+        "tests/test_autonomy_review.py", "tests/test_builtin_execution_ownership.py",
+        "tests/test_invariant_semantics.py",
+    ]
+    assert all(gate.env == required.env and gate.timeout_seconds == 91 for gate in gates)
+    updated = with_focused_gates(contract, gates)
+    assert updated.required_tests[0] == required
+    assert updated.required_tests[1:] == gates
+
+
+def test_audited_component_gates_fail_closed_for_unknown_and_conflicting_scope() -> None:
+    unknown = ChangeContract("Unknown", allowed_files=("src/stagemesh/review.py", "src/unknown.py"))
+    plan = derive_validation_plan(unknown, unknown.allowed_files)
+    assert audited_component_gates(unknown, plan) == ()
+
+    mapped = ChangeContract(
+        "Mapped", allowed_files=("src/stagemesh/review.py",),
+        required_tests=(GateCommand("auto-focused:audited-direct:.", ["echo", "spoof"]),),
+    )
+    gates = audited_component_gates(mapped, derive_validation_plan(mapped, mapped.allowed_files))
+    with pytest.raises(ContractError, match="conflicts"):
+        with_focused_gates(mapped, gates)
+
+
+def test_declared_full_suite_covers_audited_component_gates_without_replacement() -> None:
+    required = GateCommand("required-full", ["python", "-m", "pytest", "tests", "-q"])
+    contract = ChangeContract(
+        "Review", allowed_files=("src/stagemesh/review.py",), required_tests=(required,),
+    )
+    gates = audited_component_gates(contract, derive_validation_plan(contract, contract.allowed_files))
+
+    assert gates
+    assert with_focused_gates(contract, gates) == contract
+
+
+def test_declared_exact_target_is_removed_from_audited_component_gate() -> None:
+    required = GateCommand(
+        "required-review-reliability",
+        ["python", "-m", "pytest", "-q", "tests/test_review_reliability.py"],
+    )
+    contract = ChangeContract(
+        "Review", allowed_files=("src/stagemesh/review.py",), required_tests=(required,),
+    )
+
+    gates = audited_component_gates(contract, derive_validation_plan(contract, contract.allowed_files))
+
+    assert gates[0].name == "auto-focused:audited-direct:."
+    assert "tests/test_review_reliability.py" not in gates[0].command
+    assert "tests/test_review_terminalization.py" in gates[0].command
+    assert with_focused_gates(contract, gates).required_tests[0] == required
+
+
 def test_exact_candidate_discovery_ignores_dirty_metadata_and_test_files(tmp_path):
     source, test = python_repo(tmp_path)
     git = GitWorkspace(tmp_path)
@@ -157,11 +231,13 @@ def test_policy_is_always_delivered_without_client_agents_file_or_profile(tmp_pa
     assert "plus required contract gates" in prompt
 
 
-@pytest.mark.parametrize("required", [
-    {"name": "required-safety", "command": [sys.executable, "-c", "pass"]},
-    {"name": "required-full-suite", "command": [sys.executable, "-m", "pytest"]},
+@pytest.mark.parametrize(("required", "focused_added"), [
+    ({"name": "required-safety", "command": [sys.executable, "-c", "pass"]}, True),
+    ({"name": "required-full-suite", "command": [sys.executable, "-m", "pytest"]}, False),
 ])
-def test_validator_executes_discovered_failure_and_keeps_required_gate(tmp_path, monkeypatch, required):
+def test_validator_executes_discovered_failure_and_keeps_required_gate(
+    tmp_path, monkeypatch, required, focused_added,
+):
     project = tmp_path / "repo"
     source, _ = python_repo(project)
     git = GitWorkspace(project)
@@ -186,11 +262,52 @@ def test_validator_executes_discovered_failure_and_keeps_required_gate(tmp_path,
     try:
         task_id = store.upsert_task("Fix widget", source_id="T")
         store.add_candidate(task_id, sha, "test", True)
-        assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.FAILED
+        expected = EvidenceStatus.FAILED if focused_added else EvidenceStatus.PASSED
+        assert Validator().validate(store, task_id, sha, project) is expected
         assert required["name"] in calls
-        assert "auto-focused:pytest:." in calls
+        assert ("auto-focused:pytest:." in calls) is focused_added
         payload = json.loads(store.conn.execute("SELECT payload FROM evidence WHERE kind=?", (EvidenceKind.VALIDATION,)).fetchone()[0])
         assert payload["focused_validation"]["required_gates_replaced"] is False
+        assert payload["validation_checks"]["missing"] == []
+    finally:
+        store.close()
+
+
+def test_validator_records_and_executes_candidate_bound_audited_component_gates(tmp_path, monkeypatch):
+    project = tmp_path / "repo"
+    write(project, "src/stagemesh/review.py", "VALUE = 1\n")
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.name", "Test Owner")
+    git.run("config", "user.email", "test@example.invalid")
+    git.commit_all("base")
+    write(project, "src/stagemesh/review.py", "VALUE = 2\n")
+    sha = git.commit_all("candidate")
+    write(project, ".stagemesh/contracts/T.json", json.dumps({
+        "objective": "Change review", "allowed_files": ["src/stagemesh/review.py"],
+        "required_tests": [{"name": "required-safety", "command": [sys.executable, "-c", "pass"]}],
+    }))
+    calls = []
+
+    def run_gate(root, gate):
+        calls.append(gate.name)
+        return GateResult(gate.name, "PASSED", tuple(gate.command), 0, "", "")
+
+    monkeypatch.setattr("stagemesh.contracts.run_gate", run_gate)
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    try:
+        task_id = store.upsert_task("Change review", source_id="T")
+        store.add_candidate(task_id, sha, "test", True)
+        assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.PASSED
+        payload = json.loads(store.conn.execute(
+            "SELECT payload FROM evidence WHERE kind=?", (EvidenceKind.VALIDATION,),
+        ).fetchone()[0])
+        expected = ["auto-focused:audited-direct:.", "auto-focused:audited-dependent:."]
+        assert payload["focused_validation"]["conventional_discovered"] == []
+        assert payload["focused_validation"]["audited_component_discovered"] == expected
+        assert payload["focused_validation"]["discovered"] == expected
+        assert calls == ["required-safety", *expected]
         assert payload["validation_checks"]["missing"] == []
     finally:
         store.close()

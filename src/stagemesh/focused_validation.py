@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from .contracts import ChangeContract, ContractError, GateCommand
 from .git import GitError, GitWorkspace
+from .validation_plan import ValidationPlan
 
 MAX_PATHS = 64
 MAX_METADATA_BYTES = 65536
@@ -167,6 +168,41 @@ def discover_focused_gates(
         return ()  # Discovery is optional; a failure never removes or passes a required gate.
 
 
+def audited_component_gates(
+    contract: ChangeContract, plan: ValidationPlan,
+) -> tuple[GateCommand, ...]:
+    """Turn an exact audited impact map into additive root-level pytest gates."""
+    if not plan.affected_components:
+        return ()
+    command, template = _pytest_runner(contract, ".")
+    timeout = template.timeout_seconds if template else 180
+    env = template.env if template else ()
+    declared_targets = {
+        target
+        for gate in contract.gates
+        if (gate.cwd or ".") == "."
+        for target in _plain_pytest_targets(gate.command)
+    }
+    mapped_direct = tuple(dict.fromkeys(plan.direct_test_targets))
+    direct = tuple(target for target in mapped_direct if target not in declared_targets)
+    dependent = tuple(
+        target for target in dict.fromkeys(plan.dependent_test_targets)
+        if target not in mapped_direct and target not in declared_targets
+    )
+    gates = []
+    if direct:
+        gates.append(GateCommand(
+            "auto-focused:audited-direct:.", [*command, "-q", *direct],
+            timeout_seconds=timeout, env=env,
+        ))
+    if dependent:
+        gates.append(GateCommand(
+            "auto-focused:audited-dependent:.", [*command, "-q", *dependent],
+            timeout_seconds=timeout, env=env,
+        ))
+    return tuple(gates)
+
+
 def with_focused_gates(contract: ChangeContract, discovered: tuple[GateCommand, ...]) -> ChangeContract:
     """Keep required gates intact and avoid repeating already-declared exact test targets."""
     additions = []
@@ -196,9 +232,9 @@ def _covers_suite(existing: GateCommand, focused: GateCommand) -> bool:
         return False
     # Filters, custom options, and subdirectories need explicit target matching, not optimistic deduplication.
     targets = [arg for arg in focused.command if arg.endswith(".py")]
-    return (focused.name.startswith("auto-focused:pytest:")
+    return (focused.name.startswith("auto-focused:")
             and all(arg in {"-q", "-v", ".", "tests", "tests/"} for arg in args)
-            and ("." in args or any(arg in {"tests", "tests/"} for arg in args)
+            and (not args or "." in args or any(arg in {"tests", "tests/"} for arg in args)
                  and all(target.startswith("tests/") for target in targets)))
 
 
