@@ -27,9 +27,11 @@ from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryE
 
 CONTRACT = "stagemesh.activity/1"
 CONTRACT_V2 = "stagemesh.activity/2"
+CONTRACT_V3 = "stagemesh.activity/3"
 LOOPBACK = "127.0.0.1"
 _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", "limit", "offset"})
 _PARAMS_V2 = _PARAMS | {"project", "time_basis"}
+_PARAMS_V3 = _PARAMS_V2 | {"source", "source_status", "include_source_history"}
 _INT = re.compile(r"^[0-9]{1,9}$")
 _MAX_QUERY_CHARS = 2048
 # The complete production shell. Packaging (build_backend.UI_ASSETS) and serving both use exactly this list.
@@ -93,6 +95,12 @@ def _integer(name: str, value: str) -> int:
     return int(value)
 
 
+def _boolean(name: str, value: str) -> bool:
+    if value not in {"true", "false"}:
+        raise _invalid(f"{name} must be true or false")
+    return value == "true"
+
+
 def _decode(component: str) -> str:
     """Strict form decoding: malformed escapes and invalid UTF-8 are errors, never replaced."""
     if _BAD_ESCAPE.search(component):
@@ -107,7 +115,7 @@ def _decode(component: str) -> str:
 
 
 def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
-    allowed = _PARAMS_V2 if version == 2 else _PARAMS
+    allowed = _PARAMS_V3 if version == 3 else (_PARAMS_V2 if version == 2 else _PARAMS)
     if len(raw) > _MAX_QUERY_CHARS:
         raise _invalid("query string is too long")
     if not _URL_SAFE.match(raw):
@@ -128,9 +136,15 @@ def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
                 raise _invalid(f"{name} must not be repeated")
             one[name] = _decode(value)
     kwargs: dict[str, Any] = {}
-    for name in ("state", "task_id", "stage", "provider", "project", "time_basis"):
+    for name in (
+        "state", "task_id", "stage", "provider", "project", "time_basis", "source", "source_status",
+    ):
         if name in one:
             kwargs[name] = one[name]
+    if "include_source_history" in one:
+        kwargs["include_source_history"] = _boolean(
+            "include_source_history", one["include_source_history"]
+        )
     for name in ("since", "until"):
         if name in one:
             kwargs[name] = _timestamp(name, one[name])
@@ -145,6 +159,9 @@ def _entry(entry: ActivityEntry, *, version: int = 1) -> dict[str, Any]:
     data["at"] = entry.at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     if version == 1:
         data.pop("project")
+    if version < 3:
+        for name in ("source", "source_id", "source_status", "previous_source_status"):
+            data.pop(name)
     return data
 
 
@@ -157,8 +174,11 @@ def serialize_page(page: ActivityPage, *, version: int = 1) -> dict[str, Any]:
         "next_offset": page.next_offset,
         "truncated": page.truncated,
     }
-    if version == 2:
-        body.update(time_basis=page.time_basis, status_counts=page.status_counts)
+    if version >= 2:
+        counts = page.status_counts
+        if version == 2:
+            counts = {name: values for name, values in counts.items() if name != "source"}
+        body.update(time_basis=page.time_basis, status_counts=counts)
     return body
 
 
@@ -180,7 +200,9 @@ class ActivityApi:
     def handle(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
         contract = CONTRACT
         try:
-            if urlsplit(target).path.startswith("/api/v2/"):
+            if urlsplit(target).path.startswith("/api/v3/"):
+                contract = CONTRACT_V3
+            elif urlsplit(target).path.startswith("/api/v2/"):
                 contract = CONTRACT_V2
             status, body, extra = self._route(method, target, headers)
         except ApiError as exc:
@@ -208,16 +230,16 @@ class ActivityApi:
             raise ApiError(400, "invalid_query", "request body is not allowed")
         parts = urlsplit(target)
         path = parts.path
-        version = 2 if path.startswith("/api/v2/") else 1
-        contract = CONTRACT_V2 if version == 2 else CONTRACT
+        version = 3 if path.startswith("/api/v3/") else (2 if path.startswith("/api/v2/") else 1)
+        contract = CONTRACT_V3 if version == 3 else (CONTRACT_V2 if version == 2 else CONTRACT)
         if not path.startswith("/api/"):
             return self._static(path)  # the shell carries no data, so it needs no credential
         self._authenticate(lowered.get("authorization", ""))
-        if path in {"/api/v1/health", "/api/v2/health"}:
+        if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")
             return _json(200, {"status": "ok", "version": __version__}, contract)
-        if path in {"/api/v1/activity", "/api/v2/activity"}:
+        if path in {"/api/v1/activity", "/api/v2/activity", "/api/v3/activity"}:
             query = parse_query(parts.query, version=version)
             store = self._open()
             try:

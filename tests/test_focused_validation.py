@@ -273,18 +273,22 @@ def test_validator_executes_discovered_failure_and_keeps_required_gate(
         store.close()
 
 
-def test_validator_records_and_executes_candidate_bound_audited_component_gates(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source", ["review.py", "contract_binding.py", "integration.py"])
+def test_validator_records_and_executes_candidate_bound_audited_component_gates(
+    tmp_path, monkeypatch, source,
+):
     project = tmp_path / "repo"
-    write(project, "src/stagemesh/review.py", "VALUE = 1\n")
+    changed = f"src/stagemesh/{source}"
+    write(project, changed, "VALUE = 1\n")
     git = GitWorkspace(project)
     git.init_if_needed()
     git.run("config", "user.name", "Test Owner")
     git.run("config", "user.email", "test@example.invalid")
     git.commit_all("base")
-    write(project, "src/stagemesh/review.py", "VALUE = 2\n")
+    write(project, changed, "VALUE = 2\n")
     sha = git.commit_all("candidate")
     write(project, ".stagemesh/contracts/T.json", json.dumps({
-        "objective": "Change review", "allowed_files": ["src/stagemesh/review.py"],
+        "objective": "Change audited boundary", "allowed_files": [changed],
         "required_tests": [{"name": "required-safety", "command": [sys.executable, "-c", "pass"]}],
     }))
     calls = []
@@ -297,7 +301,7 @@ def test_validator_records_and_executes_candidate_bound_audited_component_gates(
     store = Store(tmp_path / "state.sqlite3")
     store.migrate()
     try:
-        task_id = store.upsert_task("Change review", source_id="T")
+        task_id = store.upsert_task("Change audited boundary", source_id="T")
         store.add_candidate(task_id, sha, "test", True)
         assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.PASSED
         payload = json.loads(store.conn.execute(

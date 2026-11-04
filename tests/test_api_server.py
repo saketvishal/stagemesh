@@ -73,6 +73,14 @@ def _direct_v2(db, target="/api/v2/activity", *, method="GET", headers=None):
     return status, json.loads(raw), extra
 
 
+def _direct_v3(db, target="/api/v3/activity", *, method="GET", headers=None):
+    api = ActivityApi(db, TOKEN)
+    api.bind(12345)
+    defaults = {"Host": "127.0.0.1:12345", "Authorization": f"Bearer {TOKEN}"}
+    status, raw, extra = api.handle(method, target, defaults if headers is None else headers)
+    return status, json.loads(raw), extra
+
+
 def test_v2_project_time_basis_and_counts_leave_v1_response_unchanged(db):
     store = Store(db)
     store.conn.execute("UPDATE tasks SET project='team/alpha' WHERE id='t0'")
@@ -90,6 +98,63 @@ def test_v2_project_time_basis_and_counts_leave_v1_response_unchanged(db):
     assert _direct_v2(db, "/api/v1/activity?project=team%2Falpha")[0] == 400
     assert _direct_v2(db, "/api/v1/activity?time_basis=completed")[0] == 400
     assert db.read_bytes() == before
+
+
+def test_v3_projects_linked_source_state_and_history_without_changing_v1_v2(db):
+    store = Store(db)
+    task = store.upsert_task("linked", source="github", source_id="42")
+    store.cache_source("github", "42", {"state": "OPEN"}, "OPEN")
+    store.cache_source("github", "42", {"state": "CLOSED"}, "CLOSED")
+    store.close()
+    before = db.read_bytes()
+
+    status, body, _ = _direct_v3(
+        db,
+        "/api/v3/activity?source=github&source_status=CLOSED&include_source_history=true",
+    )
+    assert status == 200 and body["contract"] == "stagemesh.activity/3"
+    by_kind = {entry["kind"]: entry for entry in body["entries"]}
+    assert by_kind["task"]["id"] == task
+    assert by_kind["task"]["status"] == "OPEN" and by_kind["task"]["source_status"] == "CLOSED"
+    assert by_kind["source"]["previous_source_status"] == "OPEN"
+    assert body["status_counts"]["source"]["CLOSED"] == 1
+
+    _, v2, _ = _direct_v2(db)
+    assert "source" not in v2["status_counts"]
+    assert all("source_status" not in entry for entry in v2["entries"])
+    _, v1, _ = _direct_v2(db, "/api/v1/activity")
+    assert all("source_status" not in entry for entry in v1["entries"])
+    assert _direct_v2(db, "/api/v2/activity?source=github")[0] == 400
+    assert _direct_v2(db, "/api/v2/activity?include_source_history=true")[0] == 400
+    assert db.read_bytes() == before
+
+
+def test_v3_health_and_auth_errors_use_v3_contract(db):
+    status, body, _ = _direct_v3(db, "/api/v3/health")
+    assert status == 200 and body["contract"] == "stagemesh.activity/3"
+
+    status, body, _ = _direct_v3(
+        db,
+        headers={"Host": "127.0.0.1:12345", "Authorization": "Bearer wrong"},
+    )
+    assert status == 401 and body["contract"] == "stagemesh.activity/3"
+    assert body["error"]["code"] == "unauthenticated"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "source=",
+        "source=token-secret",
+        "source_status=has%20spaces",
+        "include_source_history=1",
+        "include_source_history=true&include_source_history=false",
+    ],
+)
+def test_v3_invalid_source_filters_use_v3_error_envelope(db, query):
+    status, body, _ = _direct_v3(db, "/api/v3/activity?" + query)
+    assert status == 400 and body["contract"] == "stagemesh.activity/3"
+    assert body["error"]["code"] == "invalid_query"
 
 
 @pytest.mark.parametrize("query", ["project=", "project=" + "x" * 201, "time_basis=finished",

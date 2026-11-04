@@ -5,8 +5,9 @@ implementation pass; an empty log does not establish an environment fault or cod
 speculative implementation retry. Structured collection/setup/service evidence retains its specific diagnosis, while evidence that
 tests were running keeps the existing bounded remediation policy. Independent review of this policy change is required before release.
 
-This explicit map covers three StageMesh components: planning, validation execution,
-and review. It is a bounded contribution to #71; **#71 remains open**. It is a review
+This explicit map covers five StageMesh components: candidate contract binding,
+exact integration evidence, planning, validation execution and review. It is a
+bounded contribution to #71; **#71 remains open**. It is a review
 aid, not a global test selector or proof of complete coverage. Use it with
 [focused validation](focused-validation.md) and the approved task contract.
 
@@ -14,14 +15,18 @@ aid, not a global test selector or proof of complete coverage. Use it with
 
 | Component / source | Direct dependencies and contracts | Consumers / dependent impact |
 | --- | --- | --- |
+| Candidate contract binding: `src/stagemesh/contract_binding.py` | Frozen change-contract loading and canonical digest; task baseline/binding records; Git ancestry and inherited-candidate baseline rules; contract feasibility. | Validation, review, coordinator and integration all request the exact binding for a task/candidate. Recovery and completion integrity must reject missing, stale or mismatched bindings. |
+| Exact integration evidence: `src/stagemesh/integration.py` | Candidate contract binding; exact validation/review evidence lookup; independent-review verification; Git attribution and integration execution ownership. | Coordinator completion, landing recovery and reliable delivery require durable exact-bound integration evidence. A merge or successful command alone is not completion evidence. |
 | Planning: `src/stagemesh/validation_plan.py` | `contracts.py`: ChangeContract, GateCommand, executable versus declarative invariants. Derives classification, check names and escalation reasons; discovers declared browser scripts. | `Validator.validate` consumes the plan; `cli.command_validation_plan` displays it; `profile.py` imports broad-gate predicates. |
 | Validation execution: `src/stagemesh/validation.py` | Planning; `focused_validation.py` discovers candidate tests; `contract_binding.contract_for_candidate` supplies the frozen contract/baseline; `contracts.evaluate_contract` executes gates. Store/domain, process identity, audit and remediation supply execution ownership and evidence/finding records. | Coordinator invokes Validator; Reviewer consumes PASSED validation summaries bound to task, candidate SHA and contract digest. A plan label alone is never execution evidence. |
 | Review: `src/stagemesh/review.py` | The same bound contract and evaluator, with `run_gates=False`; Store supplies exact-bound validation evidence and implementer identity. Review adapter/pool provides an actual independent verdict. Domain, process identity, queue control, audit and remediation handle status, stop and finding records. | Coordinator consumes review evidence and `independent_review_verified`; integration relies on exact-bound evidence. Focused tests cannot replace independent review. |
 
-The internal dependency chain is review -> validation evidence -> planning. Review
-consumes validation evidence rather than calling the planner to select another
-suite. Contract binding and evaluation are shared boundaries. General provider
-implementation execution (`execution.py`) is outside this audit.
+The internal dependency chain is integration -> exact review/validation evidence ->
+candidate contract binding, while review consumes validation evidence -> planning.
+Review does not call the planner to select another suite. Contract evaluation and
+persistence remain shared boundaries; their broad modules are not claimed as mapped
+components. General provider implementation execution (`execution.py`) is outside
+this audit.
 
 ## Direct and dependent test contracts
 
@@ -33,6 +38,8 @@ checks remain authoritative; it does not rewrite frozen contracts.
 
 | Component | Direct checks and behavior | Dependent checks and boundary |
 | --- | --- | --- |
+| Candidate contract binding | `tests/test_candidate_binding_hardening.py`: ancestry, inherited baselines and exact candidate binding. `tests/test_contract_admission.py`: immutable binding and explicit repair. `tests/test_contract_fail_closed.py`: missing/malformed contract refusal. | `tests/test_candidate_isolation_integration.py`: replacement candidates cannot inherit stale integration evidence. `tests/test_completion_integrity.py`: completion rejects missing bound evidence. `tests/test_task_recovery.py`: repair/recovery preserves exact binding semantics. |
+| Exact integration evidence | `tests/test_candidate_isolation_integration.py`: integration is candidate-isolated. `tests/test_integration_recovery.py`: interrupted/recovered integration ownership. `tests/test_review_reliability.py`: `_has_exact_bound_evidence` rejects stale digest/version/baseline and non-independent review. | `tests/test_completion_integrity.py`: DONE needs durable exact evidence. `tests/test_landing_recovery.py`: landing reconciliation retains binding/evidence identity. `tests/test_reliable_delivery_end_to_end.py`: delivery cannot bypass validation/review/integration evidence. |
 | Planning | `tests/test_validation_plan.py`: classifications, broad/focused checks, browser discovery, required-gate execution; core changes reject narrower declarations. | `tests/test_contract_fail_closed.py`: plans without executable gates fail; declared docs cannot hide core changes. `tests/test_invariant_semantics.py`: prose remains a review obligation, executable invariants remain mandatory. `tests/test_stagemesh_validation_profile.py`: profile selection feeds the planner. |
 | Validation execution | `tests/test_contract_fail_closed.py`: missing/malformed contracts, absent executable checks and contract drift. `tests/test_validation_plan.py`: real Validator execution retains a declared broad gate and records its failure. | `tests/test_invariant_semantics.py`: execution/review separation. `tests/test_candidate_binding_hardening.py`: candidate ancestry, scope and exact evidence. `tests/test_builtin_execution_ownership.py`: validation/review execution ownership. |
 | Review | `tests/test_review_reliability.py`: complete, malformed and incomplete verdicts, candidate/contract binding. `tests/test_review_terminalization.py`: execution ends on pass, failure, exception or interruption. | `tests/test_autonomy_review.py`: stale SHA, independent reviewer and remediation require new evidence. `tests/test_invariant_semantics.py`: actual review of prose constraints. `tests/test_builtin_execution_ownership.py`: concurrent owners remain isolated. |
@@ -77,7 +84,7 @@ through their existing plan serialization.
 
 | Trigger | Reason to record / required response |
 | --- | --- |
-| Any of the three source roots changes | Core lifecycle/evidence boundary. The existing planner classifies all three as HIGH / CORE_LIFECYCLE_OR_SCHEMA_SECURITY, retains broad gates and executable invariants, and rejects a lower declared classification. |
+| Any of the five source roots changes | Core lifecycle/evidence boundary. The planner classifies all five as HIGH / CORE_LIFECYCLE_OR_SCHEMA_SECURITY, retains broad gates and executable invariants, and rejects a lower declared classification. |
 | Shared contract, binding, persistence, schema, authorization or evidence semantics change | Cross-cutting impact: inspect affected callers and retain broader approved validation. This map cannot establish a narrow boundary for those changes. |
 | Public API or dependency manifest changes | Keep existing planner escalation and required checks. Component membership does not waive these concerns. |
 | Unmapped source, ambiguous scope, uninspected caller, dynamic provider edge, or unavailable candidate diff | Unknown impact: record the concrete uncertainty in the existing `validation_escalation_reasons` contract field and retain broader validation. Absence from this map is not evidence of isolation. |
@@ -90,7 +97,7 @@ manufactured from this table. No test commands are invented for unknown impact.
 If broader coverage is missing from a frozen contract, use the existing approved
 contract revision/rebind process; do not silently narrow or rewrite it.
 
-All three exact StageMesh source paths remain in the existing core path list.
+All five exact StageMesh source paths are in the core path list.
 The machine-readable map never lowers classification or removes a gate; it can add
 only the exact audited direct/dependent pytest targets. Provider names and
 client-specific suites are not introduced. Authorization, independent review
@@ -98,7 +105,7 @@ requirements and candidate identity remain unchanged.
 
 ## Full-regression decision boundary
 
-The decision is deliberately stricter than the three-row map. Every mapped root is
+The decision is deliberately stricter than the five-row map. Every mapped root is
 a core validation/review boundary and therefore still requires full regression.
 An unmapped localized executable path, a mixed/unknown core scope, an executable
 provider/configuration source, an empty scope, public API impact, dependency impact,
@@ -111,8 +118,8 @@ decision. Hosted workflow consumption remains a separately reviewed follow-up.
 
 ## Measured boundary and follow-up
 
-This audit records **3 component roots**, their immediate contract/evidence edges,
-and **9 distinct test files** in the table. These counts measure the documented
+This audit records **5 component roots**, their immediate contract/evidence edges,
+and **16 distinct test files** in the table. These counts measure the documented
 slice, not transitive dependency coverage, coverage percentage or speedup.
 The added planner regressions exercise all three roots with four declaration
 states, allowed-scope fallback, concrete changed files and Windows separators;
@@ -120,9 +127,9 @@ they also cover explicit unknown escalation and unrelated client/helper paths.
 Evidence regressions additionally cover exact target lists, deterministic unions,
 changed-file precedence, mixed and unmapped scope, and persistence through Validator.
 
-Still unmeasured: the full coordinator/integration call graph, dynamic adapter
-behavior, CLI end-to-end behavior, all shared storage/schema dependencies, and
-whether these starting test contracts cover every possible change in each root.
+Still unmeasured: the full coordinator call graph, dynamic adapter behavior, CLI
+end-to-end behavior, all shared storage/schema dependencies, and whether these
+starting test contracts cover every possible change in each root.
 No repository-wide audit, global heuristic selector or source refactor is included.
 
 Follow-up for #71:
@@ -130,7 +137,7 @@ Follow-up for #71:
 1. Review these edges and test contracts against a concrete future change; record
    missing dependencies and unresolved impact before proposing narrower gates.
 2. Audit one additional boundary under separately approved scope, especially
-   contract binding/evidence consumers before claiming transitive coverage.
+   coordinator evidence admission or shared persistence before claiming transitive coverage.
 3. Measure gate durations and failures for exact candidates, then propose reviewed
    focused contracts only where evidence establishes a safe boundary.
 4. Keep #71 open until its remaining scope is separately delivered. StageMesh owns

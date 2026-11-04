@@ -1184,14 +1184,35 @@ class Store:
         source_id = _validate_text(source_id, "source id")
         state = _validate_payload(state)
         status = _validate_text(status, "source status")
-        self.conn.execute(
-            """
-            INSERT INTO source_cache VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source, source_id) DO UPDATE SET state=excluded.state, status=excluded.status, retry_after=excluded.retry_after, updated_at=excluded.updated_at
-            """,
-            (source, source_id, json.dumps(state, sort_keys=True), status, retry_after, time.time()),
-        )
-        self.conn.commit()
+        previous = self.conn.execute(
+            "SELECT status FROM source_cache WHERE source=? AND source_id=?",
+            (source, source_id),
+        ).fetchone()
+        now = time.time()
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO source_cache VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, source_id) DO UPDATE SET state=excluded.state, status=excluded.status, retry_after=excluded.retry_after, updated_at=excluded.updated_at
+                """,
+                (source, source_id, json.dumps(state, sort_keys=True), status, retry_after, now),
+            )
+            if previous is not None and previous["status"] != status:
+                self.conn.execute(
+                    "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        source,
+                        source_id,
+                        "inbound",
+                        "STATUS_CHANGED",
+                        json.dumps(
+                            {"previous_status": previous["status"], "current_status": status},
+                            sort_keys=True,
+                        ),
+                        now,
+                    ),
+                )
 
     def source_admission_pending(self, source: str, source_id: str | None) -> bool:
         # Presence is fail-closed, including malformed/falsey marker values; successful publication removes it.

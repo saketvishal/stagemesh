@@ -518,6 +518,20 @@ def test_component_map_does_not_classify_client_or_similarly_named_files(path) -
     ("source", "component", "direct", "dependent"),
     [
         (
+            "contract_binding.py", "candidate_contract_binding",
+            ["tests/test_candidate_binding_hardening.py", "tests/test_contract_admission.py",
+             "tests/test_contract_fail_closed.py"],
+            ["tests/test_candidate_isolation_integration.py", "tests/test_completion_integrity.py",
+             "tests/test_task_recovery.py"],
+        ),
+        (
+            "integration.py", "exact_integration_evidence",
+            ["tests/test_candidate_isolation_integration.py", "tests/test_integration_recovery.py",
+             "tests/test_review_reliability.py"],
+            ["tests/test_completion_integrity.py", "tests/test_landing_recovery.py",
+             "tests/test_reliable_delivery_end_to_end.py"],
+        ),
+        (
             "validation_plan.py", "planning",
             ["tests/test_validation_plan.py"],
             ["tests/test_contract_fail_closed.py", "tests/test_invariant_semantics.py",
@@ -581,13 +595,45 @@ def test_audited_component_evidence_deduplicates_independently_of_path_order() -
     ]
 
 
+def test_contract_binding_and_integration_evidence_has_deterministic_union() -> None:
+    paths = (
+        "src/stagemesh/integration.py",
+        "src\\stagemesh\\contract_binding.py",
+        "SRC/STAGEMESH/INTEGRATION.PY",
+    )
+    contract = ChangeContract(objective="Exact evidence boundaries", allowed_files=("**",))
+
+    evidence = derive_validation_plan(contract, paths).to_dict()
+
+    assert evidence == derive_validation_plan(contract, tuple(reversed(paths))).to_dict()
+    assert evidence["affected_components"] == [
+        "candidate_contract_binding", "exact_integration_evidence",
+    ]
+    assert evidence["direct_test_targets"] == [
+        "tests/test_candidate_binding_hardening.py",
+        "tests/test_candidate_isolation_integration.py",
+        "tests/test_contract_admission.py",
+        "tests/test_contract_fail_closed.py",
+        "tests/test_integration_recovery.py",
+        "tests/test_review_reliability.py",
+    ]
+    assert evidence["dependent_test_targets"] == [
+        "tests/test_candidate_isolation_integration.py",
+        "tests/test_completion_integrity.py",
+        "tests/test_landing_recovery.py",
+        "tests/test_reliable_delivery_end_to_end.py",
+        "tests/test_task_recovery.py",
+    ]
+
+
 @pytest.mark.parametrize("path", [
-    "src/customer/review.py", "src/customer/validation.py", "src/customer/validation_plan.py",
+    "src/customer/contract_binding.py", "src/customer/integration.py", "src/customer/review.py",
+    "src/customer/validation.py", "src/customer/validation_plan.py",
+    "src/stagemesh/contract_binding_helpers.py", "src/stagemesh/integration_helpers.py",
     "src/stagemesh/review_helpers.py", "src/stagemesh/validation_helpers.py",
     "src/stagemesh/validation_plan_helpers.py", "src/stagemesh/review.py/child.py",
     "vendor/src/stagemesh/review.py", "src/stagemesh/contracts.py",
-    "src/stagemesh/contract_binding.py", "src/stagemesh/persistence.py",
-    "src/stagemesh/execution.py", "src/unknown.py", "src/stagemesh/**",
+    "src/stagemesh/persistence.py", "src/stagemesh/execution.py", "src/unknown.py", "src/stagemesh/**",
     "tests/test_validation_plan.py", "docs/validation-components.md", "pyproject.toml",
 ])
 def test_unaudited_paths_have_no_inferred_component_evidence(path) -> None:
@@ -693,6 +739,8 @@ def test_supporting_docs_and_tests_are_neutral_to_audited_evidence(scope_kind) -
         ("stagemesh.toml", False, "configuration-only scope"),
         ("src/stagemesh/providers.py", True, "executable provider or configuration source"),
         ("src/widgets/card.py", True, "localized executable source"),
+        ("src/stagemesh/contract_binding.py", True, "core lifecycle, schema, security"),
+        ("src/stagemesh/integration.py", True, "core lifecycle, schema, security"),
         ("src/stagemesh/review.py", True, "core lifecycle, schema, security"),
         ("src\\stagemesh\\validation_plan.py", True, "test-selection policy changed"),
     ],

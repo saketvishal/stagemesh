@@ -380,3 +380,100 @@ def test_project_display_redacts_credentials_without_mutation(store: Store):
     page = query_activity(store, ActivityQuery(project=project))
     assert page.total == 1 and "password" not in repr(page)
     assert store.conn.total_changes == before
+
+
+def _source_transition(store: Store, source_id: str, status: str, minute: int) -> str:
+    store.cache_source("github", source_id, {"state": status}, status)
+    row = store.conn.execute(
+        "SELECT id FROM source_events WHERE source='github' AND source_id=? "
+        "AND status='STATUS_CHANGED' ORDER BY rowid DESC LIMIT 1",
+        (source_id,),
+    ).fetchone()
+    assert row is not None
+    store.conn.execute("UPDATE source_events SET created_at=? WHERE id=?", (_at(minute), row["id"]))
+    store.conn.commit()
+    return str(row["id"])
+
+
+def test_source_status_is_distinct_from_task_state_and_filters_current_rows(store: Store):
+    task = store.upsert_task("linked issue", source="github", source_id="42")
+    store.cache_source("github", "42", {"state": "OPEN"}, "OPEN")
+    closed = _source_transition(store, "42", "CLOSED", 10)
+
+    current = query_activity(store, ActivityQuery(source="github", source_status="CLOSED"))
+    entry = next(item for item in current.entries if item.id == task)
+    assert entry.state == "open" and entry.status == "OPEN"
+    assert (entry.source, entry.source_id, entry.source_status) == ("github", "42", "CLOSED")
+    assert closed not in _ids(current)  # history is explicitly opt-in
+    assert not query_activity(
+        store, ActivityQuery(state="closed", source="github", source_status="CLOSED")
+    ).entries
+
+
+def test_source_close_reopen_reclose_history_is_durable_ordered_and_bounded(store: Store):
+    task = store.upsert_task("reopened source", source="github", source_id="77")
+    store.cache_source("github", "77", {"state": "OPEN"}, "OPEN")
+    store.cache_source("github", "77", {"state": "OPEN", "labels": ["unchanged"]}, "OPEN")
+    first_close = _source_transition(store, "77", "CLOSED", 10)
+    reopened = _source_transition(store, "77", "OPEN", 20)
+    second_close = _source_transition(store, "77", "CLOSED", 30)
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM source_events WHERE status='STATUS_CHANGED'"
+    ).fetchone()[0] == 3
+
+    path = Path(store.conn.execute("PRAGMA database_list").fetchone()[2])
+    restarted = Store(path)
+    try:
+        history = query_activity(
+            restarted,
+            ActivityQuery(task_id=task, include_source_history=True, source="github"),
+        )
+        transition_ids = [item.id for item in history.entries if item.kind == "source"]
+        assert transition_ids == [second_close, reopened, first_close]
+        transitions = {item.id: item for item in history.entries if item.kind == "source"}
+        assert (
+            transitions[reopened].previous_source_status,
+            transitions[reopened].source_status,
+        ) == ("CLOSED", "OPEN")
+        assert transitions[second_close].state == "open"  # task remains open
+        assert history.status_counts["source"] == {"OPEN": 1, "CLOSED": 2, "UNKNOWN": 0}
+
+        window = query_activity(
+            restarted,
+            ActivityQuery(
+                source_status="OPEN",
+                include_source_history=True,
+                since=BASE + timedelta(minutes=10),
+                until=BASE + timedelta(minutes=30),
+            ),
+        )
+        assert _ids(window) == [reopened]  # half-open end excludes the reclose
+    finally:
+        restarted.close()
+
+
+@pytest.mark.parametrize("payload", ["not json", "null", "[]", '{"current_status":[]}',
+    '{"previous_status":"OPEN","current_status":"token-secret"}'])
+def test_malformed_or_secret_source_transition_payload_is_not_exposed(store: Store, payload: str):
+    store.conn.execute(
+        "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("bad-source-event", "github", "9", "inbound", "STATUS_CHANGED", payload, _at(1)),
+    )
+    store.conn.commit()
+    page = query_activity(store, ActivityQuery(include_source_history=True))
+    assert "bad-source-event" not in _ids(page)
+    assert "token-secret" not in repr(page)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        ActivityQuery(source=""),
+        ActivityQuery(source="token-secret"),
+        ActivityQuery(source_status="has spaces"),
+        ActivityQuery(include_source_history="yes"),  # type: ignore[arg-type]
+    ],
+)
+def test_source_filters_fail_closed(store: Store, query: ActivityQuery):
+    with pytest.raises(ActivityQueryError):
+        query_activity(store, query)
