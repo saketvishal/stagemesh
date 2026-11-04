@@ -23,7 +23,13 @@ from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import classify_process, popen_identity, process_identity
 from .queue_control import OperatorStopRequested, QueueStopControl, current_provider_stop
-from .remediation import ToolRecoveryRefused, execute_tool_recovery, remediation_context, tool_recovery_plan
+from .redaction import sanitize_provider_output
+from .remediation import (
+    ToolRecoveryRefused,
+    execute_tool_recovery,
+    remediation_context,
+    tool_recovery_plan,
+)
 from .review_identity import command_snapshot, record_implementation_identity
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
@@ -62,7 +68,6 @@ _PAYMENT_MARKER = re.compile(r"\b402\b|payment required", re.IGNORECASE)
 _PAYMENT_EXHAUSTED = re.compile(
     r"balance[^\n]{0,20}exhausted|out of credits|insufficient credits", re.IGNORECASE
 )
-_SECRET = re.compile(r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+")
 _RETRY = re.compile(r"(?i)(?:resets\s+[^\n]{1,80}|retry[- ]after[:\s]+[^\n]{1,40})")
 TOOL_EXECUTION_FAILURE = "tool_execution_failure"
 _TOOL_FAILURE = re.compile(
@@ -82,10 +87,10 @@ _TOOL_FAILURE = re.compile(
 
 def capacity_evidence(stdout: str, stderr: str) -> tuple[str, str | None]:
     """Redacted provider text and an observable reset hint. No tokens."""
-    text = _SECRET.sub(lambda m: (m.group(1) or "") + "[redacted]", f"{stdout}\n{stderr}").strip()
+    text = sanitize_provider_output(f"{stdout}\n{stderr}", limit=10_000).strip()
     retry = _RETRY.search(text)
     # CLI startup banners and echoed prompts can hide the terminal error.
-    excerpt = text if len(text) <= 500 else text[:180] + "\n...\n" + text[-315:]
+    excerpt = sanitize_provider_output(text)
     return excerpt, (retry.group(0).strip()[:120] if retry else None)
 
 

@@ -64,6 +64,9 @@ jobs:
       - name: Execution budgets and review ownership
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py tests/test_provider_cleanup_confirmation.py tests/test_external_provider_cleanup.py tests/test_concurrent_provider_termination.py tests/test_review_workspace_retention.py tests/test_pid_cleanup_proof.py
+      - name: Provider output security boundaries
+        if: ${{ steps.validation-plan.outputs.mode == 'full' }}
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_provider_output_security.py
       - name: Autonomous recovery ledger
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_autonomous_recovery.py tests/test_recovery_ledger.py
@@ -140,6 +143,9 @@ jobs:
       - name: Execution budgets and review ownership
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py tests/test_provider_cleanup_confirmation.py tests/test_external_provider_cleanup.py tests/test_concurrent_provider_termination.py tests/test_review_workspace_retention.py tests/test_pid_cleanup_proof.py
+      - name: Provider output security boundaries
+        if: ${{ steps.validation-plan.outputs.mode == 'full' }}
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_provider_output_security.py
       - name: Autonomous recovery ledger
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_autonomous_recovery.py tests/test_recovery_ledger.py

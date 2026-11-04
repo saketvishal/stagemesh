@@ -63,6 +63,7 @@ from .recovery_decision import (
     RecoveryDecision,
     decide,
 )
+from .redaction import sanitize_provider_output
 from .remediation import RemediationPolicy, finding_identity
 from .remediation_recovery import (
     MAX_EXHAUSTION_ROUNDS,
@@ -753,7 +754,11 @@ class Coordinator:
                 "reason": reason,
                 "candidate_sha": candidate_sha,
                 "durable_handoff": durable_handoff,
-                **({"provider_output": provider_output[:500]} if provider_output else {}),
+                **(
+                    {"provider_output": sanitize_provider_output(provider_output)}
+                    if provider_output
+                    else {}
+                ),
                 **pool_exhaustion_evidence(reason, provider_attempts),
             },
         )

@@ -96,8 +96,8 @@ SCRIPT = (
     "if mode == 'noop':\n"
     "    sys.exit(0)\n"
     "if mode == 'noop-output':\n"
-    "    sys.stdout.write('provider says the requested change is already present\\n')\n"
-    "    sys.stderr.write('no candidate diff produced\\n')\n"
+    "    sys.stdout.write('provider says the requested change is already present api_token=private-provider-token\\n')\n"
+    "    sys.stderr.write('no candidate diff produced Bearer private-bearer-token sk-private-prefix\\n')\n"
     "    sys.exit(0)\n"
     "if mode == 'sleep':\n"
     "    import time; time.sleep(30); sys.exit(0)\n"
@@ -908,6 +908,12 @@ def test_no_progress_preserves_redacted_provider_output_for_diagnosis(tmp_path: 
     )
     outputs = [item.get("provider_output", "") for item in unsuccessful["provider_outcomes"]]
     assert any("provider says the requested change is already present" in output for output in outputs)
+    persisted = json.dumps({"events": events, "unsuccessful": unsuccessful})
+    assert all(
+        secret not in persisted
+        for secret in ("private-provider-token", "private-bearer-token", "private-prefix")
+    )
+    assert "***REDACTED***" in persisted
     assert unsuccessful["pool_exhausted"] is True
 
 def test_every_provider_no_progress_is_one_bounded_unresolved_result(tmp_path: Path) -> None:

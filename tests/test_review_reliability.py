@@ -87,6 +87,30 @@ def test_complete_pass_is_accepted_and_bound_to_the_exact_candidate_and_contract
     assert store.has_bound_evidence(UNIT_TASK, candidate, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED)
 
 
+def test_valid_review_is_classified_before_its_recorded_provider_text_is_sanitized(
+    tmp_path: Path,
+) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    response = json.dumps(
+        {
+            "decision": "PASS",
+            "diagnostic": "Bearer private-review-token sk-private-review-prefix",
+        }
+    )
+
+    status = Reviewer(
+        adapter=ScriptedReviewAdapter(response), require_independent=True
+    ).review(store, UNIT_TASK, candidate, project)
+
+    assert status == EvidenceStatus.PASSED
+    (payload,) = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.PASSED)
+    recorded = payload["review_response"]
+    assert payload["review_verdict"] == VERDICT_PASS
+    assert "private-review-token" not in recorded
+    assert "private-review-prefix" not in recorded
+    assert "***REDACTED***" in recorded
+
+
 def test_reviewer_prompt_is_adverse_and_evidence_records_the_gate(tmp_path: Path) -> None:
     project, store, candidate = _project_with_candidate(tmp_path)
     adapter = ScriptedReviewAdapter('{"decision":"PASS"}')
