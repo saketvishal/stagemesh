@@ -59,10 +59,20 @@ def valid_manifest(**overrides) -> dict:
         ],
         "unmapped_files": [],
         "unresolved_references": [],
+        "behavioral_evidence": [
+            {
+                "kind": "acceptance",
+                "gate": "unit",
+                "status": "passed",
+                "candidate_revision": "candidate-sha-456",
+            }
+        ],
         "sync_status": "in_sync",
         "validation_status": "passed",
     }
     manifest.update(overrides)
+    if "behavioral_evidence" not in overrides:
+        manifest["behavioral_evidence"][0]["candidate_revision"] = manifest["candidate_revision"]
     return manifest
 
 
@@ -631,6 +641,32 @@ def test_validator_enforces_spec_governance_before_review(tmp_path: Path) -> Non
         payload = json.loads(row["payload"])
         assert "spec_governance" in payload
         assert not payload["spec_governance"]["ok"]
+
+        # A manifest cannot self-assert a behavioral gate that did not execute.
+        forged_behavior = valid_manifest(
+            candidate_revision=sha,
+            base_revision=base_sha,
+            changed_files=["app.py"],
+            owners=[],
+            requirements=[
+                {"requirement_id": "removed", "owner_id": "removed-owner", "path": "app.py", "change": "removed"}
+            ],
+            unmapped_files=["app.py"],
+            behavioral_evidence=[
+                {"kind": "browser", "gate": "browser-e2e", "status": "passed", "candidate_revision": sha}
+            ],
+        )
+        forged_status = Validator().validate(
+            store, task_id, sha, project, prerequisite_manifest=forged_behavior
+        )
+        assert forged_status is EvidenceStatus.FAILED
+        forged_row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='VALIDATION' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id, sha),
+        ).fetchone()
+        forged_payload = json.loads(forged_row["payload"])
+        assert any("browser-e2e' did not execute" in finding.get("message", "") for finding in forged_payload["findings"])
 
         # Valid prerequisite manifest with unmapped files passes validation with review finding
         ok_manifest = valid_manifest(

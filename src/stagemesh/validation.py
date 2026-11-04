@@ -237,6 +237,23 @@ class Validator:
                     expected_base_revision=bound.baseline_sha,
                     expected_changed_files=inspected_files,
                 )
+                if isinstance(prerequisite_manifest, dict):
+                    declared_behavioral_gates = {
+                        str(item.get("gate"))
+                        for item in prerequisite_manifest.get("behavioral_evidence", [])
+                        if isinstance(item, dict) and isinstance(item.get("gate"), str) and item.get("gate")
+                    }
+                    missing_behavioral_gates = sorted(declared_behavioral_gates - set(executed))
+                    if missing_behavioral_gates:
+                        spec_verdict = replace(
+                            spec_verdict,
+                            ok=False,
+                            errors=spec_verdict.errors
+                            + tuple(
+                                f"behavioral evidence gate '{gate}' did not execute for the exact candidate"
+                                for gate in missing_behavioral_gates
+                            ),
+                        )
                 if discovery_errors:
                     spec_verdict = replace(
                         spec_verdict,

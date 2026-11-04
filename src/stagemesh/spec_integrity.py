@@ -20,21 +20,41 @@ this module neither selects a candidate nor grants permission to integrate it.
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from .redaction import SECRET_MARKERS, redact_output
 from .spec_refs import (
-    Requirement, SpecAdapter, SpecAdapterError, SpecOwner, SpecSnapshot, local_path, nonempty, project_file,
+    Requirement,
+    SpecAdapter,
+    SpecAdapterError,
+    SpecOwner,
+    SpecSnapshot,
+    local_path,
+    nonempty,
+    project_file,
 )
 
 PINNED_ADAPTERS: dict[str, tuple[str, ...]] = {
     "openspec": ("layout-v1",),
     "custom-json": ("1",),
 }
+
+_AUDIT_LIST_LIMIT = 100
+_AUDIT_TEXT_LIMIT = 2000
+_VERSION_PATTERN = re.compile(r"(?i)(?:openspec\s+)?v?(\d+\.\d+\.\d+(?:[-+][0-9a-z.-]+)?)")
+_EXACT_VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
+_AUDIT_SECRET_ASSIGNMENT = re.compile(
+    r'''(?i)(["']?[\w.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|authorization)[\w.-]*["']?)'''
+    r'''(\s*[=:]\s*)(?!\*\*\*REDACTED)("[^"]*"|'[^']*'|\S+)'''
+)
 
 
 def resolve_pinned_adapter(adapter_name: str, adapter_version: str | None = None, **kwargs: Any) -> SpecAdapter:
@@ -72,6 +92,338 @@ class SpecGovernanceVerdict:
         if self.manifest is not None:
             result["manifest"] = self.manifest
         return result
+
+
+@dataclass(frozen=True)
+class OpenSpecValidationEvidence:
+    ok: bool
+    expected_version: str
+    observed_version: str | None
+    command: tuple[str, ...]
+    validation_command: tuple[str, ...] = ()
+    exit_code: int | None = None
+    sync_status: str = "unknown"
+    stdout_excerpt: str = ""
+    stderr_excerpt: str = ""
+    errors: tuple[str, ...] = ()
+    resolved_executable: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "ok": self.ok,
+            "expected_version": self.expected_version,
+            "observed_version": self.observed_version,
+            "command": list(self.command),
+            "validation_command": list(self.validation_command),
+            "exit_code": self.exit_code,
+            "sync_status": self.sync_status,
+            "stdout_excerpt": self.stdout_excerpt,
+            "stderr_excerpt": self.stderr_excerpt,
+            "errors": list(self.errors),
+            "resolved_executable": self.resolved_executable,
+        }
+
+
+def run_openspec_validation(
+    root: Path,
+    command: tuple[str, ...] | list[str],
+    *,
+    expected_version: str,
+    timeout_seconds: float = 60.0,
+) -> OpenSpecValidationEvidence:
+    """Run one explicitly configured OpenSpec binary without a shell or ambient secrets.
+
+    StageMesh owns the fixed read-only arguments. Project manifests cannot add a
+    command, and this boundary never installs, updates, syncs or archives specs.
+    """
+    root = Path(root).resolve()
+    prefix = tuple(command)
+    if not isinstance(expected_version, str) or _EXACT_VERSION_PATTERN.fullmatch(expected_version) is None:
+        return OpenSpecValidationEvidence(
+            False, str(expected_version), None, (), errors=("OpenSpec expected_version must be an exact semantic version",)
+        )
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not 0 < timeout_seconds <= 300:
+        return OpenSpecValidationEvidence(
+            False, expected_version, None, (), errors=("OpenSpec timeout_seconds must be between 0 and 300",)
+        )
+    if (
+        not prefix
+        or len(prefix) > 32
+        or not all(
+            isinstance(item, str)
+            and item.strip() == item
+            and item
+            and len(item) <= 2048
+            and not any(char in item for char in ("\x00", "\r", "\n"))
+            for item in prefix
+        )
+    ):
+        return OpenSpecValidationEvidence(
+            False, expected_version, None, (), errors=("OpenSpec command must be a bounded non-empty argument list",)
+        )
+    safe_command = _safe_command(prefix)
+    resolved_executable = _resolve_spec_executable(root, prefix[0])
+    if resolved_executable is None:
+        return OpenSpecValidationEvidence(
+            False,
+            expected_version,
+            None,
+            safe_command,
+            errors=("configured OpenSpec executable could not be resolved",),
+        )
+    execution_prefix = (resolved_executable, *prefix[1:])
+    version_command = (*execution_prefix, "--version")
+    try:
+        version_result = _run_spec_command(version_command, root, timeout_seconds)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        reason = "timed out" if isinstance(exc, subprocess.TimeoutExpired) else f"could not start: {type(exc).__name__}"
+        return OpenSpecValidationEvidence(
+            False,
+            expected_version,
+            None,
+            safe_command,
+            errors=(f"configured OpenSpec version command {reason}",),
+            resolved_executable=resolved_executable,
+        )
+    version_text = (version_result.stdout or "") + "\n" + (version_result.stderr or "")
+    observed = _openspec_version(version_text)
+    version_errors: list[str] = []
+    if version_result.returncode != 0:
+        version_errors.append(f"configured OpenSpec version command exited {version_result.returncode}")
+    if observed is None:
+        version_errors.append("configured OpenSpec version output did not contain a semantic version")
+    elif observed != expected_version:
+        version_errors.append(
+            f"configured OpenSpec version '{observed}' does not match exact pin '{expected_version}'"
+        )
+    if version_errors:
+        return OpenSpecValidationEvidence(
+            False,
+            expected_version,
+            observed,
+            safe_command,
+            exit_code=version_result.returncode,
+            stdout_excerpt=_audit_excerpt(version_result.stdout),
+            stderr_excerpt=_audit_excerpt(version_result.stderr),
+            errors=tuple(version_errors),
+            resolved_executable=resolved_executable,
+        )
+
+    validation_command = (*execution_prefix, "validate", "--all", "--strict", "--json", "--no-interactive")
+    safe_validation_command = _safe_command(validation_command)
+    try:
+        result = _run_spec_command(validation_command, root, timeout_seconds)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        reason = "timed out" if isinstance(exc, subprocess.TimeoutExpired) else f"could not start: {type(exc).__name__}"
+        return OpenSpecValidationEvidence(
+            False,
+            expected_version,
+            observed,
+            safe_command,
+            safe_validation_command,
+            errors=(f"configured OpenSpec validation {reason}",),
+            resolved_executable=resolved_executable,
+        )
+    errors: list[str] = []
+    missing_payload = object()
+    payload: object = missing_payload
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        errors.append("configured OpenSpec validation did not emit one JSON document")
+    if payload is not missing_payload and not isinstance(payload, dict):
+        errors.append("configured OpenSpec validation JSON root must be an object")
+    if result.returncode != 0:
+        errors.append(f"configured OpenSpec validation exited {result.returncode}")
+    sync_status = "unknown"
+    if isinstance(payload, dict):
+        declared_sync = payload.get("syncStatus", payload.get("sync_status"))
+        if isinstance(declared_sync, str) and declared_sync.strip():
+            sync_status = declared_sync.strip().casefold()
+        if sync_status in {"out_of_sync", "out-of-sync", "stale", "failed", "required", "pending"}:
+            errors.append(f"configured OpenSpec validation declared sync status '{sync_status}'")
+    return OpenSpecValidationEvidence(
+        not errors,
+        expected_version,
+        observed,
+        safe_command,
+        safe_validation_command,
+        result.returncode,
+        sync_status,
+        _audit_excerpt(result.stdout),
+        _audit_excerpt(result.stderr),
+        tuple(errors),
+        resolved_executable,
+    )
+
+
+def spec_audit_report(
+    root: Path,
+    adapter: SpecAdapter,
+    *,
+    project_revision: str,
+    openspec_validation: OpenSpecValidationEvidence | None = None,
+) -> dict[str, object]:
+    """Return a bounded, read-only structural inventory and audit decision."""
+    root = Path(root).resolve()
+    snapshot = adapter.discover(root)
+    active_ids = {
+        record.id
+        for owner in snapshot.owners
+        if owner.canonical
+        for record in (owner, *owner.requirements)
+    }
+    blockers: list[str] = []
+    for owner in snapshot.owners:
+        if not owner.canonical:
+            continue
+        for record in (owner, *owner.requirements):
+            for dependency in sorted(set(record.dependencies)):
+                if dependency not in active_ids:
+                    blockers.append(
+                        f"active requirement '{_bounded(record.id)}' has unresolved reference '{_bounded(dependency)}'"
+                    )
+    review_findings = _duplicate_requirement_findings(snapshot)
+    pending, pending_omitted = _pending_openspec_changes(root) if snapshot.adapter == "openspec" else ([], 0)
+    if pending:
+        review_findings.append(
+            f"{len(pending) + pending_omitted} pending OpenSpec change(s) require owner review"
+        )
+    if openspec_validation is not None and not openspec_validation.ok:
+        blockers.extend(openspec_validation.errors)
+    owners = [
+        {
+            "id": _bounded(owner.id),
+            "path": _bounded(owner.path),
+            "status": owner.status,
+            "requirement_ids": [_bounded(item.id) for item in owner.requirements[:_AUDIT_LIST_LIMIT]],
+            "requirements_omitted": max(0, len(owner.requirements) - _AUDIT_LIST_LIMIT),
+        }
+        for owner in snapshot.owners[:_AUDIT_LIST_LIMIT]
+    ]
+    status = "blocked" if blockers else "review" if review_findings else "passed"
+    if blockers:
+        next_action = "resolve the listed structural or validator failures, then rerun spec-audit"
+    elif review_findings:
+        next_action = "review the labeled ambiguity or pending change; no structural blocker was proven"
+    else:
+        next_action = "no structural blocker found; continue normal independent review and behavioral validation"
+    return {
+        "schema_version": 1,
+        "assessment": "structural-only",
+        "read_only": True,
+        "project_revision": _bounded(project_revision),
+        "adapter": {"name": snapshot.adapter, "version": snapshot.adapter_version},
+        "counts": {
+            "active_owners": sum(1 for owner in snapshot.owners if owner.canonical),
+            "historical_owners": sum(1 for owner in snapshot.owners if not owner.canonical),
+            "pending_changes": len(pending) + pending_omitted,
+        },
+        "owners": owners,
+        "owners_omitted": max(0, len(snapshot.owners) - _AUDIT_LIST_LIMIT),
+        "pending_changes": pending,
+        "pending_changes_omitted": pending_omitted,
+        "blocking_findings": [_bounded(item) for item in blockers[:_AUDIT_LIST_LIMIT]],
+        "blocking_findings_omitted": max(0, len(blockers) - _AUDIT_LIST_LIMIT),
+        "review_findings": [_bounded(item) for item in review_findings[:_AUDIT_LIST_LIMIT]],
+        "review_findings_omitted": max(0, len(review_findings) - _AUDIT_LIST_LIMIT),
+        "openspec_validation": openspec_validation.to_dict() if openspec_validation is not None else None,
+        "status": status,
+        "next_action": next_action,
+    }
+
+
+def _run_spec_command(command: tuple[str, ...], root: Path, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper()
+        in {
+            "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "HOME", "USERPROFILE",
+            "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+        }
+    }
+    environment.update({"CI": "1", "NO_COLOR": "1", "OPEN_SPEC_INTERACTIVE": "0"})
+    return subprocess.run(
+        command,
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=timeout_seconds,
+        check=False,
+        shell=False,
+    )
+
+
+def _resolve_spec_executable(root: Path, value: str) -> str | None:
+    candidate = Path(value)
+    if candidate.is_absolute() or candidate.parent != Path("."):
+        path = candidate if candidate.is_absolute() else root / candidate
+        return str(path.resolve()) if path.is_file() else None
+    return shutil.which(value)
+
+
+def _openspec_version(text: str) -> str | None:
+    match = _VERSION_PATTERN.search(text[:_AUDIT_TEXT_LIMIT])
+    return match.group(1) if match else None
+
+
+def _audit_excerpt(value: str | None) -> str:
+    text = redact_output(value or "")
+    text = _AUDIT_SECRET_ASSIGNMENT.sub(r"\1\2***REDACTED***", text)
+    return text[-_AUDIT_TEXT_LIMIT:]
+
+
+def _safe_command(command: tuple[str, ...]) -> tuple[str, ...]:
+    result: list[str] = []
+    redact_next = False
+    for item in command:
+        if redact_next:
+            result.append("***REDACTED***")
+            redact_next = False
+            continue
+        lower = item.casefold()
+        if any(marker in lower for marker in SECRET_MARKERS) and "=" not in item:
+            result.append(_bounded(item))
+            redact_next = True
+        else:
+            result.append(_bounded(redact_output(item)))
+    return tuple(result)
+
+
+def _bounded(value: object, limit: int = 300) -> str:
+    text = str(value).replace("\x00", "")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _duplicate_requirement_findings(snapshot: SpecSnapshot) -> list[str]:
+    by_text: dict[str, list[str]] = {}
+    for owner in snapshot.owners:
+        if not owner.canonical:
+            continue
+        for requirement in owner.requirements:
+            normalized = " ".join(requirement.text.casefold().split())
+            if normalized:
+                by_text.setdefault(normalized, []).append(requirement.id)
+    return [
+        "suspected semantic overlap (exact normalized text only): " + ", ".join(_bounded(item) for item in sorted(ids))
+        for ids in by_text.values()
+        if len(ids) > 1
+    ]
+
+
+def _pending_openspec_changes(root: Path) -> tuple[list[str], int]:
+    folder = root / "openspec" / "changes"
+    if not folder.is_dir():
+        return [], 0
+    pending = sorted(
+        item.relative_to(root).as_posix()
+        for item in folder.iterdir()
+        if item.is_dir() and item.name != "archive"
+    )
+    return pending[:_AUDIT_LIST_LIMIT], max(0, len(pending) - _AUDIT_LIST_LIMIT)
 
 
 def _same_revision(recorded: Any, expected: str) -> bool:
@@ -223,6 +575,7 @@ def validate_prerequisite_manifest(
     known_owner_ids: set[str] = set()
     owner_statuses: dict[str, str] = {}
     owner_requirements: dict[str, set[str]] = {}
+    known_record_ids: set[str] = set()
     record_dependencies: dict[int, tuple[str, ...]] = {}
     active_ids: set[str] = set()
     archived_markers = ("/archive/", "changes/archive", "openspec/changes/archive")
@@ -242,6 +595,9 @@ def validate_prerequisite_manifest(
         if not isinstance(path, str) or not path.strip():
             errors.append(f"owner '{oid}' has missing or empty path")
             continue
+        if oid in known_record_ids:
+            errors.append(f"duplicate authoritative owner id '{oid}' at '{path}'")
+        known_record_ids.add(oid)
 
         # Status validation and contradictory checks
         if status not in {"active", "history"}:
@@ -287,6 +643,11 @@ def validate_prerequisite_manifest(
                 if not isinstance(rid, str) or not rid.strip():
                     errors.append(f"requirement #{ridx} in owner '{oid}' has missing or empty id")
                 else:
+                    if rid in known_record_ids:
+                        errors.append(
+                            f"duplicate authoritative requirement id '{rid}' in owner '{oid}' at '{path}'"
+                        )
+                    known_record_ids.add(rid)
                     req_set.add(rid)
                     if status == "active" and canonical is not False:
                         active_ids.add(rid)
@@ -320,13 +681,18 @@ def validate_prerequisite_manifest(
 
     # Requirements changes check against declared records
     req_changes = manifest.get("requirements", [])
-    if isinstance(req_changes, list):
+    requirement_changed = False
+    if not isinstance(req_changes, list):
+        errors.append("manifest requirements must be a list")
+    else:
         for cidx, change in enumerate(req_changes):
             if not isinstance(change, dict):
                 continue
             rid = change.get("requirement_id") or change.get("id")
             oid = change.get("owner_id")
             ctype = change.get("change")
+            if ctype in {"added", "modified", "removed", "superseded"}:
+                requirement_changed = True
             if not isinstance(rid, str) or not rid.strip():
                 errors.append(f"affected requirement #{cidx} has missing or empty requirement_id")
                 continue
@@ -337,6 +703,35 @@ def validate_prerequisite_manifest(
             else:
                 if ctype != "removed" and rid not in owner_requirements.get(oid, set()):
                     errors.append(f"affected requirement '{rid}' not found in declared requirements for owner '{oid}'")
+
+    if requirement_changed and expected_candidate_revision is not None:
+        behavioral = manifest.get("behavioral_evidence")
+        if not isinstance(behavioral, list) or not behavioral:
+            errors.append("requirement changes require behavioral_evidence bound to the candidate revision")
+        else:
+            passing = False
+            for index, evidence in enumerate(behavioral):
+                if not isinstance(evidence, dict):
+                    errors.append(f"behavioral_evidence #{index} must be an object")
+                    continue
+                kind = evidence.get("kind")
+                gate = evidence.get("gate")
+                status = evidence.get("status")
+                revision = evidence.get("candidate_revision")
+                if not isinstance(kind, str) or not kind.strip():
+                    errors.append(f"behavioral_evidence #{index} requires a non-empty kind")
+                if not isinstance(gate, str) or not gate.strip():
+                    errors.append(f"behavioral_evidence #{index} requires a non-empty executed gate name")
+                if (
+                    status in {"passed", "verified"}
+                    and isinstance(revision, str)
+                    and revision == cand_rev
+                    and isinstance(gate, str)
+                    and gate.strip()
+                ):
+                    passing = True
+            if not passing:
+                errors.append("requirement changes lack passing behavioral evidence for the exact candidate revision")
 
     # Missing affected references check
     unresolved = manifest.get("unresolved_references", [])
@@ -356,6 +751,23 @@ def validate_prerequisite_manifest(
         review_findings.append(f"ambiguous semantic overlap: unmapped files modified ({', '.join(sorted(unmapped))})")
     if manifest.get("semantic_overlap"):
         review_findings.append(f"ambiguous semantic overlap: {manifest.get('semantic_overlap')}")
+    owner_decision = manifest.get("owner_decision_required")
+    if isinstance(owner_decision, str) and owner_decision.strip():
+        review_findings.append(f"unresolved owner decision: {_bounded(owner_decision, 500)}")
+    waiver = manifest.get("waiver_request")
+    if waiver is not None:
+        if not isinstance(waiver, dict):
+            errors.append("waiver_request must be an object with actor and reason")
+        else:
+            actor, reason = waiver.get("actor"), waiver.get("reason")
+            if not isinstance(actor, str) or not actor.strip():
+                errors.append("waiver_request requires a non-empty actor")
+            if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
+                errors.append("waiver_request reason must be non-empty and at most 500 characters")
+            if isinstance(actor, str) and actor.strip() and isinstance(reason, str) and reason.strip() and len(reason) <= 500:
+                review_findings.append(
+                    f"waiver request recorded for review by {_bounded(actor)}: {_bounded(reason, 500)}"
+                )
 
     return SpecGovernanceVerdict(
         ok=len(errors) == 0,
@@ -586,6 +998,7 @@ def structural_impact_manifest(
     candidate_revision: str,
     sync_status: str | None = None,
     validation_status: str | None = None,
+    behavioral_evidence: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Return JSON-ready structural evidence for explicitly supplied changed paths.
 
@@ -644,6 +1057,8 @@ def structural_impact_manifest(
         "unmapped_files": sorted(set(paths) - {o.path for o in all_owners} - contract_paths),
         "unresolved_references": sorted(unresolved, key=lambda r: (r["source_id"], r["target"])),
     }
+    if changes:
+        manifest["behavioral_evidence"] = list(behavioral_evidence or [])
     if sync_status is not None:
         manifest["sync_status"] = sync_status
     if validation_status is not None:

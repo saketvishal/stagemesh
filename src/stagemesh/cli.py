@@ -85,7 +85,7 @@ from .external_evidence import (
     record_external_evidence,
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
-from .git import GitWorkspace
+from .git import GitError, GitWorkspace
 from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport, detect_github_repository
 from .github_acceptance import run_github_acceptance
@@ -161,6 +161,8 @@ from .run_ready import RunSummary, format_excerpt, format_step_update, format_st
 from .runtime_info import format_runtime, runtime_info
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
+from .spec_integrity import resolve_pinned_adapter, run_openspec_validation, spec_audit_report
+from .spec_refs import SpecAdapterError
 from .stage_dispatch import stage_dispatch_refusal
 from .task_sources import (
     GitHubOutboundSync,
@@ -835,6 +837,90 @@ def command_contract_check(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 2
 
 
+def command_spec_audit(args: argparse.Namespace) -> int:
+    """Read-only specification authority inventory and structural audit."""
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    policy = config.spec_governance
+    if policy is None:
+        print("spec audit error: configure spec_governance with an adapter and exact version pin", file=sys.stderr)
+        return 2
+    try:
+        revision = GitWorkspace(project).head()
+        adapter = resolve_pinned_adapter(
+            policy.adapter,
+            policy.version,
+            contract_path=policy.contract_path,
+        )
+        validator = policy.openspec_validation
+        validation = (
+            run_openspec_validation(
+                project,
+                validator.command,
+                expected_version=validator.expected_version,
+                timeout_seconds=validator.timeout_seconds,
+            )
+            if validator is not None
+            else None
+        )
+        report = spec_audit_report(
+            project,
+            adapter,
+            project_revision=revision,
+            openspec_validation=validation,
+        )
+    except (GitError, SpecAdapterError, OSError) as exc:
+        print(f"spec audit error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_spec_audit(report)
+    return 1 if report["status"] == "blocked" else 0
+
+
+def _print_spec_audit(report: dict[str, object]) -> None:
+    adapter = report["adapter"]
+    counts = report["counts"]
+    assert isinstance(adapter, dict) and isinstance(counts, dict)
+    print(f"spec governance audit: {str(report['status']).upper()}")
+    print(f"revision: {report['project_revision']}")
+    print(f"adapter: {adapter['name']} {adapter['version']}")
+    print(
+        "authority: "
+        f"active={counts['active_owners']} history={counts['historical_owners']} "
+        f"pending={counts['pending_changes']}"
+    )
+    pending = report.get("pending_changes", [])
+    if isinstance(pending, list) and pending:
+        print("pending changes: " + ", ".join(str(item) for item in pending))
+    blockers = report.get("blocking_findings", [])
+    if isinstance(blockers, list) and blockers:
+        print("blocking structural findings:")
+        for item in blockers:
+            print(f"  - {item}")
+    else:
+        print("blocking structural findings: none")
+    findings = report.get("review_findings", [])
+    if isinstance(findings, list) and findings:
+        print("review findings:")
+        for item in findings:
+            print(f"  - {item}")
+    else:
+        print("review findings: none")
+    validation = report.get("openspec_validation")
+    if isinstance(validation, dict):
+        print(
+            "OpenSpec validation: "
+            f"{'passed' if validation.get('ok') else 'failed'}; "
+            f"version={validation.get('observed_version') or 'unavailable'}; "
+            f"sync={validation.get('sync_status')}"
+        )
+    else:
+        print("OpenSpec validation: not configured")
+    print(f"next: {report['next_action']}")
+
+
 def command_rebaseline_task(args: argparse.Namespace) -> int:
     def run(store, project):  # type: ignore[no-untyped-def]
         report = rebaseline_task(store, project, args.task, args.to, validate=args.validate, force=args.force, reason=args.reason)
@@ -1368,7 +1454,7 @@ def command_follow_up(args: argparse.Namespace) -> int:
         run_follow_up,
         validated_resume_argv,
     )
-    from .follow_through import active_follow_ups, follow_up_record
+    from .follow_through import active_follow_ups
     from .followup_scheduler import default_scheduler
 
     project = Path(args.project).resolve()
@@ -4716,6 +4802,12 @@ def build_parser() -> argparse.ArgumentParser:
     contract_check.add_argument("--require-spec", action="store_true", help="Fail unless the contract cites at least one existing non-empty spec_refs file")
     contract_check.add_argument("--json", action="store_true")
     contract_check.set_defaults(func=command_contract_check)
+    spec_audit = sub.add_parser(
+        "spec-audit",
+        help="Read-only structural audit of configured specification authority (safe for opt-in CI or scheduling)",
+    )
+    spec_audit.add_argument("--json", action="store_true")
+    spec_audit.set_defaults(func=command_spec_audit)
     rebase = sub.add_parser("rebaseline-task", help="Move a stale task baseline to the candidate's merge-base with the integration ref (audited)")
     rebase.add_argument("--task", required=True)
     rebase.add_argument("--to", required=True, metavar="INTEGRATION_REF", help="Integration ref the baseline is recomputed against")

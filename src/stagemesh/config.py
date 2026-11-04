@@ -260,6 +260,25 @@ class ResearchConfig:
     enforce_scope: bool = False
 
 
+@dataclass(frozen=True)
+class OpenSpecValidationConfig:
+    """An explicitly configured, non-shell OpenSpec validation command."""
+
+    command: tuple[str, ...]
+    expected_version: str
+    timeout_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
+class SpecGovernanceConfig:
+    """Read-only specification discovery and optional OpenSpec CLI validation."""
+
+    adapter: str
+    version: str
+    contract_path: str | None = None
+    openspec_validation: OpenSpecValidationConfig | None = None
+
+
 def _research_config(data: dict[str, object], known_providers: set[str]) -> ResearchConfig | None:
     if not data:
         return None
@@ -275,6 +294,64 @@ def _research_config(data: dict[str, object], known_providers: set[str]) -> Rese
     if not isinstance(enforce_scope, bool):
         raise ConfigValidationError("research.enforce_scope must be a boolean")
     return ResearchConfig(provider, command, enforce_scope)
+
+
+def _spec_governance_config(data: dict[str, object]) -> SpecGovernanceConfig | None:
+    if not data:
+        return None
+    unknown = set(data) - {"adapter", "version", "contract_path", "openspec_validation"}
+    if unknown:
+        raise ConfigValidationError(f"spec_governance has unsupported keys: {', '.join(sorted(unknown))}")
+    adapter, version = _string(data.get("adapter")), _string(data.get("version"))
+    if not adapter or not version:
+        raise ConfigValidationError("spec_governance requires non-empty adapter and version pins")
+    contract_path = _string(data.get("contract_path"))
+    validation_data = _optional_mapping(data, "openspec_validation")
+    validation: OpenSpecValidationConfig | None = None
+    if validation_data:
+        validation_unknown = set(validation_data) - {"command", "expected_version", "timeout_seconds"}
+        if validation_unknown:
+            raise ConfigValidationError(
+                "spec_governance.openspec_validation has unsupported keys: "
+                + ", ".join(sorted(validation_unknown))
+            )
+        command = validation_data.get("command")
+        expected_version = _string(validation_data.get("expected_version"))
+        timeout = validation_data.get("timeout_seconds", 60.0)
+        if (
+            not isinstance(command, list)
+            or not command
+            or len(command) > 32
+            or not all(
+                isinstance(item, str)
+                and item.strip() == item
+                and item
+                and len(item) <= 2048
+                and not any(char in item for char in ("\x00", "\r", "\n"))
+                for item in command
+            )
+        ):
+            raise ConfigValidationError(
+                "spec_governance.openspec_validation.command must be a bounded non-empty argument list"
+            )
+        if not expected_version:
+            raise ConfigValidationError(
+                "spec_governance.openspec_validation.expected_version must be a non-empty exact version"
+            )
+        if re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", expected_version) is None:
+            raise ConfigValidationError(
+                "spec_governance.openspec_validation.expected_version must be an exact semantic version"
+            )
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 300:
+            raise ConfigValidationError(
+                "spec_governance.openspec_validation.timeout_seconds must be between 0 and 300"
+            )
+        if adapter != "openspec":
+            raise ConfigValidationError("openspec_validation is only valid for the openspec adapter")
+        validation = OpenSpecValidationConfig(tuple(command), expected_version, float(timeout))
+    if adapter == "custom-json" and not contract_path:
+        raise ConfigValidationError("custom-json spec_governance requires contract_path")
+    return SpecGovernanceConfig(adapter, version, contract_path, validation)
 
 
 @dataclass(frozen=True)
@@ -311,6 +388,7 @@ class StageMeshConfig:
     challenger_provider: str | None = None
     research: ResearchConfig | None = None
     driver: DriverInstallConfig | None = None
+    spec_governance: SpecGovernanceConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -445,6 +523,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         challenger_provider=challenger_provider,
         research=_research_config(_optional_mapping(data, "research"), known),
         driver=_driver_install_config(_optional_mapping(data, "driver")) if "driver" in data else None,
+        spec_governance=_spec_governance_config(_optional_mapping(data, "spec_governance")),
     )
 
 
