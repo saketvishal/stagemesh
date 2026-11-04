@@ -20,6 +20,8 @@
   let inflight = false, drillState = null;
   let detailSnapshot = null, detailTaskId = null, detailGeneration = 0;
   let detailReturnView = "activity", detailOpener = null;
+  let executionSnapshot = null, executionId = null, executionGeneration = 0;
+  let executionReturnView = "activity", executionOpener = null;
 
   function setMessage(text, level) {
     const el = $("message");
@@ -235,9 +237,9 @@
     } catch (error) {
       if (mine !== detailGeneration) return;
       const stale = detailSnapshot && detailSnapshot.task.id === taskId ? " Showing the last recorded detail (stale)." : "";
-      $("detail-message").textContent = "Could not load task detail: " + error.message + "." + stale;
       if (!stale) detailSnapshot = null;
       renderTaskDetail();
+      $("detail-message").textContent = "Could not load task detail: " + error.message + "." + stale;
     }
   }
 
@@ -247,6 +249,55 @@
     const opener = detailOpener;
     detailOpener = null;
     if (opener && opener.isConnected) opener.focus();
+  }
+
+  function visibleView() {
+    if (!$("task-view").hidden) return "task";
+    if (!$("status-view").hidden) return "status";
+    return "activity";
+  }
+
+  async function openExecution(id, opener) {
+    const mine = ++executionGeneration;
+    if ($("execution-view").hidden) executionReturnView = visibleView();
+    executionOpener = opener || document.activeElement;
+    executionId = id;
+    $("show-execution").hidden = false;
+    $("show-execution").textContent = "Execution " + id.slice(0, 8);
+    $("execution-heading").textContent = "Execution " + id;
+    $("execution-message").textContent = "Loading execution detail...";
+    setView("execution");
+    try {
+      const detail = await api("/api/v1/execution?execution_id=" + encodeURIComponent(id));
+      if (mine !== executionGeneration) return;
+      executionSnapshot = detail;
+      renderExecutionDetail();
+      $("close-execution").focus();
+    } catch (error) {
+      if (mine !== executionGeneration) return;
+      const stale = executionSnapshot && executionSnapshot.execution.id === id ? " Showing the last recorded detail (stale)." : "";
+      if (!stale) executionSnapshot = null;
+      renderExecutionDetail();
+      $("execution-message").textContent = "Could not load execution detail: " + error.message + "." + stale;
+    }
+  }
+
+  function closeExecution() {
+    executionGeneration += 1;
+    setView(executionReturnView);
+    const opener = executionOpener;
+    executionOpener = null;
+    if (opener && opener.isConnected) opener.focus();
+  }
+
+  function executionButton(id, label) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label || id;
+    button.title = "Open recorded execution detail";
+    button.dataset.key = "execution-detail:" + id;
+    button.addEventListener("click", () => openExecution(id, button));
+    return button;
   }
 
   function exitDrill() {
@@ -287,7 +338,9 @@
         entry.previous_source_status && (entry.previous_source_status + " -> " + entry.source_status),
         entry.candidate_sha && entry.candidate_sha.slice(0, 12),
       ].filter(Boolean).join(" "));
-      cell(row, entry.id);
+      const id = cell(row, "");
+      if (entry.kind === "execution") id.replaceChildren(executionButton(entry.id));
+      else id.textContent = entry.id;
     }
     if (focused) {
       const again = [...body.querySelectorAll("button")].find((button) => button.dataset.key === focused);
@@ -402,7 +455,8 @@
     for (const item of snapshot.sections.active_executions) {
       const row = $("active-rows").insertRow(); taskCell(row, item.task_id);
       cell(row, item.stage); cell(row, item.provider);
-      cell(row, [item.process_state, item.parent_process_state, item.cleanup_state, item.stale && "stale"].filter(Boolean).join(" / "));
+      const state = cell(row, [item.process_state, item.parent_process_state, item.cleanup_state, item.stale && "stale"].filter(Boolean).join(" / "));
+      if (item.execution_id) state.append(" ", executionButton(item.execution_id, "Inspect execution"));
     }
     for (const item of snapshot.sections.workers) {
       const row = $("active-rows").insertRow(); cell(row, item.worker_id || "-");
@@ -410,7 +464,9 @@
     }
     for (const item of snapshot.sections.recent_failures) {
       const row = $("failure-rows").insertRow(); taskCell(row, item.task_id);
-      cell(row, item.stage); cell(row, item.provider); cell(row, item.scope); cell(row, item.reason);
+      cell(row, item.stage); cell(row, item.provider); cell(row, item.scope);
+      const reason = cell(row, item.reason);
+      if (item.execution_id) reason.append(" ", executionButton(item.execution_id, "Inspect execution"));
     }
     const efficiency = snapshot.sections.efficiency[0] || {};
     const usage = efficiency.usage || {};
@@ -483,13 +539,59 @@
     }
   }
 
+  function renderExecutionDetail() {
+    for (const id of ["execution-facts", "execution-timing", "execution-ownership", "execution-evidence"]) $(id).replaceChildren();
+    const detail = executionSnapshot;
+    if (!detail || detail.execution.id !== executionId) return;
+    $("execution-heading").textContent = detail.execution.kind + " execution";
+    $("execution-message").textContent = [
+      detail.evidence_meta.correlation.replaceAll("_", " ") + ".",
+      detail.evidence_meta.truncated ? "Evidence truncated at " + detail.evidence_meta.limit + " rows." : "Evidence within retained bounds.",
+      "Observed " + new Date(detail.observed_at).toLocaleString() + ".",
+    ].join(" ");
+    const appendFacts = (target, facts) => {
+      for (const [label, value] of facts) {
+        const dt = document.createElement("dt"); dt.textContent = label;
+        const dd = document.createElement("dd"); dd.textContent = value ?? "-";
+        target.append(dt, dd);
+      }
+    };
+    appendFacts($("execution-facts"), [
+      ["Execution", detail.execution.id], ["Kind", detail.execution.kind], ["Status", detail.execution.status],
+      ["Provider", detail.execution.provider], ["Current for task", detail.execution.current_for_task ? "yes" : "history"],
+      ["Task", detail.task.id], ["Task stage", detail.task.stage], ["Task status", detail.task.status],
+      ["Candidate", detail.candidate.sha ? detail.candidate.sha.slice(0, 12) : "-"],
+      ["Outcome", detail.outcome.code || "unavailable"], ["Outcome class", detail.outcome.classification],
+      ["Outcome scope", detail.outcome.scope],
+    ]);
+    const recordedTime = (value) => value == null ? "unavailable" : new Date(value * 1000).toLocaleString();
+    appendFacts($("execution-timing"), [
+      ["Started", recordedTime(detail.timing.started_at)], ["Updated", recordedTime(detail.timing.updated_at)],
+      ["Terminal", recordedTime(detail.timing.terminal_at)],
+      ["Recorded duration", detail.timing.recorded_duration_seconds == null ? "unavailable" : detail.timing.recorded_duration_seconds + " seconds"],
+    ]);
+    appendFacts($("execution-ownership"), [
+      ["Claim", detail.claim && detail.claim.id], ["Worker", detail.claim && detail.claim.worker_id],
+      ["Claim active", detail.claim ? (detail.claim.active ? "yes" : "released") : "unavailable"],
+      ["Identity coverage", detail.runtime.identity_coverage], ["Process state", detail.runtime.process_state],
+      ["Parent process", detail.runtime.parent_process_state], ["Cleanup", detail.runtime.cleanup_state || "none recorded"],
+    ]);
+    for (const item of detail.evidence) {
+      const row = $("execution-evidence").insertRow();
+      cell(row, recordedTime(item.recorded_at)); cell(row, item.kind); cell(row, item.status);
+      cell(row, item.current_candidate ? "yes" : "historical");
+    }
+  }
+
   function setView(name) {
     $("activity-view").hidden = name !== "activity";
     $("status-view").hidden = name !== "status";
     $("task-view").hidden = name !== "task";
+    $("execution-view").hidden = name !== "execution";
     $("show-activity").setAttribute("aria-pressed", String(name === "activity"));
     $("show-status").setAttribute("aria-pressed", String(name === "status"));
     $("show-task").setAttribute("aria-pressed", String(name === "task"));
+    $("show-execution").setAttribute("aria-pressed", String(name === "execution"));
   }
 
   function render(page, periods) {
@@ -555,7 +657,9 @@
   $("show-activity").addEventListener("click", () => setView("activity"));
   $("show-status").addEventListener("click", () => setView("status"));
   $("show-task").addEventListener("click", () => setView("task"));
+  $("show-execution").addEventListener("click", () => setView("execution"));
   $("close-detail").addEventListener("click", closeTask);
+  $("close-execution").addEventListener("click", closeExecution);
   $("detail-history").addEventListener("click", () => { if (detailTaskId) enterDrill(detailTaskId); });
   $("auto").addEventListener("change", schedule);
   document.addEventListener("keydown", (event) => {
@@ -563,6 +667,7 @@
     if (event.ctrlKey || event.metaKey || event.altKey || typing) return;
     if (event.key === "/") { event.preventDefault(); $("task").focus(); }
     else if (event.key === "r") refresh();
+    else if (event.key === "Escape" && !$("execution-view").hidden) closeExecution();
     else if (event.key === "Escape" && !$("task-view").hidden) closeTask();
     else if (event.key === "Escape" && drillState) exitDrill();
   });

@@ -42,12 +42,13 @@ EVIDENCE_STATUSES: tuple[str, ...] = tuple(status.value for status in EvidenceSt
 _KIND_ORDER = {"task_transition": 0, "retry": 1, "evidence": 2, "source": 3, "audit": 4, "execution": 5, "task": 6}
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 # Fixed application outcomes only: identifier-shaped provider text may still be a secret.
-_SAFE_RESULTS = frozenset({
+SAFE_EXECUTION_RESULTS = frozenset({
     "capacity", "cleanup_incomplete", "executor_aborted", "external_workspace_mutation",
     "fenced_identity_unknown", "findings", "no_implementation_change", "operator_stop",
     "orphaned", "provider_permission_denied", "provider_timeout", "provider_unavailable",
     "recovered_stale", "tool_execution_failure",
 })
+_SAFE_RESULTS = SAFE_EXECUTION_RESULTS  # Backward-compatible internal name used by contract tests.
 _SAFE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key", "api-key")
 
@@ -442,7 +443,7 @@ def _execution_entries(store: Store, query: ActivityQuery) -> tuple[list[Activit
             provider=_safe_code(row["actor"]),
             execution_kind=row["kind"],
             candidate_sha=row["candidate_sha"] if row["candidate_sha"] and _SAFE_SHA.match(row["candidate_sha"]) else None,
-            result_code=row["result"] if row["result"] in _SAFE_RESULTS else None,
+            result_code=row["result"] if row["result"] in SAFE_EXECUTION_RESULTS else None,
             project=_safe_project(row["project"]),
             source=_safe_code(row["source"]),
             source_id=_safe_identifier(row["source_id"]),
@@ -795,7 +796,7 @@ def _retry_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
                     if row["execution_kind"] in {kind.value for kind in ExecutionKind}
                     else None
                 ),
-                result_code=row["result"] if row["result"] in _SAFE_RESULTS else None,
+                result_code=row["result"] if row["result"] in SAFE_EXECUTION_RESULTS else None,
                 retry_state=retry_state,  # type: ignore[arg-type]
                 retry_attempt=attempt,
                 retry_limit=limit,
@@ -969,6 +970,11 @@ def _safe_code(value: object) -> str | None:
     if any(marker in value.lower() for marker in _SECRET_MARKERS):
         return None
     return value
+
+
+def safe_activity_code(value: object) -> str | None:
+    """Public projection for provider/worker identifiers used by sibling read-only APIs."""
+    return _safe_code(value)
 
 
 def _safe_title(title: str) -> str:

@@ -43,18 +43,24 @@ DRIVER = r"""
   }
   const realFetch = window.fetch.bind(window);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const control = { held: [], hold: null, fail: false, dropKey: null, log: [] };
+  const control = { held: [], hold: null, fail: false, executionAuth: false, dropKey: null, log: [] };
   const release = () => { control.hold = null; control.held.splice(0).forEach((r) => r()); };
   // Test-only wrapper around the page's real fetch: it can withhold, fail or alter ACTUAL server responses.
   window.fetch = async (url, opts) => {
     const u = String(url);
     const activity = u.includes("/api/v5/activity");
     const periods = u.includes("/api/v5/periods");
+    const executionDetail = u.includes("/api/v1/execution");
     if (activity || periods) control.log.push("request " + u);
     if (activity && control.fail) { control.log.push("fail " + u); throw new TypeError("network down"); }
+    if (executionDetail && control.executionAuth) {
+      return new Response(JSON.stringify({error: {message: "missing or invalid credential"}}), {
+        status: 401, headers: {"Content-Type": "application/json"},
+      });
+    }
     const res = await realFetch(url, opts);
-    if (!activity) return res;
     if (control.hold && control.hold(u)) { control.log.push("held " + u); await new Promise((r) => control.held.push(r)); }
+    if (!activity) return res;
     if (control.dropKey) {
       const body = await res.json();
       body.entries = body.entries.filter((e) => e.kind + ":" + e.id !== control.dropKey);
@@ -223,6 +229,33 @@ DRIVER = r"""
       document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
       await until(() => !$("status-view").hidden, "status return from task detail");
       out.detailReturnFocus = document.activeElement === task;
+      const execution = document.querySelectorAll("#failure-rows button")[1];
+      const activeExecution = document.querySelector("#active-rows button[title='Open recorded execution detail']");
+      let holdFirstExecution = true;
+      control.hold = (u) => {
+        if (!u.includes("/api/v1/execution") || !holdFirstExecution) return false;
+        holdFirstExecution = false;
+        return true;
+      };
+      execution.click();
+      await until(() => control.held.length === 1, "first execution detail held");
+      activeExecution.click();
+      await until(() => $("execution-facts").textContent.includes("IMPLEMENTATION"), "newer execution detail");
+      release();
+      await sleep(100);
+      out.executionRaceKeptNewer = $("execution-facts").textContent.includes("IMPLEMENTATION");
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("status-view").hidden, "status return from raced execution detail");
+      out.executionRaceReturnFocus = document.activeElement === activeExecution;
+      execution.click();
+      await until(() => document.querySelectorAll("#execution-evidence tr").length === 1, "execution detail");
+      out.executionVisible = !$("execution-view").hidden;
+      out.executionEvidence = document.querySelectorAll("#execution-evidence tr").length;
+      out.executionFacts = $("execution-facts").textContent;
+      out.executionFocus = document.activeElement === $("close-execution");
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("status-view").hidden, "status return from execution detail");
+      out.executionReturnFocus = document.activeElement === execution;
       task.click();
       await until(
         () => document.querySelectorAll("#detail-timeline tr").length >= 5,
@@ -232,6 +265,23 @@ DRIVER = r"""
       await until(() => !$("drill").hidden, "status task drill-down");
       out.drillVisible = !$("drill").hidden;
       out.activityVisible = !$("activity-view").hidden && $("status-view").hidden;
+    },
+
+    async executionAuth() {
+      await until(() => $("operator-summary").textContent.includes("Observed"), "operator snapshot");
+      $("show-status").click();
+      const execution = document.querySelector("#active-rows button[title='Open recorded execution detail']");
+      execution.click();
+      await until(() => $("execution-facts").textContent.includes("IMPLEMENTATION"), "initial execution detail");
+      const facts = $("execution-facts").textContent;
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("status-view").hidden, "status return before auth failure");
+      control.executionAuth = true;
+      execution.click();
+      await until(() => $("execution-message").textContent.includes("stale"), "stale execution auth failure");
+      out.staleVisible = !$("execution-view").hidden;
+      out.staleMessage = $("execution-message").textContent;
+      out.staleFactsPreserved = $("execution-facts").textContent === facts;
     },
 
     // Load more is accepted but its second-page response is still in flight when a refresh happens.
@@ -476,7 +526,7 @@ def status_base(tmp_path: Path):
         task_id=task, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, actor="codex"
     )
     failed = store.start_execution(
-        task_id=task, claim_id=None, kind=ExecutionKind.REVIEW, actor="claude"
+        task_id=task, claim_id=None, kind=ExecutionKind.REVIEW, actor="claude", candidate_sha="a" * 40
     )
     store.finish_execution(failed, ExecutionStatus.FAILED, actor="claude", result="review failed")
     store.upsert_worker(
@@ -589,7 +639,17 @@ def test_status_view_renders_bounded_operator_sections_and_links_to_history(stat
     assert result["detailVisible"] is True and result["detailTimeline"] >= 5
     assert result["detailEvidence"] == 1 and result["detailRetries"] == 1 and result["detailDependencies"] == 1
     assert result["detailFocus"] is True and result["detailReturnFocus"] is True
+    assert result["executionVisible"] is True and result["executionEvidence"] == 1
+    assert result["executionFocus"] is True and result["executionReturnFocus"] is True
+    assert result["executionRaceKeptNewer"] is True and result["executionRaceReturnFocus"] is True
+    assert "REVIEW" in result["executionFacts"] and "FAILED" in result["executionFacts"]
     assert result["drillVisible"] is True and result["activityVisible"] is True
+
+
+def test_execution_detail_preserves_last_good_snapshot_on_auth_failure(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "executionAuth", tmp_path)
+    assert result["staleVisible"] is True and result["staleFactsPreserved"] is True
+    assert "Could not load execution detail" in result["staleMessage"] and "stale" in result["staleMessage"]
 
 
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):

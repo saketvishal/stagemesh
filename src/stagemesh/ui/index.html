@@ -17,6 +17,7 @@
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
   <button type="button" id="show-status" aria-pressed="false">Status</button>
   <button type="button" id="show-task" aria-pressed="false" hidden>Task detail</button>
+  <button type="button" id="show-execution" aria-pressed="false" hidden>Execution detail</button>
 </nav>
 <main id="activity-view">
 <form id="filters" aria-label="Activity filters">
@@ -172,6 +173,24 @@
   <section aria-labelledby="detail-timeline-heading">
     <h3 id="detail-timeline-heading">Recorded lifecycle timeline</h3>
     <table id="detail-timeline-table" tabindex="-1"><thead><tr><th scope="col">Time</th><th scope="col">Kind</th><th scope="col">Stage</th><th scope="col">Recorded state</th><th scope="col">Provider</th><th scope="col">Detail</th></tr></thead><tbody id="detail-timeline"></tbody></table>
+  </section>
+</main>
+<main id="execution-view" hidden>
+  <p><button type="button" id="close-execution">Back</button></p>
+  <h2 id="execution-heading">Execution detail</h2>
+  <p id="execution-message" class="muted" role="status" aria-live="polite"></p>
+  <dl id="execution-facts" class="metrics"></dl>
+  <section aria-labelledby="execution-timing-heading">
+    <h3 id="execution-timing-heading">Recorded lifecycle and timing</h3>
+    <dl id="execution-timing" class="metrics"></dl>
+  </section>
+  <section aria-labelledby="execution-ownership-heading">
+    <h3 id="execution-ownership-heading">Claim ownership and cleanup</h3>
+    <dl id="execution-ownership" class="metrics"></dl>
+  </section>
+  <section aria-labelledby="execution-evidence-heading">
+    <h3 id="execution-evidence-heading">Exact-candidate evidence</h3>
+    <table><thead><tr><th scope="col">Time</th><th scope="col">Kind</th><th scope="col">Outcome</th><th scope="col">Current candidate</th></tr></thead><tbody id="execution-evidence"></tbody></table>
   </section>
 </main>
 <script src="/app.js"></script>

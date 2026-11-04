@@ -365,15 +365,35 @@ def pending_decision_rows(store: Store) -> tuple[Mapping[str, object], ...]:
     return tuple(_pending_decision_rows(store))
 
 
+def execution_runtime_row(store: Store, execution: Mapping[str, object]) -> Mapping[str, object]:
+    """Return bounded current runtime facts without exposing process identity material."""
+    if execution["status"] != "RUNNING":
+        return {
+            "current": False,
+            "identity_coverage": "NOT_CURRENT",
+            "process_state": "NOT_CURRENT",
+            "parent_process_state": "NOT_CURRENT",
+            "cleanup_state": None,
+        }
+    pid = execution["pid"]
+    parent_state = classify_process(
+        store.execution_process_identity(str(execution["id"])),
+        process_identity(pid if isinstance(pid, int) else None),
+    )
+    return {
+        "current": True,
+        "identity_coverage": "RECORDED" if execution["process_create_time"] is not None and execution["boot_id"] else "UNAVAILABLE",
+        "process_state": recovery_identity_state(execution, parent_state),
+        "parent_process_state": parent_state,
+        "cleanup_state": tree_cleanup_state(execution),
+    }
+
+
 def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
     rows: list[Mapping[str, object]] = []
     for execution in store.running_executions():
         pid = execution["pid"]
-        parent_state = classify_process(
-            store.execution_process_identity(execution["id"]),
-            process_identity(pid),
-        )
-        process_state = recovery_identity_state(execution, parent_state)
+        runtime = execution_runtime_row(store, execution)
         provider = execution["actor"] or "unknown"
         rows.append(
             {
@@ -383,10 +403,10 @@ def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
                 "provider": provider,
                 "pid": pid,
                 "pid_label": str(pid) if pid is not None else "no pid recorded",
-                "process_state": process_state,
-                "parent_process_state": parent_state,
-                "cleanup_state": tree_cleanup_state(execution),
-                "stale": process_state == "DEAD",
+                "process_state": runtime["process_state"],
+                "parent_process_state": runtime["parent_process_state"],
+                "cleanup_state": runtime["cleanup_state"],
+                "stale": runtime["process_state"] == "DEAD",
             }
         )
     return rows

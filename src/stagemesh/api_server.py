@@ -23,14 +23,23 @@ from typing import Any
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from . import __version__
-from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
+from .activity import (
+    SAFE_EXECUTION_RESULTS,
+    ActivityEntry,
+    ActivityPage,
+    ActivityQuery,
+    ActivityQueryError,
+    query_activity,
+    safe_activity_code,
+)
 from .activity_periods import (
     ActivityPeriodError,
     ActivityPeriodQuery,
     ActivityPeriodReport,
     query_activity_periods,
 )
-from .operator import OperatorReport, operator_report, pending_decision_rows
+from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
+from .operator import OperatorReport, execution_runtime_row, operator_report, pending_decision_rows
 from .persistence import Store
 from .redaction import redact_output
 
@@ -43,6 +52,8 @@ OPERATOR_CONTRACT = "stagemesh.operator/1"
 OPERATOR_DETAIL_LIMIT = 100
 TASK_DETAIL_CONTRACT = "stagemesh.task-detail/1"
 TASK_DETAIL_LIMIT = 200
+EXECUTION_DETAIL_CONTRACT = "stagemesh.execution-detail/1"
+EXECUTION_EVIDENCE_LIMIT = 100
 LOOPBACK = "127.0.0.1"
 _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", "limit", "offset"})
 _PARAMS_V2 = _PARAMS | {"project", "time_basis"}
@@ -247,6 +258,21 @@ def parse_task_detail_query(raw: str) -> str:
     return task_id
 
 
+def parse_execution_detail_query(raw: str) -> str:
+    if len(raw) > _MAX_QUERY_CHARS or not _URL_SAFE.match(raw):
+        raise _invalid("execution detail query must be percent-encoded ASCII")
+    segments = raw.split("&") if raw else []
+    if len(segments) != 1:
+        raise _invalid("execution detail requires exactly one execution_id")
+    name, sep, value = segments[0].partition("=")
+    if not sep or _decode(name) != "execution_id":
+        raise _invalid("execution detail requires exactly one execution_id")
+    execution_id = _decode(value)
+    if not execution_id.strip() or len(execution_id) > 200:
+        raise _invalid("execution_id must be a non-empty string of 200 characters or fewer")
+    return execution_id
+
+
 def _entry(entry: ActivityEntry, *, version: int = 1) -> dict[str, Any]:
     data = asdict(entry)
     data["at"] = entry.at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -448,6 +474,7 @@ def serialize_operator_report(report: OperatorReport) -> dict[str, Any]:
         "pending_decisions": [pending(row) for row in sections.get("Recorded Pending Decisions", ())],
         "active_executions": [
             {
+                "execution_id": _safe_text(row.get("id")),
                 "task_id": _safe_text(row.get("task_id")),
                 "stage": _safe_text(row.get("stage"), 40) or "UNKNOWN",
                 "provider": _safe_text(row.get("provider"), 80) or "unknown",
@@ -461,6 +488,7 @@ def serialize_operator_report(report: OperatorReport) -> dict[str, Any]:
         "workers": [worker(row) for row in sections.get("Workers", ())],
         "recent_failures": [
             {
+                "execution_id": _safe_text(row.get("id")),
                 "task_id": _safe_text(row.get("task_id")),
                 "stage": _safe_text(row.get("stage"), 40) or "UNKNOWN",
                 "provider": _safe_text(row.get("provider"), 80) or "unknown",
@@ -596,6 +624,134 @@ def serialize_task_detail(store: Store, task_id: str) -> dict[str, Any]:
     }
 
 
+_RESULT_CLASSES = {
+    "capacity": "provider_availability",
+    "provider_permission_denied": "provider_availability",
+    "provider_timeout": "provider_availability",
+    "provider_unavailable": "provider_availability",
+    "cleanup_incomplete": "recovery",
+    "fenced_identity_unknown": "recovery",
+    "orphaned": "recovery",
+    "recovered_stale": "recovery",
+    "executor_aborted": "control",
+    "external_workspace_mutation": "control",
+    "operator_stop": "control",
+    "tool_execution_failure": "control",
+    "findings": "outcome",
+    "no_implementation_change": "outcome",
+}
+
+
+def serialize_execution_detail(store: Store, execution_id: str) -> dict[str, Any]:
+    execution = store.conn.execute(
+        "SELECT e.*,t.title,t.stage AS task_stage,t.status AS task_status,t.project "
+        "FROM executions e JOIN tasks t ON t.id=e.task_id WHERE e.id=?",
+        (execution_id,),
+    ).fetchone()
+    if execution is None:
+        raise ApiError(404, "execution_not_found", "execution was not found")
+    allowed_kinds = {item.value for item in ExecutionKind}
+    allowed_statuses = {item.value for item in ExecutionStatus}
+    kind = execution["kind"] if execution["kind"] in allowed_kinds else "UNKNOWN"
+    status = execution["status"] if execution["status"] in allowed_statuses else "UNKNOWN"
+    started_at = _safe_number(execution["started_at"])
+    updated_at = _safe_number(execution["updated_at"])
+    terminal = status in {ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value}
+    terminal_at = updated_at if terminal and started_at is not None and updated_at is not None and updated_at >= started_at else None
+    duration = terminal_at - started_at if terminal_at is not None and started_at is not None else None
+    latest_execution = store.conn.execute(
+        "SELECT id FROM executions WHERE task_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1",
+        (execution["task_id"],),
+    ).fetchone()
+    latest_candidate = store.latest_candidate(str(execution["task_id"]))
+    candidate_sha = _safe_sha(execution["candidate_sha"])
+    current_candidate_sha = None if latest_candidate is None else _safe_sha(latest_candidate["sha"])
+    result_code = execution["result"] if execution["result"] in SAFE_EXECUTION_RESULTS else None
+    claim = None
+    if execution["claim_id"] is not None:
+        claim = store.conn.execute(
+            "SELECT id,worker_id,stage,lease_expires_at,active,created_at FROM claims WHERE id=?",
+            (execution["claim_id"],),
+        ).fetchone()
+    evidence = []
+    evidence_truncated = False
+    if candidate_sha is not None:
+        rows = store.conn.execute(
+            "SELECT id,kind,status,created_at FROM evidence WHERE task_id=? AND candidate_sha=? "
+            "ORDER BY created_at DESC,id LIMIT ?",
+            (execution["task_id"], candidate_sha, EXECUTION_EVIDENCE_LIMIT + 1),
+        ).fetchall()
+        evidence_truncated = len(rows) > EXECUTION_EVIDENCE_LIMIT
+        for row in rows[:EXECUTION_EVIDENCE_LIMIT]:
+            evidence.append(
+                {
+                    "id": _safe_text(row["id"]),
+                    "kind": row["kind"] if row["kind"] in {item.value for item in EvidenceKind} else "UNKNOWN",
+                    "status": row["status"] if row["status"] in {item.value for item in EvidenceStatus} else "UNKNOWN",
+                    "recorded_at": _safe_number(row["created_at"]),
+                    "current_candidate": candidate_sha == current_candidate_sha,
+                }
+            )
+    runtime = execution_runtime_row(store, execution)
+    return {
+        "observed_at": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "execution": {
+            "id": _safe_text(execution["id"]),
+            "kind": kind,
+            "status": status,
+            "provider": safe_activity_code(execution["actor"]),
+            "current_for_task": latest_execution is not None and latest_execution["id"] == execution["id"],
+        },
+        "task": {
+            "id": _safe_text(execution["task_id"]),
+            "title": _safe_text(execution["title"], 300),
+            "stage": _safe_text(execution["task_stage"], 40) or "UNKNOWN",
+            "status": _safe_text(execution["task_status"], 40) or "UNKNOWN",
+            "project": _safe_text(execution["project"], 200),
+        },
+        "candidate": {
+            "sha": candidate_sha,
+            "current": candidate_sha is not None and candidate_sha == current_candidate_sha,
+        },
+        "timing": {
+            "started_at": started_at,
+            "updated_at": updated_at,
+            "terminal_at": terminal_at,
+            "recorded_duration_seconds": duration,
+            "duration_kind": "recorded_terminal" if duration is not None else "unavailable",
+        },
+        "outcome": {
+            "code": result_code,
+            "classification": _RESULT_CLASSES.get(result_code, "unavailable"),
+            "raw_result_available": execution["result"] is not None,
+            "scope": "current" if latest_execution is not None and latest_execution["id"] == execution["id"] else "history",
+        },
+        "claim": None
+        if claim is None
+        else {
+            "id": _safe_text(claim["id"]),
+            "worker_id": safe_activity_code(claim["worker_id"]),
+            "stage": _safe_text(claim["stage"], 40) or "UNKNOWN",
+            "active": bool(claim["active"]),
+            "lease_expires_at": _safe_number(claim["lease_expires_at"]),
+            "created_at": _safe_number(claim["created_at"]),
+        },
+        "runtime": {
+            "current": runtime["current"],
+            "identity_coverage": runtime["identity_coverage"],
+            "process_state": runtime["process_state"],
+            "parent_process_state": runtime["parent_process_state"],
+            "cleanup_state": runtime["cleanup_state"],
+        },
+        "evidence": evidence,
+        "evidence_meta": {
+            "limit": EXECUTION_EVIDENCE_LIMIT,
+            "truncated": evidence_truncated,
+            "correlation": "exact_task_and_candidate" if candidate_sha is not None else "unavailable_without_candidate",
+        },
+    }
+
+
 class ActivityApi:
     """Transport-independent request handling, so tests need no sockets."""
 
@@ -614,7 +770,9 @@ class ActivityApi:
     def handle(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
         contract = CONTRACT
         try:
-            if urlsplit(target).path == "/api/v1/task":
+            if urlsplit(target).path == "/api/v1/execution":
+                contract = EXECUTION_DETAIL_CONTRACT
+            elif urlsplit(target).path == "/api/v1/task":
                 contract = TASK_DETAIL_CONTRACT
             elif urlsplit(target).path == "/api/v1/operator":
                 contract = OPERATOR_CONTRACT
@@ -659,6 +817,14 @@ class ActivityApi:
         if not path.startswith("/api/"):
             return self._static(path)  # the shell carries no data, so it needs no credential
         self._authenticate(lowered.get("authorization", ""))
+        if path == "/api/v1/execution":
+            execution_id = parse_execution_detail_query(parts.query)
+            store = self._open()
+            try:
+                detail = serialize_execution_detail(store, execution_id)
+            finally:
+                store.conn.close()
+            return _json(200, detail, EXECUTION_DETAIL_CONTRACT)
         if path == "/api/v1/task":
             task_id = parse_task_detail_query(parts.query)
             store = self._open()
