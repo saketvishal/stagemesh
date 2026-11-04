@@ -1047,8 +1047,15 @@ def _research_summary(store: Store, project: Path, task_id: str) -> dict[str, An
         "ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (task_id,),
     ).fetchone()
+    scope_row = store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type='research_scope.admission' "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
     summary: dict[str, Any] = {
         "required": configured is not None,
+        "scope_enforced": configured.enforce_scope if configured is not None else False,
         "configured_provider": configured.provider if configured is not None else None,
         "status": "pending" if configured is not None else "not-required",
         "observed": row is not None,
@@ -1083,7 +1090,36 @@ def _research_summary(store: Store, project: Path, task_id: str) -> dict[str, An
         unresolved_scope_gap_count=len(report.get("unresolved_scope_gaps", []))
         if isinstance(report.get("unresolved_scope_gaps"), list)
         else 0,
+        recommended_path_count=(
+            len(report.get("recommended_implementation_paths", []))
+            if isinstance(report.get("recommended_implementation_paths"), list)
+            else 0
+        ),
+        no_touch_path_count=(
+            len(report.get("no_touch_paths", []))
+            if isinstance(report.get("no_touch_paths"), list)
+            else 0
+        ),
     )
+    if scope_row is not None:
+        scope = _loads(scope_row["payload"])
+        summary["scope_admission"] = {
+            "at": scope_row["created_at"],
+            "candidate_sha": str(scope.get("candidate_sha") or "")[:64] or None,
+            "allowed": scope.get("allowed") if isinstance(scope.get("allowed"), bool) else None,
+            "reason": str(scope.get("reason") or "")[:100] or None,
+            "report_digest": str(scope.get("report_digest") or "")[:128] or None,
+            "changed_path_count": scope.get("changed_path_count")
+            if isinstance(scope.get("changed_path_count"), int)
+            and not isinstance(scope.get("changed_path_count"), bool)
+            else None,
+            "outside_recommendation_count": len(scope.get("outside_recommendation", []))
+            if isinstance(scope.get("outside_recommendation"), list)
+            else 0,
+            "no_touch_violation_count": len(scope.get("no_touch_violations", []))
+            if isinstance(scope.get("no_touch_violations"), list)
+            else 0,
+        }
     return summary
 
 

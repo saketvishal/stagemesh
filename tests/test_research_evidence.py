@@ -206,3 +206,72 @@ def test_valid_rebound_contract_invalidates_prior_evidence(context):
                       digest=hashlib.sha256(canonical.encode()).hexdigest())
     with pytest.raises(ValueError, match="stale"):
         research.read_research_evidence(destination, project=project, bound=rebound)
+
+
+def test_version_two_scope_round_trip_and_legacy_read_compatibility(context):
+    project, bound, destination = context
+    evidence = build(
+        project,
+        bound,
+        unresolved_scope_gaps=(),
+        recommended_implementation_paths=("src/service.py",),
+        no_touch_paths=(),
+    )
+    research.write_research_evidence(destination, evidence, project=project, bound=bound)
+    loaded = research.read_research_evidence(destination, project=project, bound=bound)
+    assert loaded.version == research.RESEARCH_EVIDENCE_VERSION
+    assert loaded.recommended_implementation_paths == ("src/service.py",)
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    payload["version"] = 1
+    payload.pop("recommended_implementation_paths")
+    payload.pop("no_touch_paths")
+    legacy = destination.with_name("legacy.json")
+    legacy.write_text(json.dumps(payload), encoding="utf-8")
+    loaded_legacy = research.read_research_evidence(legacy, project=project, bound=bound)
+    assert loaded_legacy.version == 1
+    assert loaded_legacy.recommended_implementation_paths == ()
+    assert loaded_legacy.no_touch_paths == ()
+
+
+@pytest.mark.parametrize(
+    ("recommended", "no_touch", "reason"),
+    [
+        (("src/service.py",), ("src/service.py",), "overlap"),
+        (("src/private.py",), (), "scope"),
+        (("../service.py",), (), "canonical"),
+        (("src/service.py", "src/service.py"), (), "duplicate"),
+    ],
+)
+def test_research_scope_paths_are_safe_disjoint_and_unique(context, recommended, no_touch, reason):
+    project, bound, _ = context
+    with pytest.raises(ValueError, match=reason):
+        build(
+            project,
+            bound,
+            recommended_implementation_paths=recommended,
+            no_touch_paths=no_touch,
+        )
+
+
+def test_enforced_report_requires_explicit_nonempty_scope(context):
+    project, bound, _ = context
+    legacy = {
+        "baseline_sha": bound.baseline_sha,
+        "contract_digest": bound.digest,
+        "inspected_paths": ["src/service.py"],
+        "findings": [],
+        "unresolved_scope_gaps": [],
+        "provenance": ["local inspection"],
+    }
+    with pytest.raises(research.ResearchBlocked) as missing:
+        research.parse_research_report(json.dumps(legacy), project, bound, require_scope=True)
+    assert missing.value.reason == "research_scope_missing"
+
+    current = {
+        **legacy,
+        "recommended_implementation_paths": ["src/service.py"],
+        "no_touch_paths": [],
+    }
+    accepted = research.parse_research_report(json.dumps(current), project, bound, require_scope=True)
+    assert accepted.recommended_implementation_paths == ("src/service.py",)

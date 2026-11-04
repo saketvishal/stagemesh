@@ -31,6 +31,9 @@ digest = re.search(r"contract_digest=([0-9a-f]+)", prompt).group(1)
 report = {"baseline_sha": sha, "contract_digest": digest, "inspected_paths": ["src/service.py"],
           "findings": [{"path": "src/service.py", "summary": "entry point"}],
           "unresolved_scope_gaps": [], "provenance": ["test researcher"]}
+if "recommended_implementation_paths" in prompt:
+    report["recommended_implementation_paths"] = ["src/service.py"]
+    report["no_touch_paths"] = []
 if mode == "gap":
     report["unresolved_scope_gaps"] = ["needs src/other.py"]
 elif mode == "stale":
@@ -142,6 +145,27 @@ def test_accepted_research_feeds_bounded_findings_and_audits(rig) -> None:
     assert "research: accepted by researcher; findings=1" in format_doctor(report)
 
 
+def test_enforced_research_records_narrow_scope_and_doctor_counts(rig) -> None:
+    project, bound, store, adapter = rig
+    scoped = adapter("ok")
+    scoped = RuntimeCommandAdapter(
+        scoped.name,
+        scoped.command,
+        research=ResearchRole(scoped.research.name, scoped.research.command, enforce_scope=True),
+        timeout_seconds=scoped.timeout_seconds,
+    )
+
+    text = scoped._run_research(store, "t1", project, bound)
+
+    assert "Research-narrowed implementation paths: src/service.py" in text
+    accepted = events(store)[0]
+    assert accepted["scope_enforced"] is True
+    assert accepted["recommended_path_count"] == 1
+    report = task_doctor(store, project, "t1")
+    assert report["research"]["recommended_path_count"] == 1
+    assert report["research"]["no_touch_path_count"] == 0
+
+
 def test_task_doctor_explains_why_research_was_not_required(rig) -> None:
     project, _bound, store, _adapter = rig
 
@@ -205,6 +229,24 @@ def test_research_is_opt_in_in_config(tmp_path: Path) -> None:
     )
     adapters = adapters_from_config(load_config(tmp_path))
     assert all(a.research is not None and a.research.command == ("claude", "-p", "--read-only") for a in adapters)
+    config_path.write_text(
+        json.dumps({
+            "providers": {"claude": "claude -p"},
+            "research": {"provider": "claude", "command": "claude -p --read-only", "enforce_scope": True},
+        }),
+        encoding="utf-8",
+    )
+    adapters = adapters_from_config(load_config(tmp_path))
+    assert all(a.research is not None and a.research.enforce_scope for a in adapters)
+    config_path.write_text(
+        json.dumps({
+            "providers": {"claude": "claude -p"},
+            "research": {"provider": "claude", "command": "claude -p --read-only", "enforce_scope": "yes"},
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError, match="enforce_scope"):
+        load_config(tmp_path)
     config_path.write_text(json.dumps({"research": {"provider": "nobody", "command": "x"}}), encoding="utf-8")
     with pytest.raises(ConfigValidationError):
         load_config(tmp_path)

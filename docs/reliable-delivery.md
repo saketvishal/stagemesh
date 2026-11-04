@@ -220,6 +220,15 @@ normal and adverse review receive the same bounded findings as explicitly adviso
 stale, unresolved, malformed and oversized research instead of copying it into the review prompt, and records only a digest
 of the delivered context in review evidence. Research never widens the contract or substitutes for reviewer inspection.
 
+Projects may opt into candidate-path enforcement with `research.enforce_scope: true`. The researcher must then return
+exact, in-contract `recommended_implementation_paths` plus disjoint `no_touch_paths`. StageMesh validates those paths as
+untrusted data, binds the report to the frozen baseline and contract, and compares the exact candidate diff before validation.
+An absent/stale report, a changed path outside the recommendation, or any no-touch change blocks admission with an audited
+reason. The default remains off so existing research configurations and projects without a research role keep their current
+behavior. Version-1 evidence stays readable but cannot satisfy the opt-in scope gate. Normal and adverse reviewers receive
+the same bounded scope data and record only its delivered-context digest; task-doctor exposes counts and gate status, not
+research contents.
+
 Both roles must execute under distinct providers and configured command identities, independently of the implementer.
 Selection uses only the existing authorized provider pool, excludes actual fallback actors and their command aliases,
 and holds when another qualified reviewer is unavailable. This does not register or authorize another provider.

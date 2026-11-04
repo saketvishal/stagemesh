@@ -257,12 +257,13 @@ class ResearchConfig:
 
     provider: str
     command: str
+    enforce_scope: bool = False
 
 
 def _research_config(data: dict[str, object], known_providers: set[str]) -> ResearchConfig | None:
     if not data:
         return None
-    unknown = set(data) - {"provider", "command"}
+    unknown = set(data) - {"provider", "command", "enforce_scope"}
     if unknown:
         raise ConfigValidationError(f"research has unsupported keys: {', '.join(sorted(unknown))}")
     provider, command = _string(data.get("provider")), _string(data.get("command"))
@@ -270,7 +271,10 @@ def _research_config(data: dict[str, object], known_providers: set[str]) -> Rese
         raise ConfigValidationError("research requires a provider and a read-only command")
     if provider not in known_providers:
         raise ConfigValidationError(f"research.provider references unknown provider: {provider}")
-    return ResearchConfig(provider, command)
+    enforce_scope = data.get("enforce_scope", False)
+    if not isinstance(enforce_scope, bool):
+        raise ConfigValidationError("research.enforce_scope must be a boolean")
+    return ResearchConfig(provider, command, enforce_scope)
 
 
 @dataclass(frozen=True)
