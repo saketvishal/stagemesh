@@ -377,13 +377,42 @@ history is counted in `unavailable_tasks`, never reconstructed. `considered_task
 is bounded to 200 after exact filters; `truncated=true` requires a narrower query.
 The report is read-only and returns no titles, audit payloads or provider output.
 
+## Operator status snapshot
+
+`GET /api/v1/operator` uses its independent `stagemesh.operator/1` contract.
+It takes no query parameters, requires the same loopback host and Bearer token,
+and opens the project store in SQLite read-only/query-only mode for one request.
+The response is a bounded observation, not a command surface or proof that a
+provider, process, approval, or external service is currently available.
+
+The response contains an `observed_at` timestamp, `ok` or `degraded` summary,
+fixed scalar `metrics`, `bounded=true`, `detail_limit=100`, and these explicit
+section arrays: `attention`, `pending_decisions`, `active_executions`, `workers`,
+`recent_failures`, `efficiency`, and `provider_selections`. Each array uses a
+fixed field allowlist. Active executions omit PIDs and executable paths. Worker
+rows omit process identity and executable paths. Provider-selection rows include
+only bounded provider names, recorded order, eligibility, and redacted reasons.
+Failure and pending-decision reasons are credential-redacted and have URLs and
+filesystem paths replaced before serialization. Raw audit/evidence payloads,
+provider output, commands, environment values, arbitrary URLs, and external
+evidence URLs are never serialized.
+
+`recent_failures.scope` distinguishes a still-current failure from history.
+The efficiency section is explicitly a bounded sample; provider usage is shown
+only when providers recorded it, and billing cost remains `UNKNOWN`. Pending
+approval coverage always retains an `UNKNOWN` row because absence from the
+bounded journal never grants permission. The shipped dashboard exposes Activity
+and Status views, keeps task links as an explicit retained-history drill-down,
+and performs no writes or operator actions.
+
 ## Known gaps against #134
 
 V4 adds durable task block/reopen/DONE and candidate-bound rework occurrences from
 this release forward. Successful durable claims add `OPEN -> CLAIMED`, while explicit
 release, confirmed-stale recovery and safe unknown-execution fencing add
 `CLAIMED -> OPEN`; rejected/duplicate claims and unchanged releases add nothing.
-The shipped loopback dashboard now requests V5 and exposes project, time-basis,
+The shipped loopback dashboard now requests V5 plus the independent read-only
+operator snapshot and exposes project, time-basis,
 source/task status and source/task/retry/evidence history filters. A task drill-down
 opts into every typed retained history while labelling retention/truncation honestly.
 The dashboard renders the recorded period route as an opened/completed series and

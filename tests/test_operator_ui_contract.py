@@ -82,6 +82,6 @@ def test_documents_strict_timestamp_and_query_decoding_rules():
 def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
     workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     windows, _, linux = workflow.partition("\n  linux:")
-    for module in ("test_operator_ui_contract.py", "test_activity.py", "test_api_server.py"):
+    for module in ("test_operator_ui_contract.py", "test_operator_api.py", "test_activity.py", "test_api_server.py"):
         assert module in windows, f"windows job omits {module}"
         assert module in linux, f"linux job omits {module}"

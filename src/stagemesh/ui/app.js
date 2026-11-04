@@ -1,5 +1,5 @@
 "use strict";
-// Read-only client for /api/v5 (docs/operator-ui-contract.md). The token lives in memory only.
+// Read-only client for activity V5 and operator V1 (docs/operator-ui-contract.md). The token lives in memory only.
 (() => {
   const params = new URLSearchParams(location.hash.slice(1));
   const token = params.get("token") || "";
@@ -12,7 +12,7 @@
   ];
   const POLL_MS = 10000;
   const MAX_PAGES = 10;
-  let rows = new Map(), intervalRows = new Map();
+  let rows = new Map(), intervalRows = new Map(), statusSnapshot = null;
   let nextOffset = null, periodNextOffset = null;
   let sort = { key: "at", dir: -1 };
   let lastGood = null, timer = null, generation = 0;
@@ -134,7 +134,9 @@
     if (!quiet) setMessage("Loading...");
     const activityTarget = wantedPages, periodTarget = periodWantedPages;
     try {
-      const [activity, periods] = await Promise.all([fetchActivity(activityTarget, mine), fetchPeriods(periodTarget, mine)]);
+      const [activity, periods, status] = await Promise.all([
+        fetchActivity(activityTarget, mine), fetchPeriods(periodTarget, mine), api("/api/v1/operator"),
+      ]);
       if (mine !== generation || activity === null || periods === null) return;
       rows = activity.fresh;
       nextOffset = activity.page.next_offset;
@@ -144,6 +146,7 @@
       periodNextOffset = periods.report ? periods.report.next_offset : null;
       periodLoadedPages = periods.fetched || 1;
       periodWantedPages = periodLoadedPages;
+      statusSnapshot = status;
       lastGood = new Date();
       render(activity.page, periods);
     } catch (error) {
@@ -151,13 +154,14 @@
       wantedPages = loadedPages;
       periodWantedPages = periodLoadedPages;
       const stale = lastGood ? " Showing data from " + lastGood.toLocaleTimeString() + " (stale)." : "";
-      setMessage("Could not load activity or periods: " + error.message + "." + stale, error.status === 400 ? "error" : "warn");
+      setMessage("Could not load activity, periods, or status: " + error.message + "." + stale, error.status === 400 ? "error" : "warn");
       if ([400, 401, 403].includes(error.status)) {
         $("auto").checked = false;
         schedule();
       }
       if (error.status === 401 || error.status === 403) {
-        rows = new Map(); intervalRows = new Map(); renderRows(); renderIntervals();
+        rows = new Map(); intervalRows = new Map(); statusSnapshot = null;
+        renderRows(); renderIntervals(); renderStatus();
       }
     } finally {
       if (mine === generation) inflight = false;
@@ -206,6 +210,7 @@
     for (const id of ["source_history", "task_history", "retry_history", "evidence_history"]) $(id).checked = true;
     $("drill-task").textContent = taskId;
     $("drill").hidden = false;
+    setView("activity");
     reload();
   }
 
@@ -316,6 +321,86 @@
     ].join(" | ");
   }
 
+  function taskCell(row, taskId) {
+    const target = cell(row, "");
+    if (!taskId) { target.textContent = "-"; return target; }
+    const button = document.createElement("button");
+    button.type = "button"; button.textContent = taskId; button.title = "Open recorded task history";
+    button.addEventListener("click", () => enterDrill(taskId));
+    target.replaceChildren(button);
+    return target;
+  }
+
+  function renderStatus() {
+    const snapshot = statusSnapshot;
+    for (const id of ["operator-metrics", "attention-rows", "pending-rows", "active-rows", "failure-rows", "selection-rows"]) {
+      $(id).replaceChildren();
+    }
+    if (!snapshot) {
+      $("operator-summary").textContent = "Status unavailable.";
+      $("efficiency-summary").textContent = "";
+      return;
+    }
+    $("operator-summary").textContent = [
+      snapshot.summary === "ok" ? "No recorded attention conditions." : "Recorded conditions need attention.",
+      "Observed " + new Date(snapshot.observed_at).toLocaleString() + ".",
+      "Bounded to " + snapshot.detail_limit + " detail rows per section.",
+    ].join(" ");
+    const metricLabels = {
+      task_count: "Tasks", open_task_count: "Open", eligible_open_task_count: "Eligible open",
+      blocked_task_count: "Blocked", running_count: "Running", done_count: "Done",
+      current_failed_execution_count: "Current failures", unknown_execution_count: "Unknown executions",
+      worker_count: "Workers", recorded_pending_decision_count: "Recorded pending decisions",
+    };
+    for (const [key, label] of Object.entries(metricLabels)) {
+      const dt = document.createElement("dt"); dt.textContent = label;
+      const dd = document.createElement("dd"); dd.textContent = snapshot.metrics[key] ?? "-";
+      $("operator-metrics").append(dt, dd);
+    }
+    for (const item of snapshot.sections.attention) {
+      const row = $("attention-rows").insertRow(); cell(row, item.status); cell(row, item.kind); cell(row, item.count);
+    }
+    for (const item of snapshot.sections.pending_decisions) {
+      const row = $("pending-rows").insertRow(); taskCell(row, item.task_id);
+      cell(row, item.kind); cell(row, item.status); cell(row, item.detail);
+    }
+    for (const item of snapshot.sections.active_executions) {
+      const row = $("active-rows").insertRow(); taskCell(row, item.task_id);
+      cell(row, item.stage); cell(row, item.provider);
+      cell(row, [item.process_state, item.parent_process_state, item.cleanup_state, item.stale && "stale"].filter(Boolean).join(" / "));
+    }
+    for (const item of snapshot.sections.workers) {
+      const row = $("active-rows").insertRow(); cell(row, item.worker_id || "-");
+      cell(row, item.capabilities.join(", ")); cell(row, item.provider); cell(row, "worker lease " + item.lease_expires_at);
+    }
+    for (const item of snapshot.sections.recent_failures) {
+      const row = $("failure-rows").insertRow(); taskCell(row, item.task_id);
+      cell(row, item.stage); cell(row, item.provider); cell(row, item.scope); cell(row, item.reason);
+    }
+    const efficiency = snapshot.sections.efficiency[0] || {};
+    const usage = efficiency.usage || {};
+    $("efficiency-summary").textContent = [
+      efficiency.scope, "provider attempts " + (efficiency.provider_attempts ?? "unknown"),
+      "failed " + (efficiency.failed_provider_attempts ?? "unknown"),
+      "checks " + (efficiency.checks_executed ?? "unknown") + " run / " + (efficiency.checks_reused ?? "unknown") + " reused",
+      usage.calls_reporting ? "provider-reported input " + usage.input + ", output " + usage.output : "provider usage unknown",
+      "billing cost " + efficiency.billing_cost,
+    ].join(" | ");
+    for (const item of snapshot.sections.provider_selections) {
+      const row = $("selection-rows").insertRow(); taskCell(row, item.task_id);
+      cell(row, item.stage); cell(row, item.policy); cell(row, item.order.join(" -> "));
+      cell(row, item.verdicts.map((v) => v.provider + ": " + (v.eligible === true ? "eligible" : v.eligible === false ? "ineligible" : "unknown")).join(", "));
+    }
+  }
+
+  function setView(name) {
+    const status = name === "status";
+    $("activity-view").hidden = status;
+    $("status-view").hidden = !status;
+    $("show-activity").setAttribute("aria-pressed", String(!status));
+    $("show-status").setAttribute("aria-pressed", String(status));
+  }
+
   function render(page, periods) {
     renderRows();
     const moreHadFocus = document.activeElement === $("more");
@@ -327,6 +412,7 @@
       .map((key) => key + " " + (taskCounts[key] || 0)).join(" | ");
     $("freshness").textContent = "updated " + lastGood.toLocaleTimeString();
     renderPeriods(periods);
+    renderStatus();
     if (page.truncated) setMessage("Older records were excluded by the retention cap; narrow the time range for a complete view.", "warn");
     else if (rows.size === 0) setMessage("No activity matches these filters.");
     else setMessage("");
@@ -375,6 +461,8 @@
   $("refresh").addEventListener("click", refresh);
   $("more").addEventListener("click", loadMore);
   $("period-more").addEventListener("click", loadMorePeriods);
+  $("show-activity").addEventListener("click", () => setView("activity"));
+  $("show-status").addEventListener("click", () => setView("status"));
   $("auto").addEventListener("change", schedule);
   document.addEventListener("keydown", (event) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);

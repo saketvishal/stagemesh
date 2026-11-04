@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .block_kinds import BlockKind
 from .delivery_state import DELIVERY_UNBLOCKED, EXTERNALLY_BLOCKED
@@ -31,9 +31,16 @@ class OperatorReport:
     summary: str
     lines: tuple[str, ...]
     sections: tuple[OperatorSection, ...]
+    metrics: Mapping[str, object] = field(default_factory=dict)
 
 
-def operator_report(store: Store) -> OperatorReport:
+def operator_report(store: Store, *, detail_limit: int | None = None) -> OperatorReport:
+    if detail_limit is not None and (
+        not isinstance(detail_limit, int)
+        or isinstance(detail_limit, bool)
+        or not 1 <= detail_limit <= 200
+    ):
+        raise ValueError("operator detail_limit must be an integer from 1 to 200")
     h = health(store)
     tasks = store.tasks()
     workers = store.workers()
@@ -46,6 +53,17 @@ def operator_report(store: Store) -> OperatorReport:
     efficiency = _recent_efficiency_row(store)
     pending_decisions = _pending_decision_rows(store)
     pending_count = sum(row["status"] == "RECORDED" for row in pending_decisions)
+    if detail_limit is not None:
+        active_executions = active_executions[:detail_limit]
+        recent_failures = recent_failures[:detail_limit]
+        recorded = [row for row in pending_decisions if row["status"] == "RECORDED"]
+        unknown = [row for row in pending_decisions if row["status"] == "UNKNOWN"]
+        pending_decisions = [*recorded[:detail_limit], *unknown[:1]]
+        provider_selections = provider_selections[:detail_limit]
+    detail_tasks = tasks if detail_limit is None else tasks[:detail_limit]
+    detail_workers = workers if detail_limit is None else workers[:detail_limit]
+    detail_retries = retries if detail_limit is None else retries[:detail_limit]
+    detail_evidence = external_evidence if detail_limit is None else external_evidence[:detail_limit]
     stage_counts = Counter(str(task["stage"]) for task in tasks)
     status_counts = Counter(str(task["status"]) for task in tasks)
     attention_rows = []
@@ -93,15 +111,15 @@ def operator_report(store: Store) -> OperatorReport:
         )
     for pending in pending_decisions:
         lines.append(f"pending_decision task={pending['task_id']} kind={pending['kind']} status={pending['status']} detail={pending['detail']}")
-    for task in tasks:
+    for task in detail_tasks:
         lines.append(f"task {task['id']} stage={task['stage']} status={task['status']} title={task['title']}")
-    for worker in workers:
+    for worker in detail_workers:
         lines.append(f"worker {worker['id']} provider={worker['provider']} lease_expires_at={worker['lease_expires_at']}")
     for event in events:
         lines.append(f"source_event {event['source']}:{event['source_id']} {event['direction']} {event['status']}")
-    for retry in retries:
+    for retry in detail_retries:
         lines.append(f"retry {retry['key']} attempts={retry['attempts']} reason={retry['reason']}")
-    for evidence in external_evidence:
+    for evidence in detail_evidence:
         lines.append(f"external_evidence {evidence.kind} {evidence.status} {evidence.candidate_sha or ''}")
     for selection in provider_selections:
         lines.append(
@@ -149,7 +167,7 @@ def operator_report(store: Store) -> OperatorReport:
                     "title": task["title"],
                     "source": task["source"],
                 }
-                for task in tasks
+                for task in detail_tasks
             ),
         ),
         OperatorSection(
@@ -161,7 +179,7 @@ def operator_report(store: Store) -> OperatorReport:
                     "capabilities": worker["capabilities"],
                     "lease_expires_at": worker["lease_expires_at"],
                 }
-                for worker in workers
+                for worker in detail_workers
             ),
         ),
         OperatorSection(
@@ -185,7 +203,7 @@ def operator_report(store: Store) -> OperatorReport:
                     "next_attempt_at": retry["next_attempt_at"],
                     "reason": retry["reason"],
                 }
-                for retry in retries
+                for retry in detail_retries
             ),
         ),
         OperatorSection(
@@ -197,12 +215,34 @@ def operator_report(store: Store) -> OperatorReport:
                     "candidate_sha": evidence.candidate_sha or "",
                     "url": evidence.url,
                 }
-                for evidence in external_evidence
+                for evidence in detail_evidence
             ),
         ),
         OperatorSection("Provider Selections", tuple(provider_selections)),
     )
-    return OperatorReport(summary="ok" if h.ok and not pending_count else "degraded", lines=tuple(lines), sections=sections)
+    metrics = {
+        "task_count": h.task_count,
+        "open_task_count": h.open_task_count,
+        "eligible_open_task_count": h.eligible_open_task_count,
+        "blocked_task_count": h.blocked_task_count,
+        "running_count": h.running_count,
+        "source_ready_count": h.source_ready_count,
+        "done_count": h.done_count,
+        "failed_execution_count": h.failed_execution_count,
+        "current_failed_execution_count": h.current_failed_execution_count,
+        "unknown_execution_count": h.unknown_execution_count,
+        "unresolved_validation_count": h.unresolved_validation_count,
+        "unresolved_process_tree_count": h.unresolved_process_tree_count,
+        "backlog_state": h.backlog_state,
+        "worker_count": len(workers),
+        "recorded_pending_decision_count": pending_count,
+    }
+    return OperatorReport(
+        summary="ok" if h.ok and not pending_count else "degraded",
+        lines=tuple(lines),
+        sections=sections,
+        metrics=metrics,
+    )
 
 
 def _loads(raw: str) -> dict[str, object]:

@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 
 from stagemesh.api_server import UI_ASSETS, ActivityApi, make_server
+from stagemesh.block_kinds import BlockKind, record_block
+from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.persistence import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -187,6 +189,24 @@ DRIVER = r"""
       await until(() => !$("drill").hidden, "interval task drill-down");
       out.drillVisible = !$("drill").hidden;
       out.allHistories = ["source_history", "task_history", "retry_history", "evidence_history"].every((id) => $(id).checked);
+    },
+
+    async status() {
+      await until(() => $("operator-summary").textContent.includes("Observed"), "operator snapshot");
+      $("show-status").click();
+      out.statusVisible = !$("status-view").hidden && $("activity-view").hidden;
+      out.summary = $("operator-summary").textContent;
+      out.attention = document.querySelectorAll("#attention-rows tr").length;
+      out.pending = document.querySelectorAll("#pending-rows tr").length;
+      out.active = document.querySelectorAll("#active-rows tr").length;
+      out.failures = document.querySelectorAll("#failure-rows tr").length;
+      out.selections = document.querySelectorAll("#selection-rows tr").length;
+      out.efficiency = $("efficiency-summary").textContent;
+      const task = document.querySelector("#failure-rows button");
+      task.click();
+      await until(() => !$("drill").hidden, "status task drill-down");
+      out.drillVisible = !$("drill").hidden;
+      out.activityVisible = !$("activity-view").hidden && $("status-view").hidden;
     },
 
     // Load more is accepted but its second-page response is still in flight when a refresh happens.
@@ -411,6 +431,53 @@ def period_base(tmp_path: Path):
     httpd.server_close()
 
 
+@pytest.fixture
+def status_base(tmp_path: Path):
+    db = tmp_path / "status-ui.sqlite3"
+    store = Store(db)
+    store.migrate()
+    task = store.upsert_task("Status task", source="local", source_id="status-task")
+    store.block_task(task)
+    record_block(store, task, BlockKind.HUMAN_DECISION, "choose recorded behavior")
+    running = store.start_execution(
+        task_id=task, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, actor="codex"
+    )
+    failed = store.start_execution(
+        task_id=task, claim_id=None, kind=ExecutionKind.REVIEW, actor="claude"
+    )
+    store.finish_execution(failed, ExecutionStatus.FAILED, actor="claude", result="review failed")
+    store.upsert_worker(
+        worker_id="worker-1", provider="codex", capabilities=["IMPLEMENT"], pid=None,
+        process_create_time=None, boot_id=None, executable=None, heartbeat_at=1, lease_expires_at=2,
+    )
+    store.add_audit_event(
+        "provider.selection",
+        {
+            "task_id": task, "stage": "IMPLEMENT", "policy": "weighted", "order": ["codex", "claude"],
+            "verdicts": [
+                {"provider": "codex", "eligible": True, "reason": "eligible"},
+                {"provider": "claude", "eligible": False, "reason": "not configured"},
+            ],
+        },
+    )
+    store.close()
+    assert running
+    site = tmp_path / "status-site"
+    site.mkdir()
+    for name in ("app.js", "app.css"):
+        shutil.copyfile(UI / name, site / name)
+    index = (UI / "index.html").read_text(encoding="utf-8")
+    marker = '<script src="/app.js"></script>'
+    (site / "index.html").write_text(
+        index.replace(marker, '<script src="/driver.js"></script>\n' + marker), encoding="utf-8"
+    )
+    httpd, _ = make_server(db, token=TOKEN, static_dir=site, api_class=FixtureApi)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+
+
 def run_scenario(base: str, scenario: str, tmp_path: Path) -> dict:
     browser = _find_browser()
     if browser is None:
@@ -478,6 +545,15 @@ def test_recorded_series_intervals_pagination_and_drill_down(period_base, tmp_pa
     assert result["focusAfterPeriodMore"] is True and result["stillActive"] is True
     assert "Timezone " + result["timezone"] in result["summary"] and "history unavailable 0" in result["summary"]
     assert result["drillVisible"] is True and result["allHistories"] is True
+
+
+def test_status_view_renders_bounded_operator_sections_and_links_to_history(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "status", tmp_path)
+    assert result["statusVisible"] is True and "Bounded to 100" in result["summary"]
+    assert result["attention"] >= 2 and result["pending"] == 2
+    assert result["active"] == 2 and result["failures"] == 1 and result["selections"] == 1
+    assert "billing cost UNKNOWN" in result["efficiency"]
+    assert result["drillVisible"] is True and result["activityVisible"] is True
 
 
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):
@@ -565,7 +641,7 @@ def test_installed_wheel_serves_its_own_ui_and_requires_auth(tmp_path: Path):
             except urllib.error.HTTPError as exc:
                 return exc.code, exc.read()
 
-        for asset, needle in (("/", b"StageMesh activity"), ("/app.js", b"/api/v5/activity"), ("/app.css", b"[hidden]")):
+        for asset, needle in (("/", b"StageMesh operator"), ("/app.js", b"/api/v5/activity"), ("/app.css", b"[hidden]")):
             status, body = get(asset)
             assert status == 200 and needle in body, asset
             assert body == (UI / ("index.html" if asset == "/" else asset.lstrip("/"))).read_bytes(), asset
