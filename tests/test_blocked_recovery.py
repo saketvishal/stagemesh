@@ -280,7 +280,7 @@ def test_a_retried_integration_that_rebases_the_candidate_is_not_blocked_by_the_
 
 
 def test_label_selector_scopes_automatic_recovery_to_in_label_tasks(tmp_path: Path, monkeypatch) -> None:
-    import stagemesh.auto_plan as auto_plan
+    from stagemesh import auto_plan
 
     rig = ParallelRig(tmp_path, ["A", "B"])
     for task_id in ("A", "B"):

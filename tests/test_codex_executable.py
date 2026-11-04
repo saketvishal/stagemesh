@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import stagemesh.providers as providers
+from stagemesh import providers
 from stagemesh.execution import capacity_evidence
 
 
