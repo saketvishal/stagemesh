@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -194,6 +195,16 @@ def test_activity_periods_cli_json_is_read_only(tmp_path: Path, capsys: pytest.C
     assert code == 0 and payload["active_intervals"][0]["task_id"] == task
     assert payload["series"][0]["opened_occurrences"] == 1
     assert database.read_bytes() == before
+
+
+def test_built_wheel_declares_windows_iana_timezone_data(tmp_path: Path) -> None:
+    import build_backend
+
+    name = build_backend.build_wheel(str(tmp_path))
+    with zipfile.ZipFile(tmp_path / name) as wheel:
+        metadata_name = next(item for item in wheel.namelist() if item.endswith(".dist-info/METADATA"))
+        metadata = wheel.read(metadata_name).decode("utf-8")
+    assert 'Requires-Dist: tzdata>=2025.2; platform_system == "Windows"' in metadata
 
 
 @pytest.mark.parametrize(

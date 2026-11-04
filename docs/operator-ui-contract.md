@@ -391,5 +391,8 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
    occurrences; V4 adds typed task status/rework/retry occurrences. Every version preserves earlier response shapes.
    Migration 7 adds only the durable retry-to-execution correlation table; activity queries remain read-only.
 8. **Health and version route:** `GET /api/v1/health`. Implemented (#446).
-9. **Dependencies: none.** The server is standard library; the UI is dependency-free HTML, CSS and JavaScript shipped as
-   package data (#448), so no Node toolchain is needed to build or install StageMesh.
+9. **Dependencies:** the server remains standard-library Python and the UI remains dependency-free HTML, CSS and JavaScript
+   shipped as package data (#448), so no Node toolchain is needed. Windows runtimes install the standard `tzdata` package
+   because CPython on Windows does not ship the IANA timezone database required by recorded period buckets; Unix platforms
+   use their system database. A deliberately dependency-skipping offline wheel install may return `timezone is unavailable`
+   until `tzdata` is installed in that runtime; it never substitutes UTC or invents bucket boundaries.

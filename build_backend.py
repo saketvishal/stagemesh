@@ -26,6 +26,7 @@ def _metadata() -> str:
             f"Version: {VERSION}",
             "Summary: Provider-neutral control plane for autonomous software engineering lifecycles",
             "Requires-Python: >=3.11",
+            'Requires-Dist: tzdata>=2025.2; platform_system == "Windows"',
             "Provides-Extra: dev",
             'Requires-Dist: pytest>=8.0; extra == "dev"',
             'Requires-Dist: ruff>=0.6; extra == "dev"',
