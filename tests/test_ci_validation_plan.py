@@ -18,6 +18,7 @@ from stagemesh.ci_validation_plan import (
     OPERATOR,
     OPERATOR_DEPENDENT_TESTS,
     OPERATOR_DIRECT_TESTS,
+    SMOKE,
     derive_ci_validation_plan,
 )
 
@@ -168,6 +169,7 @@ def test_cli_emits_versioned_json_and_github_outputs(tmp_path: Path, capsys) -> 
         "run_full=false",
         "run_operator=true",
         "run_docs=false",
+        "run_smoke=false",
         "required_os=windows,linux",
     ]
 
@@ -198,7 +200,7 @@ def test_missing_or_invalid_git_identity_falls_back_to_explicit_full_plan() -> N
     assert plan.reasons[1] == "diff planning error: ValueError"
 
 
-@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
 def test_authoritative_events_force_full_without_reading_a_diff(event: str) -> None:
     plan = script.plan_from_inputs(
         repo=ROOT,
@@ -207,6 +209,84 @@ def test_authoritative_events_force_full_without_reading_a_diff(event: str) -> N
     )
     assert plan.mode == FULL
     assert plan.reasons == (f"{event} event requires full regression",)
+
+
+def test_main_push_uses_bounded_smoke_for_ordinary_changes() -> None:
+    plan = script.plan_from_inputs(
+        repo=ROOT,
+        paths=("src/stagemesh/feature.py", "tests/test_feature.py"),
+        event="push",
+    )
+    assert plan.mode == SMOKE
+    assert plan.required_os == ("windows", "linux")
+    assert plan.mandatory_checks == MANDATORY_CHECKS
+    assert not plan.browser_required
+    assert not plan.windows_installer_required
+    assert not plan.runtime_coverage
+
+
+def test_main_push_derives_smoke_from_exact_git_range(tmp_path: Path) -> None:
+    git(tmp_path, "init")
+    source = tmp_path / "src" / "stagemesh" / "feature.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n", encoding="utf-8")
+    base = commit(tmp_path, "base")
+    source.write_text("after\n", encoding="utf-8")
+    head = commit(tmp_path, "ordinary change")
+
+    plan = script.plan_from_inputs(
+        repo=tmp_path,
+        base=base,
+        head=head,
+        event="push",
+    )
+
+    assert plan.mode == SMOKE
+    assert plan.changed_paths == ("src/stagemesh/feature.py",)
+
+
+def test_main_push_emits_explicit_smoke_output(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "github-output"
+    assert script.main(
+        [
+            "--event",
+            "push",
+            "--path",
+            "src/stagemesh/feature.py",
+            "--github-output",
+            str(output),
+        ]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == SMOKE
+    assert "run_smoke=true" in output.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/ci.yml",
+        "pyproject.toml",
+        "src/stagemesh/security.py",
+        "schema/model.sql",
+    ],
+)
+def test_main_push_keeps_full_regression_for_ci_sensitive_boundaries(path: str) -> None:
+    plan = script.plan_from_inputs(repo=ROOT, paths=(path,), event="push")
+    assert plan.mode == FULL
+    assert "CI-sensitive boundary changed" in plan.reasons[0]
+
+
+def test_main_push_with_unavailable_range_fails_safe_to_full() -> None:
+    plan = script.plan_from_inputs(
+        repo=ROOT,
+        base="not-a-sha",
+        head="also-not-a-sha",
+        event="push",
+    )
+    assert plan.mode == FULL
+    assert "post-merge base/head diff is unavailable" in plan.reasons[0]
 
 
 def test_candidate_range_policy_runs_static_and_attribution_checks(monkeypatch) -> None:

@@ -124,7 +124,7 @@ decision.
 
 ## Hosted-CI decision boundary
 
-The separate `stagemesh.ci-validation/1` planner consumes exact changed paths. It
+The separate `stagemesh.ci-validation/2` planner consumes exact changed paths. It
 recognizes only the seven operator roots above, the exact 15 operator test files
 in the table, and supporting documentation. Ordering, case and Windows separators
 normalize deterministically. An empty, mixed or unmapped scope selects `full`; so
@@ -135,17 +135,21 @@ count, extension alone or arbitrary directory membership.
 
 An `operator` plan requires both protected Windows and Linux jobs, the real-browser
 test and Windows installer/timezone acceptance. A `docs` plan records portable
-policy checks and explicitly sets `runtime_coverage=false`. Every mode retains the
-static range/attribution policy, focused-policy tests and executable/declarative
-invariant tests. The workflow prints the versioned JSON plan. Its existing complete
-regression groups run for `full`; the fixed operator command runs only for
-`operator` or `full`. The protected job names remain `windows` and `linux`.
+policy checks and explicitly sets `runtime_coverage=false`. A post-merge `smoke`
+plan retains both operating systems, exact-range policy, bootstrap/import,
+focused-policy tests, and executable/declarative invariants without repeating the
+complete regression. Every mode retains the mandatory checks. The workflow prints
+the versioned JSON plan. Its existing complete regression groups run for `full`;
+the fixed operator command runs only for `operator` or `full`. The protected job
+names remain `windows` and `linux`.
 
 Pull requests and merge groups use their explicit base/head identities with a
 full-history checkout. A missing or invalid diff selects `full`; the mandatory
 range policy separately fails closed when a candidate event lacks valid identity.
-Pushes to `main`, scheduled runs and manual runs always select `full`, so focused
-PR evidence never replaces the authoritative recurring regression.
+An ordinary push to `main` selects `smoke`; missing range identity or changes to
+workflow, selection, dependency, schema, security, packaging, or other protected
+boundaries select `full`. Scheduled and manual runs always select `full`, so
+post-merge smoke evidence never replaces the authoritative recurring regression.
 
 ## Measured boundary and follow-up
 

@@ -32,7 +32,7 @@ jobs:
           STAGEMESH_CI_EVENT: ${{ github.event_name }}
           STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: python scripts/ci_validation_plan.py
       - name: Attribution and static range policy
         env:
@@ -114,7 +114,7 @@ jobs:
           STAGEMESH_CI_EVENT: ${{ github.event_name }}
           STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: python scripts/ci_validation_plan.py
       - name: Attribution and static range policy
         env:

@@ -16,12 +16,14 @@ from stagemesh.ci_validation_plan import (
     DOCS,
     FULL,
     OPERATOR,
+    SMOKE,
     derive_ci_validation_plan,
     full_ci_validation_plan,
+    post_merge_ci_validation_plan,
 )
 
 SHA = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
-FULL_EVENTS = frozenset({"push", "schedule", "workflow_dispatch"})
+FULL_EVENTS = frozenset({"schedule", "workflow_dispatch"})
 DIFF_EVENTS = frozenset({"pull_request", "merge_group"})
 
 
@@ -60,6 +62,16 @@ def plan_from_inputs(
     event = event.strip().casefold()
     if force_full or event in FULL_EVENTS:
         return full_ci_validation_plan(paths, f"{event or 'explicit'} event requires full regression")
+    if event == "push":
+        try:
+            push_paths = paths or changed_paths(repo, base, head)
+            return post_merge_ci_validation_plan(push_paths)
+        except (OSError, UnicodeError, ValueError, subprocess.CalledProcessError) as exc:
+            return full_ci_validation_plan(
+                (),
+                "exact post-merge base/head diff is unavailable; full regression selected",
+                f"diff planning error: {type(exc).__name__}",
+            )
     if paths:
         return derive_ci_validation_plan(paths)
     if event and event not in DIFF_EVENTS:
@@ -84,6 +96,7 @@ def _write_github_outputs(path: Path, mode: str, required_os: tuple[str, ...]) -
         "run_full": str(mode == FULL).lower(),
         "run_operator": str(mode == OPERATOR).lower(),
         "run_docs": str(mode == DOCS).lower(),
+        "run_smoke": str(mode == SMOKE).lower(),
         "required_os": ",".join(required_os),
     }
     with path.open("a", encoding="utf-8", newline="\n") as output:
