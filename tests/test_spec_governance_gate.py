@@ -55,8 +55,19 @@ def valid_manifest(**overrides) -> dict:
                 "owner_id": "openspec/specs/auth/spec.md",
                 "path": "openspec/specs/auth/spec.md",
                 "change": "modified",
+                "owner_role": "product-owner",
+                "decision_refs": ["docs/decisions/login.md#approved"],
             }
         ],
+        "classification_counts": {
+            "added": 0,
+            "modified": 1,
+            "removed": 0,
+            "superseded": 0,
+            "unchanged": 0,
+        },
+        "unchanged_requirement_ids": [],
+        "unchanged_requirements_omitted": 0,
         "unmapped_files": [],
         "unresolved_references": [],
         "behavioral_evidence": [
@@ -71,6 +82,14 @@ def valid_manifest(**overrides) -> dict:
         "validation_status": "passed",
     }
     manifest.update(overrides)
+    if "classification_counts" not in overrides:
+        manifest["classification_counts"] = {
+            label: sum(
+                1 for item in manifest["requirements"]
+                if isinstance(item, dict) and item.get("change") == label
+            )
+            for label in ("added", "modified", "removed", "superseded")
+        } | {"unchanged": len(manifest.get("unchanged_requirement_ids", []))}
     if "behavioral_evidence" not in overrides:
         manifest["behavioral_evidence"][0]["candidate_revision"] = manifest["candidate_revision"]
     return manifest
@@ -185,6 +204,73 @@ def test_blocks_missing_owners_and_ids() -> None:
     v3 = validate_prerequisite_manifest(m3)
     assert not v3.ok
     assert any("missing owner" in err.lower() for err in v3.errors)
+
+
+def test_requirement_changes_require_bounded_owner_and_decision_provenance() -> None:
+    missing = valid_manifest()
+    del missing["requirements"][0]["owner_role"]
+    del missing["requirements"][0]["decision_refs"]
+    verdict = validate_prerequisite_manifest(missing)
+    assert not verdict.ok
+    assert any("owner_role" in item for item in verdict.errors)
+    assert any("decision reference" in item for item in verdict.errors)
+
+    for reference in (
+        "../outside.md#decision",
+        "http://example.invalid/decision",
+        "https://user:password@example.invalid/decision",
+        "docs/decision.md#bad anchor",
+    ):
+        malformed = valid_manifest()
+        malformed["requirements"][0]["decision_refs"] = [reference]
+        rejected = validate_prerequisite_manifest(malformed)
+        assert not rejected.ok, reference
+        assert any("decision reference" in item for item in rejected.errors)
+
+    approved = valid_manifest()
+    approved["requirements"][0]["decision_refs"] = [
+        "docs/decisions/login.md#approved",
+        "https://example.invalid/decisions/login",
+    ]
+    assert validate_prerequisite_manifest(approved).ok
+
+
+def test_supersession_requires_an_explicit_distinct_active_replacement() -> None:
+    old = "AUTH-OLD"
+    replacement = "openspec/specs/auth/spec.md#requirement-login"
+    superseded = valid_manifest(
+        requirements=[
+            {
+                "requirement_id": old,
+                "owner_id": "openspec/specs/auth/spec.md",
+                "path": "openspec/specs/auth/spec.md",
+                "change": "superseded",
+                "superseded_by": replacement,
+                "owner_role": "product-owner",
+                "decision_refs": ["docs/decisions/login.md#approved"],
+            }
+        ]
+    )
+    assert validate_prerequisite_manifest(superseded).ok
+
+    missing = valid_manifest(requirements=[{**superseded["requirements"][0], "superseded_by": "MISSING"}])
+    assert not validate_prerequisite_manifest(missing).ok
+    circular = valid_manifest(
+        requirements=[{**superseded["requirements"][0], "requirement_id": replacement, "superseded_by": replacement}]
+    )
+    rejected = validate_prerequisite_manifest(circular)
+    assert not rejected.ok
+    assert any("cannot supersede itself" in item for item in rejected.errors)
+
+
+def test_complete_classification_shape_fails_closed() -> None:
+    missing = valid_manifest(classification_counts={"modified": 1})
+    assert not validate_prerequisite_manifest(missing).ok
+    malformed = valid_manifest(unchanged_requirement_ids="REQ", unchanged_requirements_omitted=-1)
+    verdict = validate_prerequisite_manifest(malformed)
+    assert not verdict.ok
+    assert any("unchanged_requirement_ids" in item for item in verdict.errors)
+    assert any("unchanged_requirements_omitted" in item for item in verdict.errors)
 
 
 # --- 3. Block contradictory declared active statuses ---

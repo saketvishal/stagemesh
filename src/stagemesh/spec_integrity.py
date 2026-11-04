@@ -398,6 +398,22 @@ def _bounded(value: object, limit: int = 300) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def _decision_reference(value: object) -> str:
+    reference = nonempty(value, "decision reference")
+    if len(reference) > 500 or any(char in reference for char in ("\x00", "\r", "\n")):
+        raise SpecAdapterError("decision reference must be bounded and single-line")
+    parsed = urlsplit(reference)
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise SpecAdapterError("decision URL must be HTTPS without embedded credentials")
+        return reference
+    path, separator, fragment = reference.partition("#")
+    local_path(path)
+    if separator and (not fragment or len(fragment) > 200 or any(char.isspace() for char in fragment)):
+        raise SpecAdapterError("decision anchor must be non-empty, bounded and contain no whitespace")
+    return reference
+
+
 def _duplicate_requirement_findings(snapshot: SpecSnapshot) -> list[str]:
     by_text: dict[str, list[str]] = {}
     for owner in snapshot.owners:
@@ -693,6 +709,24 @@ def validate_prerequisite_manifest(
             ctype = change.get("change")
             if ctype in {"added", "modified", "removed", "superseded"}:
                 requirement_changed = True
+                owner_role = change.get("owner_role")
+                if not isinstance(owner_role, str) or not owner_role.strip() or len(owner_role) > 100:
+                    errors.append(
+                        f"affected requirement '{rid}' requires a bounded non-empty owner_role"
+                    )
+                decision_refs = change.get("decision_refs")
+                if not isinstance(decision_refs, list) or not decision_refs:
+                    errors.append(
+                        f"affected requirement '{rid}' requires at least one approved decision reference"
+                    )
+                else:
+                    for ref_index, reference in enumerate(decision_refs):
+                        try:
+                            _decision_reference(reference)
+                        except SpecAdapterError as exc:
+                            errors.append(
+                                f"affected requirement '{rid}' decision reference #{ref_index} is invalid: {exc}"
+                            )
             if not isinstance(rid, str) or not rid.strip():
                 errors.append(f"affected requirement #{cidx} has missing or empty requirement_id")
                 continue
@@ -701,8 +735,31 @@ def validate_prerequisite_manifest(
             elif oid not in known_owner_ids:
                 errors.append(f"affected requirement '{rid}' references missing owner '{oid}'")
             else:
-                if ctype != "removed" and rid not in owner_requirements.get(oid, set()):
+                if ctype not in {"removed", "superseded"} and rid not in owner_requirements.get(oid, set()):
                     errors.append(f"affected requirement '{rid}' not found in declared requirements for owner '{oid}'")
+            if ctype == "superseded":
+                replacement = change.get("superseded_by")
+                if not isinstance(replacement, str) or not replacement.strip():
+                    errors.append(f"superseded requirement '{rid}' requires superseded_by")
+                elif replacement == rid:
+                    errors.append(f"superseded requirement '{rid}' cannot supersede itself")
+                elif replacement not in active_ids:
+                    errors.append(
+                        f"superseded requirement '{rid}' replacement '{replacement}' is not active"
+                    )
+
+    classification = manifest.get("classification_counts")
+    expected_classes = {"added", "modified", "removed", "superseded", "unchanged"}
+    if not isinstance(classification, dict) or set(classification) != expected_classes:
+        errors.append("manifest classification_counts must contain added, modified, removed, superseded and unchanged")
+    elif any(type(value) is not int or value < 0 for value in classification.values()):
+        errors.append("manifest classification_counts values must be non-negative integers")
+    unchanged_ids = manifest.get("unchanged_requirement_ids")
+    if not isinstance(unchanged_ids, list) or not all(isinstance(item, str) and item for item in unchanged_ids):
+        errors.append("manifest unchanged_requirement_ids must be a list of non-empty ids")
+    omitted_unchanged = manifest.get("unchanged_requirements_omitted")
+    if type(omitted_unchanged) is not int or omitted_unchanged < 0:
+        errors.append("manifest unchanged_requirements_omitted must be a non-negative integer")
 
     if requirement_changed and expected_candidate_revision is not None:
         behavioral = manifest.get("behavioral_evidence")
@@ -809,6 +866,9 @@ def validate_manifest_discovery(
         "changed_files",
         "owners",
         "requirements",
+        "classification_counts",
+        "unchanged_requirement_ids",
+        "unchanged_requirements_omitted",
         "unmapped_files",
         "unresolved_references",
     ):
@@ -999,6 +1059,8 @@ def structural_impact_manifest(
     sync_status: str | None = None,
     validation_status: str | None = None,
     behavioral_evidence: list[dict[str, object]] | None = None,
+    change_provenance: dict[str, dict[str, object]] | None = None,
+    supersessions: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Return JSON-ready structural evidence for explicitly supplied changed paths.
 
@@ -1018,7 +1080,10 @@ def structural_impact_manifest(
     touched = {o.id for o in all_owners if o.path in paths or contract_paths.intersection(paths)}
     old = {r.id: (o, r) for o in before.owners for r in o.requirements}
     new = {r.id: (o, r) for o in after.owners for r in o.requirements}
-    changes = []
+    changes: list[dict[str, object]] = []
+    unchanged: list[str] = []
+    provenance = change_provenance or {}
+    explicit_supersessions = supersessions or {}
     for identifier in sorted(old.keys() | new.keys()):
         prior, current = old.get(identifier), new.get(identifier)
         if not any(pair and pair[0].id in touched for pair in (prior, current)):
@@ -1031,10 +1096,37 @@ def structural_impact_manifest(
                 current[1], current[0].id, current[0].path, current[0].status):
             change = "modified"
         else:
+            if current is not None and current[0].id in touched:
+                unchanged.append(identifier)
             continue
         owner, _ = current or prior
-        changes.append({"requirement_id": identifier, "owner_id": owner.id,
-                        "path": owner.path, "change": change})
+        record: dict[str, object] = {
+            "requirement_id": identifier,
+            "owner_id": owner.id,
+            "path": owner.path,
+            "change": change,
+        }
+        if change == "removed" and identifier in explicit_supersessions:
+            record["change"] = "superseded"
+            record["superseded_by"] = explicit_supersessions[identifier]
+        declared = provenance.get(identifier)
+        if declared is not None:
+            if not isinstance(declared, dict):
+                raise SpecAdapterError(f"change provenance for {identifier} must be an object")
+            record.update(declared)
+        changes.append(record)
+    removed_ids = {str(item["requirement_id"]) for item in changes if item["change"] in {"removed", "superseded"}}
+    unknown_supersessions = sorted(set(explicit_supersessions) - removed_ids)
+    if unknown_supersessions:
+        raise SpecAdapterError(
+            "supersession sources must be removed requirements: " + ", ".join(unknown_supersessions)
+        )
+    active_after = {requirement.id for owner in after.owners if owner.canonical for requirement in owner.requirements}
+    for source, target in explicit_supersessions.items():
+        nonempty(source, "supersession source")
+        nonempty(target, "supersession target")
+        if source == target or target not in active_after:
+            raise SpecAdapterError(f"invalid supersession {source!r} -> {target!r}")
     active_ids = {record.id for owner in after.owners if owner.canonical
                   for record in (owner, *owner.requirements)}
     unresolved = []
@@ -1054,6 +1146,13 @@ def structural_impact_manifest(
         "changed_files": paths,
         "owners": [_owner_record(owners[key]) for key in sorted(touched)],
         "requirements": changes,
+        "classification_counts": {
+            label: sum(1 for item in changes if item["change"] == label)
+            for label in ("added", "modified", "removed", "superseded")
+        }
+        | {"unchanged": len(unchanged)},
+        "unchanged_requirement_ids": unchanged[:_AUDIT_LIST_LIMIT],
+        "unchanged_requirements_omitted": max(0, len(unchanged) - _AUDIT_LIST_LIMIT),
         "unmapped_files": sorted(set(paths) - {o.path for o in all_owners} - contract_paths),
         "unresolved_references": sorted(unresolved, key=lambda r: (r["source_id"], r["target"])),
     }
