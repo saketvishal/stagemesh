@@ -270,6 +270,22 @@ class OpenSpecValidationConfig:
 
 
 @dataclass(frozen=True)
+class SpecRiskClassPolicy:
+    """Project-local approval and validation requirements for one spec risk class."""
+
+    required_owner_roles: tuple[str, ...]
+    required_validation_gates: tuple[str, ...] = ()
+    require_independent_review: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "required_owner_roles": sorted(self.required_owner_roles),
+            "required_validation_gates": sorted(self.required_validation_gates),
+            "require_independent_review": self.require_independent_review,
+        }
+
+
+@dataclass(frozen=True)
 class SpecGovernanceConfig:
     """Read-only specification discovery and optional OpenSpec CLI validation."""
 
@@ -277,6 +293,17 @@ class SpecGovernanceConfig:
     version: str
     contract_path: str | None = None
     openspec_validation: OpenSpecValidationConfig | None = None
+    risk_classes: dict[str, SpecRiskClassPolicy] = field(default_factory=dict)
+
+    def risk_policy(self) -> dict[str, dict[str, object]]:
+        return {name: policy.to_dict() for name, policy in sorted(self.risk_classes.items())}
+
+    @property
+    def risk_policy_fingerprint(self) -> str | None:
+        if not self.risk_classes:
+            return None
+        encoded = json.dumps(self.risk_policy(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _research_config(data: dict[str, object], known_providers: set[str]) -> ResearchConfig | None:
@@ -296,10 +323,68 @@ def _research_config(data: dict[str, object], known_providers: set[str]) -> Rese
     return ResearchConfig(provider, command, enforce_scope)
 
 
-def _spec_governance_config(data: dict[str, object]) -> SpecGovernanceConfig | None:
+_SPEC_POLICY_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_SPEC_POLICY_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
+
+
+def _spec_policy_values(value: object, label: str, *, required: bool) -> tuple[str, ...]:
+    if not isinstance(value, list) or (required and not value) or len(value) > 32:
+        suffix = "non-empty " if required else ""
+        raise ConfigValidationError(f"{label} must be a bounded {suffix}list")
+    if not all(isinstance(item, str) and _SPEC_POLICY_TOKEN.fullmatch(item) for item in value):
+        raise ConfigValidationError(f"{label} entries must be bounded policy tokens")
+    if len(set(value)) != len(value):
+        raise ConfigValidationError(f"{label} must not contain duplicates")
+    return tuple(value)
+
+
+def _spec_risk_classes(value: object, *, require_independent_review: bool) -> dict[str, SpecRiskClassPolicy]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not value or len(value) > 32:
+        raise ConfigValidationError("spec_governance.risk_classes must be a bounded non-empty object")
+    policies: dict[str, SpecRiskClassPolicy] = {}
+    for name, raw in value.items():
+        if not isinstance(name, str) or _SPEC_POLICY_NAME.fullmatch(name) is None:
+            raise ConfigValidationError("spec_governance.risk_classes names must be lowercase bounded policy names")
+        if not isinstance(raw, dict):
+            raise ConfigValidationError(f"spec_governance.risk_classes.{name} must be an object")
+        unknown = set(raw) - {
+            "required_owner_roles", "required_validation_gates", "require_independent_review",
+        }
+        if unknown:
+            raise ConfigValidationError(
+                f"spec_governance.risk_classes.{name} has unsupported keys: {', '.join(sorted(unknown))}"
+            )
+        roles = _spec_policy_values(
+            raw.get("required_owner_roles"),
+            f"spec_governance.risk_classes.{name}.required_owner_roles",
+            required=True,
+        )
+        gates = _spec_policy_values(
+            raw.get("required_validation_gates", []),
+            f"spec_governance.risk_classes.{name}.required_validation_gates",
+            required=False,
+        )
+        independent = raw.get("require_independent_review", False)
+        if not isinstance(independent, bool):
+            raise ConfigValidationError(
+                f"spec_governance.risk_classes.{name}.require_independent_review must be a boolean"
+            )
+        if independent and not require_independent_review:
+            raise ConfigValidationError(
+                f"spec_governance.risk_classes.{name} requires independent review but routing disables it"
+            )
+        policies[name] = SpecRiskClassPolicy(roles, gates, independent)
+    return policies
+
+
+def _spec_governance_config(
+    data: dict[str, object], *, require_independent_review: bool
+) -> SpecGovernanceConfig | None:
     if not data:
         return None
-    unknown = set(data) - {"adapter", "version", "contract_path", "openspec_validation"}
+    unknown = set(data) - {"adapter", "version", "contract_path", "openspec_validation", "risk_classes"}
     if unknown:
         raise ConfigValidationError(f"spec_governance has unsupported keys: {', '.join(sorted(unknown))}")
     adapter, version = _string(data.get("adapter")), _string(data.get("version"))
@@ -351,7 +436,10 @@ def _spec_governance_config(data: dict[str, object]) -> SpecGovernanceConfig | N
         validation = OpenSpecValidationConfig(tuple(command), expected_version, float(timeout))
     if adapter == "custom-json" and not contract_path:
         raise ConfigValidationError("custom-json spec_governance requires contract_path")
-    return SpecGovernanceConfig(adapter, version, contract_path, validation)
+    risk_classes = _spec_risk_classes(
+        data.get("risk_classes"), require_independent_review=require_independent_review
+    )
+    return SpecGovernanceConfig(adapter, version, contract_path, validation, risk_classes)
 
 
 @dataclass(frozen=True)
@@ -523,7 +611,10 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         challenger_provider=challenger_provider,
         research=_research_config(_optional_mapping(data, "research"), known),
         driver=_driver_install_config(_optional_mapping(data, "driver")) if "driver" in data else None,
-        spec_governance=_spec_governance_config(_optional_mapping(data, "spec_governance")),
+        spec_governance=_spec_governance_config(
+            _optional_mapping(data, "spec_governance"),
+            require_independent_review=require_review,
+        ),
     )
 
 

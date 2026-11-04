@@ -49,6 +49,8 @@ PINNED_ADAPTERS: dict[str, tuple[str, ...]] = {
 
 _AUDIT_LIST_LIMIT = 100
 _AUDIT_TEXT_LIMIT = 2000
+_MANIFEST_RECORD_LIMIT = 1000
+_APPROVAL_EVIDENCE_LIMIT = 3200
 _VERSION_PATTERN = re.compile(r"(?i)(?:openspec\s+)?v?(\d+\.\d+\.\d+(?:[-+][0-9a-z.-]+)?)")
 _EXACT_VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 _AUDIT_SECRET_ASSIGNMENT = re.compile(
@@ -263,6 +265,8 @@ def spec_audit_report(
     *,
     project_revision: str,
     openspec_validation: OpenSpecValidationEvidence | None = None,
+    risk_policy_fingerprint: str | None = None,
+    risk_classes: tuple[str, ...] | list[str] = (),
 ) -> dict[str, object]:
     """Return a bounded, read-only structural inventory and audit decision."""
     root = Path(root).resolve()
@@ -328,6 +332,10 @@ def spec_audit_report(
         "review_findings": [_bounded(item) for item in review_findings[:_AUDIT_LIST_LIMIT]],
         "review_findings_omitted": max(0, len(review_findings) - _AUDIT_LIST_LIMIT),
         "openspec_validation": openspec_validation.to_dict() if openspec_validation is not None else None,
+        "risk_policy": {
+            "fingerprint": _bounded(risk_policy_fingerprint) if risk_policy_fingerprint else None,
+            "classes": sorted({_bounded(item, 64) for item in risk_classes}),
+        },
         "status": status,
         "next_action": next_action,
     }
@@ -487,6 +495,9 @@ def validate_prerequisite_manifest(
     expected_candidate_revision: str | None = None,
     expected_base_revision: str | None = None,
     expected_changed_files: tuple[str, ...] | list[str] | None = None,
+    risk_policy: dict[str, dict[str, object]] | None = None,
+    risk_policy_fingerprint: str | None = None,
+    executed_gates: tuple[str, ...] | list[str] | None = None,
 ) -> SpecGovernanceVerdict:
     """Validate a prerequisite structural impact manifest fail-closed.
 
@@ -698,35 +709,64 @@ def validate_prerequisite_manifest(
     # Requirements changes check against declared records
     req_changes = manifest.get("requirements", [])
     requirement_changed = False
+    changed_records: list[dict[str, Any]] = []
+    configured_risk_policy = risk_policy or {}
     if not isinstance(req_changes, list):
         errors.append("manifest requirements must be a list")
     else:
+        if len(req_changes) > _MANIFEST_RECORD_LIMIT:
+            errors.append(f"manifest requirements exceeds the {_MANIFEST_RECORD_LIMIT}-record limit")
         for cidx, change in enumerate(req_changes):
             if not isinstance(change, dict):
+                errors.append(f"affected requirement #{cidx} must be an object")
                 continue
+            unknown_change_fields = set(change) - {
+                "requirement_id", "id", "owner_id", "path", "change", "owner_role",
+                "decision_refs", "superseded_by", "risk_class",
+            }
+            if unknown_change_fields:
+                errors.append(
+                    f"affected requirement #{cidx} has unsupported fields: "
+                    + ", ".join(sorted(unknown_change_fields))
+                )
             rid = change.get("requirement_id") or change.get("id")
             oid = change.get("owner_id")
             ctype = change.get("change")
             if ctype in {"added", "modified", "removed", "superseded"}:
                 requirement_changed = True
+                changed_records.append(change)
                 owner_role = change.get("owner_role")
-                if not isinstance(owner_role, str) or not owner_role.strip() or len(owner_role) > 100:
+                if (
+                    not isinstance(owner_role, str)
+                    or not owner_role.strip()
+                    or len(owner_role) > 100
+                    or any(char in owner_role for char in ("\x00", "\r", "\n"))
+                ):
                     errors.append(
                         f"affected requirement '{rid}' requires a bounded non-empty owner_role"
                     )
                 decision_refs = change.get("decision_refs")
-                if not isinstance(decision_refs, list) or not decision_refs:
+                if not isinstance(decision_refs, list) or not decision_refs or len(decision_refs) > 32:
                     errors.append(
-                        f"affected requirement '{rid}' requires at least one approved decision reference"
+                        f"affected requirement '{rid}' requires one to 32 approved decision references"
                     )
                 else:
+                    normalized_refs: list[str] = []
                     for ref_index, reference in enumerate(decision_refs):
                         try:
-                            _decision_reference(reference)
+                            normalized_refs.append(_decision_reference(reference))
                         except SpecAdapterError as exc:
                             errors.append(
                                 f"affected requirement '{rid}' decision reference #{ref_index} is invalid: {exc}"
                             )
+                    if len(set(normalized_refs)) != len(normalized_refs):
+                        errors.append(f"affected requirement '{rid}' decision_refs must not contain duplicates")
+                if configured_risk_policy:
+                    risk_class = change.get("risk_class")
+                    if not isinstance(risk_class, str) or risk_class not in configured_risk_policy:
+                        errors.append(
+                            f"affected requirement '{rid}' must declare a configured risk_class"
+                        )
             if not isinstance(rid, str) or not rid.strip():
                 errors.append(f"affected requirement #{cidx} has missing or empty requirement_id")
                 continue
@@ -760,6 +800,120 @@ def validate_prerequisite_manifest(
     omitted_unchanged = manifest.get("unchanged_requirements_omitted")
     if type(omitted_unchanged) is not int or omitted_unchanged < 0:
         errors.append("manifest unchanged_requirements_omitted must be a non-negative integer")
+    if (
+        isinstance(classification, dict)
+        and set(classification) == expected_classes
+        and all(type(value) is int and value >= 0 for value in classification.values())
+        and isinstance(req_changes, list)
+        and isinstance(unchanged_ids, list)
+        and type(omitted_unchanged) is int
+        and omitted_unchanged >= 0
+    ):
+        actual_counts = {
+            label: sum(
+                1 for change in req_changes
+                if isinstance(change, dict) and change.get("change") == label
+            )
+            for label in ("added", "modified", "removed", "superseded")
+        }
+        actual_counts["unchanged"] = len(unchanged_ids) + omitted_unchanged
+        if classification != actual_counts:
+            errors.append("manifest classification_counts do not match the declared requirement classifications")
+    if isinstance(unchanged_ids, list):
+        if len(unchanged_ids) > _AUDIT_LIST_LIMIT:
+            errors.append(f"manifest unchanged_requirement_ids exceeds the {_AUDIT_LIST_LIMIT}-item limit")
+        if len({item for item in unchanged_ids if isinstance(item, str)}) != len(unchanged_ids):
+            errors.append("manifest unchanged_requirement_ids must not contain duplicates")
+
+    if requirement_changed and expected_candidate_revision is not None and configured_risk_policy:
+        if not isinstance(risk_policy_fingerprint, str) or not risk_policy_fingerprint:
+            errors.append("configured spec risk policy is missing its deterministic fingerprint")
+        approvals = manifest.get("approval_evidence")
+        if not isinstance(approvals, list):
+            errors.append("requirement changes require exact-candidate approval_evidence")
+            approvals = []
+        elif len(approvals) > _APPROVAL_EVIDENCE_LIMIT:
+            errors.append(
+                f"approval_evidence exceeds the {_APPROVAL_EVIDENCE_LIMIT}-record limit"
+            )
+        valid_roles_by_requirement: dict[str, set[str]] = {}
+        for index, evidence in enumerate(approvals):
+            if not isinstance(evidence, dict):
+                errors.append(f"approval_evidence #{index} must be an object")
+                continue
+            unknown_evidence_fields = set(evidence) - {
+                "requirement_id", "actor", "role", "decision_ref",
+                "candidate_revision", "policy_fingerprint",
+            }
+            if unknown_evidence_fields:
+                errors.append(
+                    f"approval_evidence #{index} has unsupported fields: "
+                    + ", ".join(sorted(unknown_evidence_fields))
+                )
+            requirement_id = evidence.get("requirement_id")
+            actor = evidence.get("actor")
+            role = evidence.get("role")
+            decision_ref = evidence.get("decision_ref")
+            revision = evidence.get("candidate_revision")
+            fingerprint = evidence.get("policy_fingerprint")
+            change = next(
+                (item for item in changed_records if item.get("requirement_id") == requirement_id),
+                None,
+            )
+            if change is None:
+                errors.append(f"approval_evidence #{index} references an unknown changed requirement")
+                continue
+            risk_class = change.get("risk_class")
+            policy = configured_risk_policy.get(risk_class) if isinstance(risk_class, str) else None
+            required_roles = policy.get("required_owner_roles", []) if isinstance(policy, dict) else []
+            if not isinstance(actor, str) or not actor.strip() or len(actor) > 100 or any(
+                char in actor for char in ("\x00", "\r", "\n")
+            ):
+                errors.append(f"approval_evidence #{index} requires a bounded single-line actor")
+            if not isinstance(role, str) or role not in required_roles:
+                errors.append(
+                    f"approval_evidence #{index} role is not required by risk class '{risk_class}'"
+                )
+            try:
+                normalized_ref = _decision_reference(decision_ref)
+            except SpecAdapterError as exc:
+                errors.append(f"approval_evidence #{index} decision_ref is invalid: {exc}")
+                normalized_ref = None
+            decision_refs = change.get("decision_refs")
+            if normalized_ref is not None and (
+                not isinstance(decision_refs, list) or normalized_ref not in decision_refs
+            ):
+                errors.append(
+                    f"approval_evidence #{index} decision_ref is not declared for requirement '{requirement_id}'"
+                )
+            if revision != expected_candidate_revision or revision != cand_rev:
+                errors.append(f"approval_evidence #{index} is not bound to the exact candidate revision")
+            if fingerprint != risk_policy_fingerprint:
+                errors.append(f"approval_evidence #{index} has a stale or mismatched policy fingerprint")
+            if isinstance(role, str) and role in required_roles:
+                valid_roles_by_requirement.setdefault(str(requirement_id), set()).add(role)
+
+        required_gates: set[str] = set()
+        for change in changed_records:
+            requirement_id = str(change.get("requirement_id"))
+            risk_class = change.get("risk_class")
+            policy = configured_risk_policy.get(risk_class) if isinstance(risk_class, str) else None
+            if not isinstance(policy, dict):
+                continue
+            required_roles = {
+                role for role in policy.get("required_owner_roles", []) if isinstance(role, str)
+            }
+            missing_roles = sorted(required_roles - valid_roles_by_requirement.get(requirement_id, set()))
+            for role in missing_roles:
+                errors.append(
+                    f"affected requirement '{requirement_id}' lacks exact-candidate approval from role '{role}'"
+                )
+            required_gates.update(
+                gate for gate in policy.get("required_validation_gates", []) if isinstance(gate, str)
+            )
+        actual_gates = set(executed_gates or ())
+        for gate in sorted(required_gates - actual_gates):
+            errors.append(f"spec risk policy gate '{gate}' did not execute for the exact candidate")
 
     if requirement_changed and expected_candidate_revision is not None:
         behavioral = manifest.get("behavioral_evidence")
@@ -844,12 +998,31 @@ def validate_manifest_discovery(
     candidate_revision: str,
 ) -> tuple[str, ...]:
     """Bind caller-supplied structural claims to the configured adapter's exact snapshots."""
+    declared_changes = manifest.get("requirements", [])
+    provenance: dict[str, dict[str, object]] = {}
+    supersessions: dict[str, str] = {}
+    if isinstance(declared_changes, list):
+        for item in declared_changes:
+            if not isinstance(item, dict) or not isinstance(item.get("requirement_id"), str):
+                continue
+            requirement_id = item["requirement_id"]
+            extra = {
+                key: value
+                for key, value in item.items()
+                if key not in {"requirement_id", "owner_id", "path", "change", "superseded_by"}
+            }
+            if extra:
+                provenance[requirement_id] = extra
+            if item.get("change") == "superseded" and isinstance(item.get("superseded_by"), str):
+                supersessions[requirement_id] = item["superseded_by"]
     expected = structural_impact_manifest(
         before,
         after,
         changed_files,
         base_revision=base_revision,
         candidate_revision=candidate_revision,
+        change_provenance=provenance,
+        supersessions=supersessions,
     )
     errors: list[str] = []
     adapter = manifest.get("adapter")
@@ -891,6 +1064,9 @@ def spec_governance_gate(
     expected_changed_files: tuple[str, ...] | list[str] | None = None,
     sync_status: str | None = None,
     validation_status: str | None = None,
+    risk_policy: dict[str, dict[str, object]] | None = None,
+    risk_policy_fingerprint: str | None = None,
+    executed_gates: tuple[str, ...] | list[str] | None = None,
 ) -> SpecGovernanceVerdict:
     if prerequisite_manifest is not None:
         return validate_prerequisite_manifest(
@@ -899,6 +1075,9 @@ def spec_governance_gate(
             expected_candidate_revision=expected_candidate_revision,
             expected_base_revision=expected_base_revision,
             expected_changed_files=expected_changed_files,
+            risk_policy=risk_policy,
+            risk_policy_fingerprint=risk_policy_fingerprint,
+            executed_gates=executed_gates,
         )
     if before is not None and after is not None:
         manifest = structural_impact_manifest(
@@ -916,6 +1095,9 @@ def spec_governance_gate(
             expected_candidate_revision=expected_candidate_revision,
             expected_base_revision=expected_base_revision,
             expected_changed_files=expected_changed_files,
+            risk_policy=risk_policy,
+            risk_policy_fingerprint=risk_policy_fingerprint,
+            executed_gates=executed_gates,
         )
     return SpecGovernanceVerdict(ok=False, errors=("prerequisite manifest or before/after snapshots are required",))
 
@@ -1082,8 +1264,20 @@ def structural_impact_manifest(
     new = {r.id: (o, r) for o in after.owners for r in o.requirements}
     changes: list[dict[str, object]] = []
     unchanged: list[str] = []
+    if change_provenance is not None and not isinstance(change_provenance, dict):
+        raise SpecAdapterError("change_provenance must be an object")
+    if supersessions is not None and not isinstance(supersessions, dict):
+        raise SpecAdapterError("supersessions must be an object")
     provenance = change_provenance or {}
     explicit_supersessions = supersessions or {}
+    if not all(isinstance(identifier, str) and identifier for identifier in provenance):
+        raise SpecAdapterError("change_provenance keys must be non-empty requirement ids")
+    if not all(
+        isinstance(source, str) and source and isinstance(target, str) and target
+        for source, target in explicit_supersessions.items()
+    ):
+        raise SpecAdapterError("supersessions must map non-empty requirement ids")
+    provenance_fields = {"owner_role", "decision_refs", "risk_class"}
     for identifier in sorted(old.keys() | new.keys()):
         prior, current = old.get(identifier), new.get(identifier)
         if not any(pair and pair[0].id in touched for pair in (prior, current)):
@@ -1113,8 +1307,21 @@ def structural_impact_manifest(
         if declared is not None:
             if not isinstance(declared, dict):
                 raise SpecAdapterError(f"change provenance for {identifier} must be an object")
+            unknown_fields = set(declared) - provenance_fields
+            if unknown_fields:
+                raise SpecAdapterError(
+                    f"change provenance for {identifier} has unsupported fields: "
+                    + ", ".join(sorted(str(field) for field in unknown_fields))
+                )
             record.update(declared)
         changes.append(record)
+    changed_ids = {str(item["requirement_id"]) for item in changes}
+    stale_provenance = sorted(str(identifier) for identifier in set(provenance) - changed_ids)
+    if stale_provenance:
+        raise SpecAdapterError(
+            "change provenance references unchanged or unknown requirements: "
+            + ", ".join(stale_provenance)
+        )
     removed_ids = {str(item["requirement_id"]) for item in changes if item["change"] in {"removed", "superseded"}}
     unknown_supersessions = sorted(set(explicit_supersessions) - removed_ids)
     if unknown_supersessions:

@@ -868,6 +868,8 @@ def command_spec_audit(args: argparse.Namespace) -> int:
             adapter,
             project_revision=revision,
             openspec_validation=validation,
+            risk_policy_fingerprint=policy.risk_policy_fingerprint,
+            risk_classes=list(policy.risk_classes),
         )
     except (GitError, SpecAdapterError, OSError) as exc:
         print(f"spec audit error: {exc}", file=sys.stderr)
@@ -886,6 +888,14 @@ def _print_spec_audit(report: dict[str, object]) -> None:
     print(f"spec governance audit: {str(report['status']).upper()}")
     print(f"revision: {report['project_revision']}")
     print(f"adapter: {adapter['name']} {adapter['version']}")
+    risk_policy = report.get("risk_policy")
+    if isinstance(risk_policy, dict) and risk_policy.get("fingerprint"):
+        print(
+            "risk policy: "
+            f"{risk_policy['fingerprint']}; classes={','.join(str(item) for item in risk_policy.get('classes', []))}"
+        )
+    else:
+        print("risk policy: not configured")
     print(
         "authority: "
         f"active={counts['active_owners']} history={counts['historical_owners']} "

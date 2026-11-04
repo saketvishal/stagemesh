@@ -118,6 +118,50 @@ class SpecAdapterTests(unittest.TestCase):
                 supersessions={old: "MISSING"},
             )
 
+        for protected_field in ("requirement_id", "owner_id", "path", "change", "superseded_by"):
+            with self.subTest(protected_field=protected_field), self.assertRaises(SpecAdapterError):
+                structural_impact_manifest(
+                    before,
+                    after,
+                    [path],
+                    base_revision="base",
+                    candidate_revision="candidate",
+                    change_provenance={old: {protected_field: "untrusted"}},
+                )
+
+        with self.assertRaises(SpecAdapterError):
+            structural_impact_manifest(
+                before,
+                after,
+                [path],
+                base_revision="base",
+                candidate_revision="candidate",
+                change_provenance={"UNKNOWN": {
+                    "owner_role": "product-owner",
+                    "decision_refs": ["docs/decisions/nav.md#approved"],
+                }},
+            )
+        for invalid in ({1: {}}, {old: []}):
+            with self.subTest(invalid=invalid), self.assertRaises(SpecAdapterError):
+                structural_impact_manifest(
+                    before,
+                    after,
+                    [path],
+                    base_revision="base",
+                    candidate_revision="candidate",
+                    change_provenance=invalid,
+                )
+        for invalid in ({1: new}, {old: 1}):
+            with self.subTest(invalid=invalid), self.assertRaises(SpecAdapterError):
+                structural_impact_manifest(
+                    before,
+                    after,
+                    [path],
+                    base_revision="base",
+                    candidate_revision="candidate",
+                    supersessions=invalid,
+                )
+
     def test_removed_file_and_title_rename_are_not_semantic_matches(self):
         path = "openspec/specs/a/spec.md"
         target = self.write(path, "### Requirement: Old\nSame.\n")

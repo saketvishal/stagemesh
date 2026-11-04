@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .contract_feasibility import check_contract_feasibility
 from .contracts import (
     ChangeContract,
     ContractError,
@@ -15,7 +16,6 @@ from .contracts import (
     parse_contract,
     task_contract_path,
 )
-from .contract_feasibility import check_contract_feasibility
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS
 
 TOP_SECTIONS = 5
@@ -44,6 +44,9 @@ def check_contract_text(
     expected_candidate_revision: str | None = None,
     expected_base_revision: str | None = None,
     expected_changed_files: tuple[str, ...] | list[str] | None = None,
+    spec_risk_policy: dict[str, dict[str, object]] | None = None,
+    spec_risk_policy_fingerprint: str | None = None,
+    executed_gates: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed verdict for contract JSON text. `ok` is True only when it parses and fits the canonical limit."""
     report: dict[str, Any] = {"ok": False, "limit": limit, "size": None, "errors": [], "gates": [], "largest_sections": []}
@@ -110,6 +113,9 @@ def check_contract_text(
             expected_candidate_revision=expected_candidate_revision,
             expected_base_revision=expected_base_revision,
             expected_changed_files=expected_changed_files,
+            risk_policy=spec_risk_policy,
+            risk_policy_fingerprint=spec_risk_policy_fingerprint,
+            executed_gates=executed_gates,
         )
         report["spec_governance"] = verdict.to_dict()
         if not verdict.ok:
@@ -144,6 +150,7 @@ def check_contract(
     expected_candidate_revision: str | None = None,
     expected_base_revision: str | None = None,
     expected_changed_files: tuple[str, ...] | list[str] | None = None,
+    executed_gates: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     manifest_load_error = None
     if isinstance(prerequisite_manifest, (str, Path)):
@@ -200,6 +207,10 @@ def check_contract(
             "largest_sections": [],
             "path": str(path),
         }
+    from .config import load_config
+
+    config = load_config(project)
+    spec_config = config.spec_governance
     report = check_contract_text(
         text,
         limit=limit,
@@ -209,6 +220,11 @@ def check_contract(
         expected_candidate_revision=expected_candidate_revision,
         expected_base_revision=expected_base_revision,
         expected_changed_files=expected_changed_files,
+        spec_risk_policy=spec_config.risk_policy() if spec_config is not None else None,
+        spec_risk_policy_fingerprint=(
+            spec_config.risk_policy_fingerprint if spec_config is not None else None
+        ),
+        executed_gates=executed_gates,
     )
     report["path"] = str(path)
     if report["ok"]:

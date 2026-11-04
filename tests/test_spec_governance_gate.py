@@ -7,21 +7,19 @@ from pathlib import Path
 
 import pytest
 
+from stagemesh.config import load_config
 from stagemesh.contract_check import check_contract, check_contract_text
-from stagemesh.contracts import ChangeContract, GateCommand
-from stagemesh.domain import EvidenceKind, EvidenceStatus
+from stagemesh.domain import EvidenceStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.spec_integrity import (
     CustomSpecAdapter,
     OpenSpecAdapter,
-    SpecGovernanceVerdict,
     resolve_pinned_adapter,
-    spec_governance_gate,
     structural_impact_manifest,
     validate_prerequisite_manifest,
 )
-from stagemesh.spec_refs import SpecAdapterError, SpecOwner, SpecSnapshot
+from stagemesh.spec_refs import SpecAdapterError, SpecSnapshot
 from stagemesh.validation import Validator
 
 
@@ -271,6 +269,133 @@ def test_complete_classification_shape_fails_closed() -> None:
     assert not verdict.ok
     assert any("unchanged_requirement_ids" in item for item in verdict.errors)
     assert any("unchanged_requirements_omitted" in item for item in verdict.errors)
+
+    inconsistent = valid_manifest()
+    inconsistent["classification_counts"]["modified"] = 2
+    mismatch = validate_prerequisite_manifest(inconsistent)
+    assert not mismatch.ok
+    assert any("do not match" in error for error in mismatch.errors)
+
+
+def test_spec_risk_policy_binds_owner_approvals_policy_and_executed_gates() -> None:
+    policy = {
+        "ordinary": {
+            "required_owner_roles": ["product-owner"],
+            "required_validation_gates": [],
+            "require_independent_review": False,
+        },
+        "sensitive": {
+            "required_owner_roles": ["product-owner", "security-owner"],
+            "required_validation_gates": ["security-tests"],
+            "require_independent_review": True,
+        },
+    }
+    fingerprint = "sha256:" + "a" * 64
+    manifest = valid_manifest()
+    requirement = manifest["requirements"][0]
+    requirement["risk_class"] = "sensitive"
+    manifest["approval_evidence"] = [
+        {
+            "requirement_id": requirement["requirement_id"],
+            "actor": "product-approver",
+            "role": "product-owner",
+            "decision_ref": requirement["decision_refs"][0],
+            "candidate_revision": manifest["candidate_revision"],
+            "policy_fingerprint": fingerprint,
+        },
+        {
+            "requirement_id": requirement["requirement_id"],
+            "actor": "security-approver",
+            "role": "security-owner",
+            "decision_ref": requirement["decision_refs"][0],
+            "candidate_revision": manifest["candidate_revision"],
+            "policy_fingerprint": fingerprint,
+        },
+    ]
+    verdict = validate_prerequisite_manifest(
+        manifest,
+        expected_candidate_revision=manifest["candidate_revision"],
+        risk_policy=policy,
+        risk_policy_fingerprint=fingerprint,
+        executed_gates=["security-tests"],
+    )
+    assert verdict.ok, verdict.errors
+
+    for mutate, expected_error in (
+        (lambda item: item["requirements"][0].pop("risk_class"), "configured risk_class"),
+        (lambda item: item["approval_evidence"][1].update(candidate_revision="stale"), "exact candidate"),
+        (lambda item: item["approval_evidence"][1].update(policy_fingerprint="sha256:stale"), "policy fingerprint"),
+        (lambda item: item["approval_evidence"].pop(), "security-owner"),
+        (
+            lambda item: item["requirements"][0]["decision_refs"].append(
+                item["requirements"][0]["decision_refs"][0]
+            ),
+            "must not contain duplicates",
+        ),
+        (
+            lambda item: item["approval_evidence"][0].update(untrusted_claim=True),
+            "unsupported fields",
+        ),
+    ):
+        attacked = json.loads(json.dumps(manifest))
+        mutate(attacked)
+        rejected = validate_prerequisite_manifest(
+            attacked,
+            expected_candidate_revision=manifest["candidate_revision"],
+            risk_policy=policy,
+            risk_policy_fingerprint=fingerprint,
+            executed_gates=["security-tests"],
+        )
+        assert not rejected.ok
+        assert any(expected_error in error for error in rejected.errors)
+
+    missing_gate = json.loads(json.dumps(manifest))
+    missing_gate["waiver_request"] = {"actor": "operator", "reason": "requested exception"}
+    rejected_gate = validate_prerequisite_manifest(
+        missing_gate,
+        expected_candidate_revision=manifest["candidate_revision"],
+        risk_policy=policy,
+        risk_policy_fingerprint=fingerprint,
+        executed_gates=[],
+    )
+    assert not rejected_gate.ok
+    assert any("security-tests" in error and "did not execute" in error for error in rejected_gate.errors)
+    assert any("waiver request recorded" in finding for finding in rejected_gate.review_findings)
+
+
+def test_lower_spec_risk_class_does_not_inherit_sensitive_gates() -> None:
+    policy = {
+        "ordinary": {
+            "required_owner_roles": ["product-owner"],
+            "required_validation_gates": [],
+            "require_independent_review": False,
+        },
+        "sensitive": {
+            "required_owner_roles": ["security-owner"],
+            "required_validation_gates": ["security-tests"],
+            "require_independent_review": True,
+        },
+    }
+    fingerprint = "sha256:" + "b" * 64
+    manifest = valid_manifest()
+    requirement = manifest["requirements"][0]
+    requirement["risk_class"] = "ordinary"
+    manifest["approval_evidence"] = [{
+        "requirement_id": requirement["requirement_id"],
+        "actor": "product-approver",
+        "role": "product-owner",
+        "decision_ref": requirement["decision_refs"][0],
+        "candidate_revision": manifest["candidate_revision"],
+        "policy_fingerprint": fingerprint,
+    }]
+    verdict = validate_prerequisite_manifest(
+        manifest,
+        expected_candidate_revision=manifest["candidate_revision"],
+        risk_policy=policy,
+        risk_policy_fingerprint=fingerprint,
+        executed_gates=[],
+    )
+    assert verdict.ok, verdict.errors
 
 
 # --- 3. Block contradictory declared active statuses ---
@@ -854,6 +979,99 @@ def test_validator_rejects_manifest_that_disagrees_with_pinned_adapter_snapshot(
             and "discovered" in finding.get("message", "")
             for finding in payload["findings"]
         )
+    finally:
+        store.close()
+
+
+def test_validator_binds_project_risk_policy_to_real_gate_and_discovered_delta(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "Test Owner")
+    (project / ".gitignore").write_text(".stagemesh/\n", encoding="utf-8")
+    spec = project / "openspec" / "specs" / "actual" / "spec.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("### Requirement: Actual\nOriginal.\n", encoding="utf-8")
+    (project / "test_app.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+    adapter = OpenSpecAdapter()
+    before = adapter.discover(project)
+    base_sha = git.commit_all("baseline")
+
+    runtime = project / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "config.json").write_text(json.dumps({
+        "spec_governance": {
+            "adapter": "openspec",
+            "version": "layout-v1",
+            "risk_classes": {"sensitive": {
+                "required_owner_roles": ["security-owner"],
+                "required_validation_gates": ["unit"],
+                "require_independent_review": True,
+            }},
+        }
+    }), encoding="utf-8")
+    store = Store(runtime / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Update actual requirement", source_id="TASK-GOV-RISK")
+    contracts = runtime / "contracts"
+    contracts.mkdir()
+    (contracts / f"{task_id}.json").write_text(json.dumps({
+        "objective": "Update actual requirement",
+        "allowed_files": ["openspec/specs/actual/spec.md"],
+        "spec_refs": ["openspec/specs/actual/spec.md"],
+        "required_tests": [{
+            "name": "unit",
+            "command": [sys.executable, "-m", "pytest", "-q", "test_app.py"],
+        }],
+    }), encoding="utf-8")
+    spec.write_text("### Requirement: Actual\nUpdated.\n", encoding="utf-8")
+    candidate_sha = git.commit_all("implementation")
+    store.add_candidate(task_id, candidate_sha, "implementer", True)
+    after = adapter.discover(project)
+    requirement_id = "openspec/specs/actual/spec.md#requirement-actual"
+    manifest = structural_impact_manifest(
+        before, after, ["openspec/specs/actual/spec.md"],
+        base_revision=base_sha,
+        candidate_revision=candidate_sha,
+        validation_status="passed",
+        sync_status="in_sync",
+        behavioral_evidence=[{
+            "kind": "unit", "gate": "unit", "status": "passed",
+            "candidate_revision": candidate_sha,
+        }],
+        change_provenance={requirement_id: {
+            "owner_role": "security-owner",
+            "decision_refs": ["docs/decisions/actual.md#approved"],
+            "risk_class": "sensitive",
+        }},
+    )
+    policy = load_config(project).spec_governance
+    assert policy is not None and policy.risk_policy_fingerprint is not None
+    manifest["approval_evidence"] = [{
+        "requirement_id": requirement_id,
+        "actor": "security-approver",
+        "role": "security-owner",
+        "decision_ref": "docs/decisions/actual.md#approved",
+        "candidate_revision": candidate_sha,
+        "policy_fingerprint": policy.risk_policy_fingerprint,
+    }]
+    try:
+        status = Validator().validate(
+            store, task_id, candidate_sha, project, prerequisite_manifest=manifest
+        )
+        assert status is EvidenceStatus.PASSED
+        row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='VALIDATION' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id, candidate_sha),
+        ).fetchone()
+        payload = json.loads(row["payload"])
+        assert payload["spec_governance"]["ok"]
+        assert "unit" in payload["validation_checks"]["executed"]
     finally:
         store.close()
 
