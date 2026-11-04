@@ -115,6 +115,8 @@ def test_empty_mixed_support_only_and_unmapped_scopes_fail_safe(
         "src/stagemesh/persistence.py",
         "src/stagemesh/security.py",
         "src/stagemesh/authorization.py",
+        "src/stagemesh/provider_pool.py",
+        "src/stagemesh/redaction.py",
         "src/stagemesh/public/schema/model.py",
         "scripts/ci_validation_plan.py",
         "tests/test_ci_validation_plan.py",

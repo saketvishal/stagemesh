@@ -12,6 +12,7 @@ FULL_GROUPS = (
     "Missing provider tool host",
     "Existing queue stop compatibility",
     "Execution budgets and review ownership",
+    "Provider output security boundaries",
     "Autonomous recovery ledger",
     "Continuous driver control and recovery",
     "Validation environment and fallback progress",
@@ -85,6 +86,8 @@ def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:
         recovery = _step(job, "Autonomous recovery ledger")
         assert "tests/test_autonomous_recovery.py" in recovery
         assert "tests/test_recovery_ledger.py" in recovery
+        provider_security = _step(job, "Provider output security boundaries")
+        assert "tests/test_provider_output_security.py" in provider_security
         delivery = _step(job, "Delivery and window regressions")
         assert "tests/test_autonomous_window.py" in delivery
         assert focused_condition in _step(job, "Stabilization matrix")

@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 from .persistence import Store
+from .redaction import sanitize_provider_output
 
 CLEARED_EVENT = "provider.cooldown_cleared"
 REPEATED_NO_PROGRESS = "repeated_no_progress"
@@ -46,7 +47,11 @@ def cleared_at(store: Store, provider: str) -> float:
 
 def active_cooldowns(store: Store, cooldown_seconds: float, now: float | None = None) -> list[dict[str, Any]]:
     """Providers currently resting, one entry each: class, stages, first/last seen, last error, deadline and what to do."""
-    from .provider_pool import PROVIDER_FAILURE_EVENT, _failure_cooldown_seconds, provider_wide_outcomes
+    from .provider_pool import (
+        PROVIDER_FAILURE_EVENT,
+        _failure_cooldown_seconds,
+        provider_wide_outcomes,
+    )
 
     now = time.time() if now is None else now
     wide = provider_wide_outcomes()
@@ -70,7 +75,9 @@ def active_cooldowns(store: Store, cooldown_seconds: float, now: float | None = 
         entry["last_seen"] = seen
         entry["stages"].add(str(payload.get("stage") or ""))
         entry["retry_at"] = max(entry["retry_at"], deadline)
-        entry["last_error"] = str(payload.get("provider_output") or reason)[:200]
+        entry["last_error"] = sanitize_provider_output(
+            payload.get("provider_output") or reason, 200
+        )
         entry["reset_hint"] = payload.get("retry_after")
     result = []
     for entry in sorted(entries.values(), key=lambda item: item["provider"]):

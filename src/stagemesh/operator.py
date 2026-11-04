@@ -13,7 +13,7 @@ from .external_evidence import external_evidence_records
 from .observability import health
 from .persistence import Store
 from .process_identity import classify_process, process_identity
-from .redaction import redact_output
+from .redaction import redact_mapping, redact_output
 
 RECENT_FAILURE_LIMIT = 10
 RECENT_METRIC_LIMIT = 100
@@ -421,6 +421,9 @@ def _provider_selection_rows(store: Store) -> list[Mapping[str, object]]:
             payload = json.loads(event["payload"])
         except (TypeError, ValueError):
             continue
+        if not isinstance(payload, dict):
+            continue
+        payload = redact_mapping(payload)
         order = payload.get("order")
         verdicts = payload.get("verdicts")
         rows.append(

@@ -169,6 +169,9 @@ classified tool failure, for example `"recovery_setup_actions":
 provider output: it executes at most one configured setup and one verification of
 the original command, with durable receipts and fresh authorization and budget
 checks. Providers without this field retain the default fail-closed behavior.
+Provider diagnostic text crosses one shared bounded/redacted storage boundary; the
+exact persistence, legacy projection, and CI guarantees are documented in
+[docs/provider-output-security.md](docs/provider-output-security.md).
 
 ```json
 { "providers": { "claude": { "command": "claude -p --permission-mode acceptEdits",

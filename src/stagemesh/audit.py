@@ -29,7 +29,7 @@ def export_audit_jsonl(store: Store, output: Path, limit: int = 500, root: Path 
                     {
                         "id": event["id"],
                         "event_type": event["event_type"],
-                        "payload": json.loads(event["payload"]),
+                        "payload": redact_mapping(json.loads(event["payload"])),
                         "created_at": event["created_at"],
                     },
                     sort_keys=True,

@@ -70,7 +70,7 @@ from .provider_events import (
     validate_observable_attachments,
 )
 from .queue_control import OperatorStopRequested
-from .redaction import redact_command_secrets
+from .redaction import redact_command_secrets, sanitize_provider_output
 from .remediation import ToolRecoveryRefused, execute_tool_recovery, remediation_context
 from .research_context import (
     ResearchBlocked,
@@ -1803,7 +1803,7 @@ def _review_infrastructure_failure(reason: str, output: str | None = None, retry
 
     payload: dict[str, str] = {"decision": "INFRASTRUCTURE_FAILURE", "reason": reason}
     if output:
-        payload["provider_output"] = output[:500]
+        payload["provider_output"] = sanitize_provider_output(output)
     if retry_after:
         payload["retry_after"] = retry_after[:120]
     return json.dumps(payload)

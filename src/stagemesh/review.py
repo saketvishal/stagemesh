@@ -24,6 +24,7 @@ from .efficiency import record_provider_call, take_call_usage
 from .persistence import Store
 from .process_identity import owner_execution_fields
 from .queue_control import OperatorStopRequested
+from .redaction import sanitize_provider_output
 from .remediation import finding_identity, findings_to_verify, unresolved_findings
 from .research_context import accepted_research_evidence
 from .review_disposition import record_review_findings
@@ -884,11 +885,13 @@ class Reviewer:
                             same_provider = bool(implementer and _same_provider(final_provider, implementer))
                             independent = bool(final_provider and implementer and not same_provider)
                             review_payload["independent_reviewer"] = independent
-                        review_payload["review_response"] = str(response)[:MAX_RECORDED_REVIEW_RESPONSE_CHARS]
                         review_payload["review_attempts"] = attempt + 1
                         if not valid_command_snapshot(final_identity) or not _same_provider(str(final_identity.get("provider", "")), str(final_provider)):
                             final_identity = None
                         verdict = classify_review_response(response)
+                        review_payload["review_response"] = sanitize_provider_output(
+                            response, MAX_RECORDED_REVIEW_RESPONSE_CHARS
+                        )
                         if (role is not None and verdict.kind != VERDICT_REVIEW_INCOMPLETE
                                 and (final_identity is None or not _same_provider(str(final_identity.get("provider", "")), str(final_provider)))):
                             verdict = ReviewVerdict(VERDICT_REVIEW_INCOMPLETE, reason="review_role_identity_unavailable", provider_failure=True)
@@ -902,7 +905,9 @@ class Reviewer:
                         if verdict.reason == "budget_exhausted":
                             parsed = parse_review_response(response)
                             if isinstance(parsed, dict) and isinstance(parsed.get("provider_output"), str):
-                                review_payload["review_budget_reason"] = parsed["provider_output"][:1000]
+                                review_payload["review_budget_reason"] = sanitize_provider_output(
+                                    parsed["provider_output"], 1000
+                                )
                         if verdict.kind != VERDICT_REVIEW_INCOMPLETE or verdict.provider_failure:
                             break  # a provider outage was already walked through every eligible reviewer
                     review_payload["review_verdict"] = verdict.kind

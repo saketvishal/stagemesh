@@ -4,6 +4,8 @@ import re
 from urllib.parse import urlsplit, urlunsplit
 
 SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key", "api-key")
+REDACTED = "***REDACTED***"
+MAX_PROVIDER_OUTPUT_CHARS = 500
 
 
 def redact_mapping(data: dict[str, object]) -> dict[str, object]:
@@ -21,6 +23,8 @@ def _redact_value(value: object) -> object:
         return redact_mapping(value)
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_output(value)
     return value
 
 
@@ -82,9 +86,45 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?P<key>(?:token|secret|password|passwd|authorization|api[_\-]?key)\w*)(?P<sep>\s*[=:]\s*)(?:Bearer\s+)?[^\s\"',;]+",
     re.IGNORECASE,
 )
+_STANDALONE_SECRET = re.compile(
+    r"(?i)(?P<bearer>\bBearer\s+)[^\s\"',;]+|(?<![A-Za-z0-9_])(?:gh[pousr]_|sk-|xai-)[^\s\"',;]+"
+)
+_TRUNCATION_MARKER = "\n...[truncated]...\n"
 
 
 def redact_output(text: str) -> str:
-    """Scrub credentials from captured process output before it is stored or shown (URL userinfo and key=value secrets)."""
+    """Scrub credentials from captured process output before it is stored or shown."""
     text = _URL_CREDENTIALS.sub(lambda match: f"{match.group('scheme')}***REDACTED***@", text)
-    return _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group('key')}{match.group('sep')}***REDACTED***", text)
+    text = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group('key')}{match.group('sep')}{REDACTED}", text)
+    return _STANDALONE_SECRET.sub(
+        lambda match: f"{match.group('bearer') or ''}{REDACTED}", text
+    )
+
+
+def sanitize_provider_output(
+    value: object, limit: int = MAX_PROVIDER_OUTPUT_CHARS
+) -> str:
+    """Return bounded, printable, credential-scrubbed text for untrusted provider evidence."""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        try:
+            text = str(value)
+        except Exception:  # noqa: BLE001 - evidence conversion must never escape this boundary
+            text = "<unprintable provider output>"
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "".join(
+        character if character in {"\n", "\t"} or character.isprintable() else "�"
+        for character in text
+    )
+    text = redact_output(text)
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= len(_TRUNCATION_MARKER):
+        return text[:limit]
+    remaining = limit - len(_TRUNCATION_MARKER)
+    head = (remaining + 1) // 2
+    tail = remaining - head
+    return text[:head] + _TRUNCATION_MARKER + (text[-tail:] if tail else "")

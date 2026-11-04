@@ -117,6 +117,10 @@ _SHARED_BOUNDARY_NAMES = frozenset(
         "integration.py",
         "lifecycle.py",
         "permissions.py",
+        "provider_cooldown.py",
+        "provider_pool.py",
+        "providers.py",
+        "redaction.py",
         "review.py",
     }
 )

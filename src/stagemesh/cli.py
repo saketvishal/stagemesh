@@ -145,7 +145,7 @@ from .recovery import (
     resume_task,
     task_doctor,
 )
-from .redaction import redact_command_secrets, redact_url_credentials
+from .redaction import redact_command_secrets, redact_mapping, redact_url_credentials
 from .registry import (
     GlobalRegistry,
     ProjectRegistration,
@@ -4621,7 +4621,7 @@ def command_audit(args: argparse.Namespace) -> int:
                         {
                             "id": event["id"],
                             "event_type": event["event_type"],
-                            "payload": json.loads(event["payload"]),
+                            "payload": redact_mapping(json.loads(event["payload"])),
                             "created_at": event["created_at"],
                         }
                         for event in store.audit_events(args.limit)

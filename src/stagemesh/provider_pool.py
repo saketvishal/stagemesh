@@ -37,6 +37,7 @@ from .provider_cooldown import (
 )
 from .provider_events import CAPABILITY_EVIDENCE_MISSING, CAPABILITY_POLICY_VIOLATION
 from .providers import RuntimeCommandAdapter
+from .redaction import sanitize_provider_output
 from .review import (
     INFRASTRUCTURE_FAILURE,
     VERDICT_REVIEW_INCOMPLETE,
@@ -419,7 +420,7 @@ class ProviderPool:
         payload: dict[str, object] = {"task_id": task_id, "stage": stage, "provider": provider, "reason": reason[:300]}
         payload["retry_at"] = time.time() + _failure_cooldown_seconds(reason, self.cooldown_seconds)
         if provider_output:
-            payload["provider_output"] = provider_output[:500]
+            payload["provider_output"] = sanitize_provider_output(provider_output)
         if retry_after:
             payload["retry_after"] = retry_after[:120]
         if next_provider:
@@ -449,7 +450,7 @@ class ProviderPool:
                 "task_unresolved": True,
                 "next_provider": next_provider,
                 "sequence": list(sequence),
-                **({"provider_output": provider_output[:500]} if provider_output else {}),
+                **({"provider_output": sanitize_provider_output(provider_output)} if provider_output else {}),
             },
         )
         if no_progress_streak(store, provider) >= NO_PROGRESS_THRESHOLD:
@@ -860,7 +861,7 @@ def _infrastructure_evidence(response: str) -> dict[str, str]:
         if isinstance(value, str) and value:
             evidence[key] = value
     if "provider_output" not in evidence and response:
-        evidence["provider_output"] = response[:500]
+        evidence["provider_output"] = sanitize_provider_output(response)
     return evidence
 
 
@@ -1130,7 +1131,11 @@ class PooledExecutor(Executor):
                         "provider": adapter.name,
                         "outcome": NO_IMPLEMENTATION_CHANGE,
                         "classification": "no_progress",
-                        **({"provider_output": result.provider_output[:500]} if result.provider_output else {}),
+                        **(
+                            {"provider_output": sanitize_provider_output(result.provider_output)}
+                            if result.provider_output
+                            else {}
+                        ),
                     }
                 )
                 try:
@@ -1218,7 +1223,11 @@ def pool_exhaustion_evidence(reason: str | None, attempts: list | None = None) -
                 "provider": str(item.get("provider") or ""),
                 "outcome": str(item.get("outcome") or ""),
                 "classification": str(item.get("classification") or _classification(str(item.get("outcome") or ""))),
-                **({"provider_output": str(item.get("provider_output"))[:500]} if item.get("provider_output") else {}),
+                **(
+                    {"provider_output": sanitize_provider_output(item.get("provider_output"))}
+                    if item.get("provider_output")
+                    else {}
+                ),
             }
             for item in attempts
         ]
