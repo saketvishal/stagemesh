@@ -69,7 +69,7 @@ Founder hands-off operation is opt-in per project. Its deterministic policy, cap
 
 StageMesh selects eligible providers at runtime from project-owned pools. `codex`, `claude`, `grok`, and `agy` are built in; projects may register other command providers and stage-specific commands. Provider availability, stage compatibility, independent-review identity, cooldown, and optional live acceptance are evaluated before dispatch. A provider failure falls through to the next eligible provider within configured budgets.
 
-Projects inventory skills, MCP definitions, and skills-only Claude plugin packages in `.stagemesh/capabilities.json`. Registration is not invocation: `stagemesh capabilities --json` distinguishes declared, installed, enabled, adapter-supported, usable, attached, loaded, invoked, and content-integrity states. Capability contracts opt in by ID, and dispatch refuses relevant policy or source-pin drift.
+`stagemesh skills --json` inventories the five installed, pinned automatic skills, and `stagemesh skills --task <id> --json` previews deterministic stage selection without launching a provider. Projects inventory additional skills, MCP definitions, and skills-only Claude plugin packages in `.stagemesh/capabilities.json`. Registration is not invocation: `stagemesh capabilities --json` reports registry availability, while `stagemesh capabilities --task <id> --json` distinguishes attached, activated, loaded, invoked, and content-integrity evidence. Capability contracts opt in by ID, and dispatch refuses relevant policy or source-pin drift.
 
 Supported runtime adapters are deliberately narrow:
 
@@ -109,6 +109,7 @@ Projects remain PR-only unless they explicitly configure hosted or StageMesh-con
 - [Operator flow](docs/operator-flow.md)
 - [Run-window reference](docs/run-window.md)
 - [Capabilities, skills, MCP, and plugin safety](docs/capabilities.md)
+- [Bundled skills and proof of use](docs/agent-skills.md)
 - [Provider readiness](docs/provider-readiness.md)
 - [Workspace and task recovery](docs/workspace-and-task-recovery.md)
 - [Reliable delivery](docs/reliable-delivery.md)

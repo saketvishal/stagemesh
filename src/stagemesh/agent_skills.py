@@ -25,6 +25,33 @@ _SKILL_FILES = {
     "test-driven-development": "superpowers/test-driven-development/SKILL.md",
     "verification-before-completion": "superpowers/verification-before-completion/SKILL.md",
 }
+_SKILL_METADATA = {
+    "frontend-design": {
+        "origin": "anthropic",
+        "stages": ("IMPLEMENT",),
+        "selection_policy": "frontend paths or explicit UI intent",
+    },
+    "receiving-code-review": {
+        "origin": "superpowers",
+        "stages": ("IMPLEMENT",),
+        "selection_policy": "remediation with recorded findings",
+    },
+    "systematic-debugging": {
+        "origin": "superpowers",
+        "stages": ("IMPLEMENT",),
+        "selection_policy": "bug or failure intent, or remediation",
+    },
+    "test-driven-development": {
+        "origin": "superpowers",
+        "stages": ("IMPLEMENT",),
+        "selection_policy": "code or behavioral change",
+    },
+    "verification-before-completion": {
+        "origin": "superpowers",
+        "stages": ("IMPLEMENT", "REVIEW"),
+        "selection_policy": "every implementation and independent review",
+    },
+}
 _SUPPORT_FILES = {
     "frontend-design": ("frontend-design/LICENSE.txt",),
     "receiving-code-review": ("superpowers/LICENSE.txt",),
@@ -264,6 +291,62 @@ def _resolve_resources(skills: tuple[str, ...]) -> dict[str, Path]:
             checked.add(relative)
         resolved[skill] = root / main
     return resolved
+
+
+def builtin_skill_inventory() -> list[dict[str, object]]:
+    """Return the installed, pinned automatic skill pack without launching a provider."""
+    names = tuple(_SKILL_FILES)
+    files = _resolve_resources(names)
+    try:
+        manifest = json.loads((SKILL_ROOT / "manifest.json").read_text(encoding="utf-8"))
+        resources = manifest["resources"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SkillPackError(f"cannot load bundled skill manifest: {exc}") from exc
+    rows: list[dict[str, object]] = []
+    for name in names:
+        relative = _SKILL_FILES[name]
+        resource = resources[relative]
+        metadata = _SKILL_METADATA[name]
+        path = files[name]
+        rows.append(
+            {
+                "id": name,
+                "kind": "skill",
+                "origin": metadata["origin"],
+                "source": relative,
+                "source_url": resource["source_url"],
+                "git_blob_sha": resource["git_blob_sha"],
+                "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "installed": True,
+                "available": True,
+                "automatic": True,
+                "integrity": "verified",
+                "providers": ["agy", "claude", "codex", "grok"],
+                "provider_neutral": True,
+                "stages": list(metadata["stages"]),
+                "permissions": ["workspace-read"],
+                "selection_policy": metadata["selection_policy"],
+            }
+        )
+    return rows
+
+
+def skill_selection_preview(title: str, contract: object | None) -> dict[str, object]:
+    """Preview deterministic bundled choices without claiming attachment or use."""
+    stages = {
+        "implementation": select_skills(title, contract, stage="implementation"),
+        "remediation": select_skills(
+            title, contract, remediation=True, stage="implementation"
+        ),
+        "review": select_skills(title, contract, stage="review"),
+    }
+    return {
+        "evidence": "selection-preview-only",
+        "attached": False,
+        "loaded": False,
+        "invoked": False,
+        "stages": {name: list(skills) for name, skills in stages.items()},
+    }
 
 
 _PROJECT_SKILL_ROOTS = ("agent-skills", ".agents/skills", ".claude/skills")

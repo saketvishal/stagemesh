@@ -680,6 +680,80 @@ def task_usage(
         connection.close()
 
 
+def task_capability_report(
+    project: Path,
+    database: Path,
+    task_id: str,
+) -> dict[str, object]:
+    """Return the canonical task projection without creating runtime state.
+
+    Unlike the lower-level usage reader, this report keeps registry inventory
+    rows *and* durable observations for bundled/project skills that were never
+    registry declarations.  A frozen task contract supplies the requested
+    capability ids when one is available.
+    """
+    task = str(task_id).strip()
+    if not task:
+        raise CapabilityRegistryError("capability usage task id must be non-empty")
+    root = Path(project).resolve()
+    rows = inventory(root)
+    path = Path(database)
+    if not path.is_file():
+        return {
+            "task_id": task,
+            "history_available": False,
+            "task_exists": False,
+            "skill_evidence_mode": skill_evidence_mode(root),
+            "registry_count": len(rows),
+            "requested": [],
+            "unregistered_requested": [],
+            "capabilities": [
+                {
+                    **row,
+                    "registered": True,
+                    "requested": False,
+                    "invocation": "not-observed",
+                    "evidence_matches_current": None,
+                    "usage": _empty_usage(),
+                }
+                for row in rows
+            ],
+        }
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        requested: tuple[str, ...] = ()
+        frozen = connection.execute(
+            "SELECT canonical_json FROM task_contracts WHERE task_id=?", (task,)
+        ).fetchone()
+        if frozen is not None:
+            payload = json.loads(str(frozen["canonical_json"]))
+            values = payload.get("capability_refs", ()) if isinstance(payload, dict) else ()
+            if isinstance(values, list):
+                requested = tuple(str(item) for item in values)
+        report = task_capability_summary(root, connection, task, requested=requested)
+        report["history_available"] = True
+        present = {str(row["id"]) for row in report["capabilities"]}  # type: ignore[index]
+        report["capabilities"].extend(  # type: ignore[union-attr]
+            {
+                **row,
+                "registered": True,
+                "requested": False,
+                "invocation": "not-observed",
+                "evidence_matches_current": None,
+                "usage": _empty_usage(),
+            }
+            for row in rows
+            if str(row["id"]) not in present
+        )
+        return report
+    except (sqlite3.DatabaseError, json.JSONDecodeError) as exc:
+        raise CapabilityRegistryError(f"cannot read capability usage evidence: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def task_usage_from_connection(
     connection: sqlite3.Connection, task_id: str
 ) -> tuple[bool, dict[str, dict[str, object]]]:

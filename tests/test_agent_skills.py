@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from stagemesh.contracts import ChangeContract
+from stagemesh.contracts import ChangeContract, canonical_contract_json
 from stagemesh.providers import RuntimeCommandAdapter, _build_task_prompt, _command_and_input
 
 VERIFY = "verification-before-completion"
@@ -113,6 +113,91 @@ def test_review_receives_verification_only() -> None:
     assert select_skills(
         "Fix UI regression", contract("Fix UI regression", "web/Intake.tsx"), stage="review"
     ) == (VERIFY,)
+
+
+def test_builtin_skill_inventory_reports_exact_pinned_pack() -> None:
+    from stagemesh.agent_skills import builtin_skill_inventory
+
+    rows = builtin_skill_inventory()
+
+    assert [row["id"] for row in rows] == [
+        FRONTEND,
+        RECEIVE_REVIEW,
+        DEBUG,
+        TDD,
+        VERIFY,
+    ]
+    assert sum(row["origin"] == "superpowers" for row in rows) == 4
+    assert sum(row["origin"] == "anthropic" for row in rows) == 1
+    assert all(row["installed"] is True for row in rows)
+    assert all(row["integrity"] == "verified" for row in rows)
+    assert all(row["provider_neutral"] is True for row in rows)
+    assert all(row["providers"] == ["agy", "claude", "codex", "grok"] for row in rows)
+
+
+def test_builtin_skill_inventory_fails_closed_on_tampered_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import agent_skills
+
+    copied = tmp_path / "skill-packs"
+    shutil.copytree(agent_skills.SKILL_ROOT, copied)
+    (copied / "superpowers" / "verification-before-completion" / "SKILL.md").write_text(
+        "tampered\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(agent_skills, "SKILL_ROOT", copied)
+
+    with pytest.raises(agent_skills.SkillPackError, match="differs from pinned upstream blob"):
+        agent_skills.builtin_skill_inventory()
+
+
+def test_skills_cli_previews_frozen_task_selection_without_writing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from stagemesh.cli import main
+    from stagemesh.persistence import Store
+
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    store = Store(database)
+    store.migrate()
+    task_id = store.upsert_task("Fix frontend regression", source_id="skill-preview")
+    bound = ChangeContract(
+        objective="Fix frontend regression",
+        allowed_files=("web/Page.tsx",),
+    )
+    store.bind_task_contract(
+        task_id,
+        "a" * 40,
+        1,
+        "b" * 64,
+        canonical_contract_json(bound),
+    )
+    store.close()
+    before = database.stat().st_mtime_ns
+
+    assert main(["--project", str(tmp_path), "skills", "--task", task_id, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["count"] == 5
+    assert payload["contract_source"] == "frozen"
+    assert payload["selection"]["evidence"] == "selection-preview-only"
+    assert payload["selection"]["attached"] is False
+    assert payload["selection"]["stages"] == {
+        "implementation": [FRONTEND, DEBUG, TDD, VERIFY],
+        "remediation": [RECEIVE_REVIEW, FRONTEND, DEBUG, TDD, VERIFY],
+        "review": [VERIFY],
+    }
+    assert database.stat().st_mtime_ns == before
+
+
+def test_skills_cli_refuses_unknown_task_without_creating_runtime_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from stagemesh.cli import main
+
+    assert main(["--project", str(tmp_path), "skills", "--task", "missing", "--json"]) == 2
+    assert "unknown task" in capsys.readouterr().err
+    assert not (tmp_path / ".stagemesh" / "stagemesh.sqlite3").exists()
 
 
 def test_referenced_frontend_spec_selects_design_without_losing_project_spec_content(
