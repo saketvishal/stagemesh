@@ -92,3 +92,21 @@ admission. Existing prepared or frozen contracts are not rewritten by installing
 a profile; they keep their required gates and evidence. Broader CI, independent
 review and hosted landing checks remain unchanged. A focused gate does not prove
 unrelated behavior, and failed checks must not be removed to make work pass.
+
+## StageMesh Hosted CI Plan
+
+StageMesh's own protected `windows` and `linux` jobs consume the separate
+`stagemesh.ci-validation/1` plan. This is not a generic client-repository selector.
+It recognizes one audited read-only operator boundary by exact paths and retains a
+fixed operator regression on both operating systems, including the real-browser
+and Windows installer/timezone checks. The plan is data only; it does not execute
+tests, providers or network calls.
+
+Unknown, empty, mixed or policy-sensitive changes select the complete regression.
+That includes workflow/selector/profile, dependency, schema, persistence,
+lifecycle, claims, authorization, security, packaging and shared-interface changes.
+Documentation-only plans explicitly claim no runtime coverage. Mandatory static
+range/attribution, focused-policy and invariant checks remain present in every
+mode. Pushes to `main`, scheduled runs and manual runs always execute the complete
+regression. See [the bounded component audit](validation-components.md) for the
+exact roots, tests, coupling limits and unmeasured dependencies.
