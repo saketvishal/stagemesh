@@ -8,6 +8,7 @@ from pathlib import Path
 from test_survivor_wave import make_store
 
 import stagemesh.cli as cli_module
+from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.queue_reconcile import ReconcileOptions, reconcile_queue
 
@@ -17,7 +18,14 @@ def _decision_block(store, task_id: str) -> None:
     store.add_candidate(task_id, sha, "codex", True)
     store.add_evidence(task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.FAILED)
     store.upsert_finding(f"finding-{task_id}", task_id, sha, "error", "needs product decision")
-    store.block_task(task_id)
+    record_block(
+        store,
+        task_id,
+        BlockKind.HUMAN_DECISION,
+        "needs product decision",
+        stage="REVIEW",
+        candidate_sha=sha,
+    )
 
 
 def _by_id(report):
