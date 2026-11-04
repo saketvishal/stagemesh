@@ -607,19 +607,29 @@ def test_cli_continue_staged_routes_invoke_distinct_review_provider(tmp_path: Pa
         f"Path({str(log)!r}).write_text(Path({str(log)!r}).read_text(encoding='utf-8') + 'claude\\n', encoding='utf-8')\n"
         "print('{\"decision\":\"PASS\"}')\n",
     )
+    adverse_review = _provider_script(
+        tmp_path / "adverse_review.py",
+        f"from pathlib import Path\n"
+        f"Path({str(log)!r}).write_text(Path({str(log)!r}).read_text(encoding='utf-8') + 'grok\\n', encoding='utf-8')\n"
+        "print('{\"decision\":\"PASS\"}')\n",
+    )
     project = _cli_project(
         tmp_path,
-        routing={"mode": "STAGED", "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"}},
+        routing={
+            "mode": "STAGED",
+            "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"},
+            "pools": {"IMPLEMENT": ["codex"], "REVIEW": ["claude", "grok"]},
+        },
     )
     config_path = project / ".stagemesh" / "config.json"
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    data["providers"] = {"codex": impl, "claude": review}
+    data["providers"] = {"codex": impl, "claude": review, "grok": adverse_review}
     config_path.write_text(json.dumps(data), encoding="utf-8")
 
     assert _continue(project) == 0
 
     payload = _review_payload(project)
-    assert log.read_text(encoding="utf-8").splitlines() == ["codex", "claude"]
+    assert log.read_text(encoding="utf-8").splitlines() == ["codex", "claude", "grok"]
     assert payload["implementer_provider"] == "codex"
     roles = payload["review_roles"]
     normal = roles["normal"]
@@ -628,6 +638,7 @@ def test_cli_continue_staged_routes_invoke_distinct_review_provider(tmp_path: Pa
     assert normal["role"] == "normal"
     assert adverse["provider"] == payload["review_provider"]
     assert adverse["provider"] == payload["review_execution_provider"]
+    assert adverse["provider"] == "grok"
     assert adverse["provider"] != normal["provider"]
     assert adverse["execution_id"] != normal["execution_id"]
     assert payload["review_execution_invoked"] is True
