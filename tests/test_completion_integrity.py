@@ -117,16 +117,21 @@ def test_real_independent_review_succeeds_and_advances_to_integrate(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("adapter", "reason"),
-    [(None, "independent_review_unavailable"), (FakeReviewAdapter("Codex"), "review_provider_same_as_implementer")],
+    ("adapter", "reason", "task_status"),
+    [
+        (None, "independent_review_unavailable", TaskStatus.BLOCKED),
+        (FakeReviewAdapter("Codex"), "review_provider_same_as_implementer", TaskStatus.OPEN),
+    ],
 )
-def test_fallback_or_same_provider_cannot_satisfy_required_review(tmp_path: Path, adapter, reason: str) -> None:
+def test_fallback_or_same_provider_cannot_satisfy_required_review(
+    tmp_path: Path, adapter, reason: str, task_status: TaskStatus,
+) -> None:
     rig = Rig(tmp_path, adapter, integration_ref="refs/heads/integration")
 
     rig.tick(6)
 
     assert rig.stage == Stage.REVIEW
-    assert rig.store.get_task(TASK)["status"] == TaskStatus.OPEN
+    assert rig.store.get_task(TASK)["status"] == task_status
     assert not [e for e in rig.evidence(EvidenceKind.REVIEW) if e[0] == EvidenceStatus.PASSED]
     status, payload = rig.evidence(EvidenceKind.REVIEW)[0]
     assert status == EvidenceStatus.CAPACITY

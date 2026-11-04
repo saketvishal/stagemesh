@@ -57,6 +57,8 @@ _CORE_PATTERNS = (
     "src/stagemesh/persistence.py",
     "src/stagemesh/postgres_store.py",
     "src/stagemesh/contracts.py",
+    "src/stagemesh/contract_binding.py",
+    "src/stagemesh/integration.py",
     "src/stagemesh/security.py",
     "src/stagemesh/validation.py",
     "src/stagemesh/validation_plan.py",
@@ -80,6 +82,32 @@ _BROWSER_E2E_SCRIPTS = ("e2e:ui-gate", "test:e2e", "e2e", "playwright")
 # Bounded evidence from docs/validation-components.md, never executable gate selection.
 # Each exact source root maps to (component, direct pytest targets, dependent targets).
 _AUDITED_COMPONENTS = {
+    "src/stagemesh/contract_binding.py": (
+        "candidate_contract_binding",
+        (
+            "tests/test_candidate_binding_hardening.py",
+            "tests/test_contract_admission.py",
+            "tests/test_contract_fail_closed.py",
+        ),
+        (
+            "tests/test_candidate_isolation_integration.py",
+            "tests/test_completion_integrity.py",
+            "tests/test_task_recovery.py",
+        ),
+    ),
+    "src/stagemesh/integration.py": (
+        "exact_integration_evidence",
+        (
+            "tests/test_candidate_isolation_integration.py",
+            "tests/test_integration_recovery.py",
+            "tests/test_review_reliability.py",
+        ),
+        (
+            "tests/test_completion_integrity.py",
+            "tests/test_landing_recovery.py",
+            "tests/test_reliable_delivery_end_to_end.py",
+        ),
+    ),
     "src/stagemesh/validation_plan.py": (
         "planning",
         ("tests/test_validation_plan.py",),
