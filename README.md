@@ -2,19 +2,15 @@
 
 StageMesh is a provider-neutral control plane for autonomous and multi-agent software engineering. It owns task lifecycle, durable state, validation, review, and integration while executors remain replaceable.
 
-Initial lifecycle:
-
 ```text
 PLAN -> IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE
 ```
 
-This repository is a clean vNext implementation with SQLite persistence, deterministic recovery, exact-SHA candidates and evidence, provider-aware routing, task-source synchronization, machine-enforced change contracts, isolated task worktrees, and an invariant test suite.
+Implementation agents run in per-task Git worktrees, not the shared checkout. Validation, review, and integration bind their evidence to the exact candidate SHA. A task cannot reach `DONE` until its contract, validation gates, independent review, and integration prerequisites pass.
 
-Implementation agents run in per-task Git worktrees, not the shared checkout. Validation, review, and integration all bind their evidence to the exact candidate SHA; a task cannot reach `DONE` unless the candidate passes its contract, validation gates, independent review, and integration prerequisites.
+## Quick start
 
-## Quick Start
-
-Install the latest development checkout:
+Install the development checkout:
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -26,495 +22,95 @@ Or install the known-good stable package tag:
 python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.5.0"
 ```
 
-On Windows, the reviewed per-user installer creates an isolated runtime and a Start Menu shortcut without administrator rights:
+The reviewed Windows per-user installer creates an isolated runtime and Start Menu shortcut without administrator rights:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-stagemesh.ps1
 ```
 
-The default package source is pinned to the exact reviewed desktop-launcher commit. A different Git source must pin a 40-character commit;
-a wheel source requires `-WheelSha256`. Preview the exact paths without changing the machine with `-Action Plan -Json`, and remove
-only an installer-owned runtime and shortcut with `-Action Uninstall`. The shortcut opens the project passed with `-Project` (the
-current directory by default). Installing the application never enables a StageMesh schedule.
+The installer never enables a schedule implicitly. Its source-pin, plan, uninstall, and wheel-integrity behavior is documented in [project-local runtime](docs/project-local-runtime.md). See [versioning](docs/versioning.md) for the stable-tag workflow.
 
-See [docs/versioning.md](docs/versioning.md) for the stable-tag workflow.
+Initialize a project and run one bounded task loop:
 
 ```bash
 stagemesh init --project .
 stagemesh doctor
-stagemesh continue --once   # one coordinator pass; plain `continue` supervises one task to completion
-stagemesh continue --parallel 3   # up to three independent tasks at once, one worktree each
+stagemesh continue
 stagemesh status
-python scripts/stabilization_gate.py   # default stabilization gate: synthetic runtime failure matrix, ~30s, no real providers
-pytest
-python scripts/invariants.py
-python scripts/acceptance.py
 ```
 
-The stabilization gate drives the real `stagemesh continue` against a fake provider CLI (`tests/stabilization_support.py`) and asserts
-recovery from provider no-change, timeout, quota, workspace mutation, validation and review failure, fallback, exhaustion and stale
-remediation without any operator step. Add a scenario to `tests/test_stabilization_matrix.py` for every new runtime failure mode.
-
-Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default.
-
-## Founder Operator Loop
-
-For StageMesh development, keep the daily loop short and founder-driven:
+For StageMesh development, bootstrap the project-owned provider pool and run the fast synthetic stabilization gate before broader acceptance:
 
 ```bash
 python scripts/bootstrap_stagemesh.py --providers codex,claude,grok,agy
-stagemesh continue
-stagemesh status
 python scripts/stabilization_gate.py
 ```
 
-Bootstrap once per checkout, then repeat `continue`, `status` and the stabilization gate while work is moving. The stabilization gate
-is the fast local confidence check for the development loop; broad CI, full acceptance and hosted checks are separate merge-readiness
-checks, not the normal daily loop.
+The stabilization gate drives the real coordinator against a fake provider CLI. It tests bounded recovery without calling real providers. Full acceptance, invariants, and hosted CI remain separate merge-readiness gates.
 
-Do not task-doctor every stuck task one by one during the founder loop. Let `status` show blocked work, keep moving on eligible tasks,
-and batch-clean blocked tasks when they accumulate or before a merge-readiness pass.
+Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default. Do not edit it by hand.
 
-## Founder Hands-Off
+## Operating model
 
-StageMesh is being extended so a founder can give only `Implement objective X.` and have branches, CI, review cycles, stacked PRs,
-base movement and recovery handled by deterministic, typed, evidence-backed policy instead of operator instructions. The gate, the
-capabilities, the incident scenarios enforced by tests, the remaining gaps and the ten-task streak live in one canonical document:
-[docs/founder-hands-off.md](docs/founder-hands-off.md). The supervisor is opt-in per project (`autonomy` in `.stagemesh/config.json`;
-the legacy `.stagemesh/autonomy.json` remains supported) and is
-inspected with `stagemesh autonomy isolation | trace | streak | readiness`. For explicitly authorized Windows-local continuous
-operation, the reversible Task Scheduler supervisor is documented in [docs/continuous-driver.md](docs/continuous-driver.md); it wraps
-the existing bounded `run-window` path and is never installed implicitly.
-
-## Provider pools and task isolation
-
-StageMesh picks providers at run time instead of one fixed provider per stage. Each stage (`IMPLEMENT`, `REVIEW`) has a pool
-(default `codex, claude, grok, agy`; a `routing.stage_routes` entry is simply tried first). Set `routing.pools` to pin an explicit list:
-
-```json
-{ "routing": { "pools": { "IMPLEMENT": ["codex", "claude", "grok", "agy"], "REVIEW": ["claude", "grok", "agy", "codex"] },
-              "provider_failure_cooldown_seconds": 900 } }
-```
-
-During project-local installation, choose the project-owned provider pool with:
-
-```powershell
-python scripts/bootstrap_stagemesh.py --providers codex,claude,grok,agy
-```
-
-A provider is skipped (with the reason logged to stderr) when its CLI is not callable, it lacks the stage capability, it failed for
-the same task and stage within the cooldown (this is how auth and quota failures are remembered), or, for `REVIEW` with
-`require_independent_review`, it produced the candidate or shares its command. Failures fall through the pool automatically; if no
-independent reviewer exists StageMesh refuses and lists every provider with its skip reason. Implementation always runs in an
-isolated git worktree and the integration ref only advances after validation, independent review and integration pass.
-
-### Provider registry and selection policies
-
-Provider registration is separate from worker capabilities. Projects can inventory local skills, MCP definitions, and Claude plugin
-packages in `.stagemesh/capabilities.json`; `stagemesh capabilities --json` reports declared, installed, enabled, adapter-supported,
-usable, and content-integrity states without installing or invoking anything. New registration pins reviewed source content;
-`stagemesh capabilities pin <id> --plan --json` previews an explicit legacy pin or reviewed refresh, and dispatch refuses drifted pins.
-Read-only `SKILL.md` attachment, skills-only Claude plugin import, and
-bounded Codex stdio MCP have runtime adapters, and contracts opt in by id with `capability_refs`. The plugin importer never activates
-hooks, agents, commands, MCP, LSP, or other executable plugin components. Codex MCP disables ambient servers, restricts an
-already-installed server to declared read-only tools, and requires redacted invocation evidence. MCP for other providers and executable
-plugin requests fail closed. See
-[docs/capabilities.md](docs/capabilities.md) for the schema and audit semantics.
-`stagemesh capabilities discover --root <project-directory>` safely inventories additional vendored skills, skills-only Claude plugins,
-and bounded MCP manifests; it does not install, register, enable, attach, load, or invoke them.
-`stagemesh capabilities vendor <id> --kind ... --source ... --plan --json` previews a bounded copy of one explicitly reviewed local
-source, including a UTF-8 skill package with referenced support files. Applying copies only accepted content into the project, pins the
-complete copied tree, and registers it disabled; it performs no network/package installation, provider or subprocess call, enablement,
-task selection, attachment, load, or invocation.
-An explicit `--update --plan` previews replacement of the matching tree-pinned vendored source; applying uses rollback protection and
-always leaves the refreshed declaration disabled. Verified identical content is not rewritten.
-Use `stagemesh capabilities contract --task <id> --add <capability> --plan --json` to preview explicit task opt-in, then remove
-`--plan` for an atomic project-contract update. Existing frozen task bindings are never silently changed. Before dispatch,
-`stagemesh capabilities preflight --task <id> --json` reports the exact compatible provider/stage routes without invoking them.
-When a runtime contract is first frozen, StageMesh also freezes the selected registry declarations (source, provider/stage scope,
-permissions, enablement, and source pin) plus the effective skill-evidence mode. Dispatch refuses relevant policy drift before implementation or review starts; unrelated
-registry entries may change. Preflight, task-doctor, and run-window expose the frozen/current policy digests and require an audited
-`rebind-contract` for legacy-unbound or deliberately changed selections.
-Projects may opt into `observed-load-required` skill evidence. Supported provider JSON streams then produce redacted
-`capability.loaded` receipts for implementation and review, and a provider that does not show every selected skill being read before
-its first recorded mutation is rejected without a quota cooldown. Review streams must also contain a recognized final-answer event;
-unknown JSONL shapes fail closed. The default remains attachment-only and never overstates prompt delivery as model use.
-Use `stagemesh capabilities policy observed-load-required --plan --json` to preview the bounded registry change, then remove `--plan`
-to apply it atomically. Task and run reports expose the effective policy alongside usage evidence.
-
-Projects may also opt into a read-only, version-pinned specification authority audit with `stagemesh spec-audit`. It distinguishes
-active, historical, and pending OpenSpec material, reports structural blockers separately from semantic uncertainty, and can invoke an
-already-installed exact-version OpenSpec validator without installing, syncing, or archiving anything. See
-[docs/spec-governance.md](docs/spec-governance.md) for configuration, CI use, adoption, rollback, and limits.
-
-`codex`, `claude`, `grok` and `agy` are built-in registry entries; any other name can be added under `providers`, as a plain command string
-or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `priority` (lower first) and `weight`:
-
-```json
-{ "providers": { "my-agent": { "command": "my-agent run", "capabilities": ["IMPLEMENT"] },
-                 "reviewer-bot": { "command": "reviewer-bot review", "capabilities": ["REVIEW"] } },
-  "routing": { "pools": { "IMPLEMENT": ["codex", "claude", "grok", "my-agent"], "REVIEW": ["claude", "grok", "reviewer-bot"] },
-               "provider_selection_policy": "round_robin", "provider_weights": { "claude": 2, "grok": 2 } } }
-```
-
-A provider can run a different command for one stage (for example a read-only reviewer) while staying **one logical provider**:
-`command` is the default, and `review_command` / `implement_command` (or `"commands": {"REVIEW": "...", "IMPLEMENT": "..."}`) replace it for
-that stage only. Independence is judged by provider name (and any command in common), so a candidate implemented by `claude` is never
-reviewed by `claude`, whichever command each stage runs. `command` may be omitted only when every stage the provider serves has its own.
-`stagemesh capacity`, `config` and `doctor` show which command runs for each stage and whether it is the default or an override.
-
-An implementation provider may also declare an exact, opt-in setup command for a
-classified tool failure, for example `"recovery_setup_actions":
-{"missing_dependency": "python -m pip check"}`. StageMesh never derives setup from
-provider output: it executes at most one configured setup and one verification of
-the original command, with durable receipts and fresh authorization and budget
-checks. Providers without this field retain the default fail-closed behavior.
-Provider diagnostic text crosses one shared bounded/redacted storage boundary; the
-exact persistence, legacy projection, and CI guarantees are documented in
-[docs/provider-output-security.md](docs/provider-output-security.md).
-
-```json
-{ "providers": { "claude": { "command": "claude -p --permission-mode acceptEdits",
-                             "review_command": "claude -p --allowedTools Read Grep Glob" } } }
-```
-
-`provider_selection_policy` ranks the *eligible* providers of a stage (after CLI, capability, cooldown and independence checks):
-`priority` (default: priority, then pool order), `round_robin` (next after the provider that last answered for the stage),
-`least_recently_used` (never-used first, then oldest answer) or `weighted` (lowest `(uses+1)/weight` first). The remaining providers
-form the fallback chain in the same order. `STAGEMESH_<NAME>_CMD` overrides any provider command, `--provider` pins implementation,
-and SINGLE_AGENT mode still uses its one provider.
-
-See `docs/examples/grok-provider-pools.config.json` for a project config that makes Grok a first-class IMPLEMENT and REVIEW
-provider while preserving independent review.
-
-## Choosing the next task
-
-Use [exact-label work scopes](docs/label-scope.md) to restrict a run, persist its
-selector across restarts, and bind planned children without broadening admission.
-
-Plain `stagemesh continue` runs the only eligible task, or ranks several and runs the best one. `--task <id>` bypasses ranking and
-is how a stale task is retried; `--choose` asks on the terminal. Ranking (best first): priority label, preferred label
-(`stagemesh:prep`, `prep`, `governance`, `readiness`), valid contract over one needing auto-planning, then issue number. Tasks with an
-excluded label (`stagemesh:blocked`, `stagemesh:deferred`), unmet dependencies, a stale failure (failed integration or pending
-remediation) or no contract that can be auto-planned are skipped. The reason is logged and returned as `selection` in `--json`.
-GitHub synchronization still registers open non-objective issues that are not eligible, so the complete backlog and its dependency
-frontier remain visible without making deferred work runnable. Dependency links are reconciled only after discovery completes.
-Issues with contradictory ready/blocked labels, a self-dependency or an unknown dependency are registered as blocked with a
-`source validation failed` reason; one malformed issue does not hide or stop valid work.
-Tune it with:
-
-```json
-{ "task_selection": { "auto_select": true, "tie_breaker": "issue_number",
-                    "priority_labels": ["priority:p0", "priority:p1", "priority:p2", "priority:p3"],
-                    "preferred_labels": ["stagemesh:prep"], "excluded_labels": ["stagemesh:blocked"] } }
-```
-
-## Parallel execution
-
-`stagemesh continue --parallel N` runs up to N independent tasks at once instead of one. It cannot be combined with `--task`,
-`--choose` or `--once`; tasks are picked by the same ranking as above (best first), so blocked, excluded-label, stale-failed,
-dependency-blocked and unplannable tasks are never started. A task whose dependency is still running waits; it starts the moment
-the dependency is DONE.
-
-* **Isolation.** Every running task has its own worktree and its own database connection; a task that crashes or fails stops
-  only itself (the run ends `PARTIAL`). By default, task worktrees live under the project-owned runtime directory
-  `.stagemesh/worktrees`; a DONE task's worktree is removed.
-* **Conflicts.** A candidate task is deferred while a running task conflicts with it: a shared `exclusive_resources` entry in the
-  contracts (for example `"exclusive_resources": ["test-db"]`), or a `protected_files` pattern that overlaps the other task's
-  allowed or protected files. Deferrals are listed under `deferred` in `--json`.
-* **Providers.** Each provider runs at most `parallel.provider_max_concurrency` (default 2) things at once, or its own
-  `providers.<name>.max_concurrency`; a saturated preferred provider hands work to the next one, otherwise the task waits for a
-  slot. A provider failure that is not about the code (rate limit, outage, auth) puts the provider in cooldown for every task.
-  Validation and review run concurrently per task.
-* **Integration.** Moving the integration ref is serialized by a lock (`.stagemesh/integration.lock`; thread and process safe, and
-  released by the OS if the holder dies). If the ref advanced past a candidate, it is rebased in its own worktree under the lock,
-  then re-validated and re-reviewed before landing (up to `parallel.integration_rebase_attempts`, default 2). A conflicting or
-  over-budget rebase leaves INTEGRATION evidence FAILED with the typed finding `integration_rebase_conflict` or
-  `integration_stale_base`; the ref is never touched.
-* **Output.** Human output prefixes every line with `[task-id]`. `--json` reports each task separately under `tasks` (timestamped
-  `lifecycle` events, `steps`, `final`, provider events) plus `task_outcomes`, `deferred`, `skipped` and `recovered`.
-* **Ctrl+C and restart.** Ctrl+C stops every task, kills the provider processes it started, fails their running executions,
-  releases their claims and discards uncommitted partial edits; worktrees with committed work are kept and the next run resumes
-  them (exit code 130). After a hard kill the next run releases claims whose owning process is provably dead and removes
-  worktrees that belong to finished or unknown tasks.
-* **Worktree root.** Configure `runtime.worktree_root` in `.stagemesh/config.json` to move task worktrees to another reviewed
-  location. When that location is outside the project runtime directory, StageMesh creates a project-specific child below it so
-  cleanup cannot cross into another project's task worktrees. StageMesh refuses broad roots such as the filesystem root, drive root,
-  home directory, or project parent unless `runtime.allow_unsafe_worktree_root` is explicitly set after operator review.
-  Paths inside the project but outside `.stagemesh`, including product source and `.git`, stay refused even with that escape hatch.
-  `stagemesh doctor` shows the effective worktree root and any legacy roots it can see.
-  Older worktrees from the legacy global `.sm-wt` layout are never deleted automatically; inspect and remove them manually once no
-  interrupted task needs them:
+Use `stagemesh run-window` for bounded unattended or production work. It applies preflight checks, journals the run, uses isolated task worktrees, and remains PR-only unless the project explicitly authorizes a merge policy. The normal operator flow is:
 
 ```bash
 stagemesh doctor
-git worktree list
-git worktree remove --force <legacy-worktree-path>
-git worktree prune
+stagemesh queue reconcile
+stagemesh run-window
+stagemesh doctor
 ```
 
-```json
-{ "runtime": { "worktree_root": ".stagemesh/worktrees" },
-  "parallel": { "provider_max_concurrency": 2, "integration_rebase_attempts": 2 },
-  "providers": { "codex": { "command": "codex exec", "max_concurrency": 3 } } }
-```
+See [operator flow](docs/operator-flow.md) for queue reconciliation, blocked work, provider cooldowns, survivor waves, and interrupted runs. See [run-window](docs/run-window.md) and [run-window budgets](docs/run-window-budgets.md) for options, stop rules, restart behavior, delivery, and merge policy.
 
-### `stagemesh queue-run`
+Founder hands-off operation is opt-in per project. Its deterministic policy, capability boundaries, incident scenarios, evidence requirements, and remaining acceptance gaps are tracked in [founder hands-off](docs/founder-hands-off.md). The reversible Windows scheduler wrapper is documented in [continuous driver](docs/continuous-driver.md) and is never installed implicitly.
 
-`stagemesh queue-run --concurrency N [--max-steps N] [--json]` is the strict, supervised form of `continue --parallel`, for a shared
-queue. It syncs the task sources, runs the project preflight, then starts up to N tasks whose contracts do not conflict.
+## Providers, skills, MCP, and plugins
 
-* **Preflight.** A project with `.stagemesh/profile.json` must pass `stagemesh project-smoke`, otherwise the whole run is refused
-  (`REFUSED:preflight_failed`, exit 2, nothing started). A project without a profile has no smoke to run and relies on per-task
-  contracts; the git repository and the integration target must still resolve.
-* **Admission, per task (a refusal never stops the others).** No contract: refused (`missing_contract`; nothing is auto-planned).
-  Uncommitted changes in the checkout at any path the task may write (its `allowed_files` minus `forbidden_files`; `.stagemesh/`
-  and `.git/` excluded): refused (`dirty_working_tree`, with the paths).
-* **Conflicts.** Tasks never run together when their allowed write scopes overlap (patterns are compared, so it can serialize
-  tasks that would not really collide, never the reverse), or they share an `exclusive_resources` entry, or one's
-  `protected_files` overlap the other's scope. Deferred tasks run after the conflicting one finishes and are listed under `deferred`.
-* **Isolation and integration.** Each task works in its own worktree; validation and review run per candidate; integration to the
-  target branch is one at a time under the integration lock, with rebase-and-revalidate or a typed failure when the branch moved.
-* **Recovery.** Only claims whose owner process is provably dead are released; live or unknown owners are never touched.
-* **Stopping.** The run ends when every selected task is DONE, BLOCKED, refused or out of steps (`--max-steps` is per task), after
-  Ctrl+C, or on a global safety failure (for example the integration lock cannot be taken), which halts every task and releases
-  its claims (`GLOBAL_SAFETY_FAILURE`). `--json` adds `preflight` and `refused` to the per-task lifecycle report of `--parallel`.
+StageMesh selects eligible providers at runtime from project-owned pools. `codex`, `claude`, `grok`, and `agy` are built in; projects may register other command providers and stage-specific commands. Provider availability, stage compatibility, independent-review identity, cooldown, and optional live acceptance are evaluated before dispatch. A provider failure falls through to the next eligible provider within configured budgets.
 
-## Diagnosis before remediation
+`stagemesh skills --json` inventories the five installed, pinned automatic skills, and `stagemesh skills --task <id> --json` previews deterministic stage selection without launching a provider. Projects inventory additional skills, MCP definitions, and skills-only Claude plugin packages in `.stagemesh/capabilities.json`. Registration is not invocation: `stagemesh capabilities --json` reports registry availability, while `stagemesh capabilities --task <id> --json` distinguishes attached, activated, loaded, invoked, and content-integrity evidence. Capability contracts opt in by ID, and dispatch refuses relevant policy or source-pin drift.
 
-When a candidate fails validation, review or integration, StageMesh diagnoses the failure before it spends another implementation
-attempt. It summarizes the failing evidence, compares it with the task's earlier failed candidates (shas, numbers, timings and temp
-paths are ignored; reviewer wording may differ), and classifies it:
+Supported runtime adapters are deliberately narrow:
 
-| Category | Meaning | Typical fix |
-|---|---|---|
-| `contract_scope` | the contract forbids or does not cover what the task needs, or its size limits are too small | widen the contract or split the task |
-| `validation_gate` | a gate cannot run or is misconfigured (missing tool, timeout, no executable gate) | fix the gate or environment |
-| `review_finding` | the independent reviewer keeps raising the same concern | address it, or fix the acceptance criteria |
-| `implementation_defect` | a gate runs and fails on the code | read the output; the test may be wrong |
-| `provider_no_progress` | the provider produced nothing, or the same tree again | check the provider, try another |
-| `integration_conflict` | the integration ref moved and the candidate no longer lands | rebase or re-implement |
-| `stale_baseline` | the task baseline is behind the integration ref, so other tasks' files show up in this task's diff | `rebaseline-task` |
+- read-only `SKILL.md` attachment;
+- skills-only Claude plugin import without hooks, commands, agents, MCP, or LSP activation;
+- bounded Codex stdio MCP with ambient servers disabled, declared read-only tools, and redacted invocation evidence.
 
-When the same failure happens `repeat_threshold` times in a row (default 2), the task is blocked early with the diagnosis instead of
-burning the remaining budget (`stopped early, contract_scope (2 identical failures): ...` in `continue`, the `diagnosis` object in
-`--json`, and a `task.diagnosis_stop` audit event). A failure that differs from the previous one is progress and keeps the normal
-remediation loop. `retry-task` starts a fresh comparison. Every diagnosis is also stored as a `task.diagnosis` audit event and is
-passed to the next implementation attempt along with the findings.
+Executable plugin components, unsupported provider MCP routes, unpinned content, and permission expansion fail closed. Discovery and vendoring do not enable or invoke capabilities. See [capabilities](docs/capabilities.md), [agent skills](docs/agent-skills.md), [provider readiness](docs/provider-readiness.md), and [provider-output security](docs/provider-output-security.md).
 
-`stagemesh diagnose --task <id> [--json] [--threshold N] [--provider NAME]` shows the same diagnosis on demand (read-only). With a
-provider it also runs a separate diagnostic pass: the provider sees the recorded facts and a checkout of the candidate under the
-same read-only rules as independent review, and any change it makes to the checkout is discarded as a failure. Configure it to run
-automatically before each further implementation attempt:
+## Task selection, isolation, and parallel work
 
-```json
-{ "diagnosis": { "repeat_threshold": 2, "stop_on_repeat": true, "provider": "claude", "dispatch": "every_failure" } }
-```
+Plain `stagemesh continue` runs the only eligible task or ranks eligible work by project policy. Use `--task <id>` for a specific task. Exact-label scopes restrict admission across restarts; contradictory labels, invalid dependencies, objective roots, stale failures, and unplannable tasks remain visible but do not become runnable. See [label scopes](docs/label-scope.md).
 
-A `stale_baseline` stops the task at once, and a repeated `contract_scope`, `validation_gate` or `provider_no_progress` stops it
-before the implementation provider is called again: none of them can be fixed by more code. Findings are stored verbatim, shown in
-`continue`, `queue-run` and `diagnose`, and quoted unabridged (with the candidate sha) in the next implementation prompt.
+`stagemesh continue --parallel N` gives each task a separate worktree and database connection. Provider concurrency, contract write scopes, protected files, exclusive resources, dependency order, and serialized integration prevent unsafe overlap. A task failure stops that task, not unrelated work.
 
-The exact ordinary, reopened, and exhaustion-round limits—and the durable epoch and retry evidence shown by `task-doctor`—are documented in [docs/recovery-budgets.md](docs/recovery-budgets.md).
+For production operation, use `run-window`. Raw `queue-run` is a legacy execution surface and requires explicit unsafe opt-in. The complete admission, recovery, interruption, and reporting behavior is in [operator flow](docs/operator-flow.md) and [run-window](docs/run-window.md).
 
-### Workspace ownership and external-mutation detection
+## Recovery and safety boundaries
 
-Each task's worktree is written by one StageMesh execution at a time. An execution claims the worktree with an owner file in its private
-git dir, created atomically (`O_EXCL`); while that owner is alive every other claim fails closed. Claims, including the takeover of a dead
-owner's lease, are serialized by a per-workspace OS file lock: when several executions find the same dead owner, exactly one takes it over
-and the others are refused while it holds the lease (a claim that cannot get the lock within 10 seconds is refused too). Once the owner
-releases, a later claim proceeds like any other, checked against the seal. An acquisition that fails after creating the owner file
-safely unwinds under the per-workspace lock without stranding an empty or corrupt record. On exit, release cleans up the owner record
-under the workspace lock with bounded retries for transient sharing contention (such as Windows file handles); if release permanently
-cannot complete, it surfaces a typed `WorkspaceReleaseError` and fails closed rather than silently reporting success. Cleanup never
-removes a foreign owner's record. When an execution finishes it *seals* the result: the HEAD, a content fingerprint of the
-uncommitted files, and the candidate SHA it produced. The agent's own edits, and linear commits it makes while it holds the lease, are the
-authorized result.
+StageMesh diagnoses validation, review, provider, and integration failures before spending another implementation attempt. Repeated failures stop at bounded thresholds; changed failures count as progress. Recovery choices, evidence, retry epochs, and terminal fences are documented in [recovery budgets](docs/recovery-budgets.md) and [reliable delivery](docs/reliable-delivery.md).
 
-No table or schema is added: ownership state lives in the worktree's git dir. StageMesh does write audit events
-(`workspace.ownership_initialized`, `workspace.lease_recovered`, `EXTERNAL_WORKSPACE_MUTATION`, `task.blocked`) and marks an execution that
-hit a mutation FAILED.
+Every task worktree has one StageMesh owner at a time. Lifecycle boundaries verify the sealed HEAD, tracked content, candidate identity, and exact-candidate evidence. External mutation blocks the task; StageMesh does not reset, adopt, or silently reconcile the workspace. This is lifecycle-boundary detection, not cryptographic isolation from another process running as the same user.
 
-The worktree and the candidate rows are compared with the seal before the agent starts and after it exits, before and after validation,
-before and after independent review, before integration, and before a rebase rewrites the worktree. Review always runs in a throwaway
-checkout of the exact candidate SHA, never in the implementation worktree, and a validation gate that moves HEAD in its checkout cannot
-pass. These are treated as external mutation: a new commit or moved HEAD; a modified, added or deleted file whose content differs from the
-seal; a lost or foreign lease; a candidate that is not the sealed one; missing PASSED validation evidence for the exact candidate SHA
-(checked before review and before integration, where PASSED review evidence is required as well); and git output that cannot be decoded
-as UTF-8 (`git_output_undecodable`). Git output is decoded as UTF-8 whatever the Windows locale is, so non-ASCII paths are fingerprinted
-under their real names. This list is what the code checks, not a promise that every possible change to a workspace is caught (see the
-known gaps below). Each detection records an `EXTERNAL_WORKSPACE_MUTATION` audit event (task, execution or claim, workspace, stage, reason,
-expected and observed SHA, changed paths, remedy) and blocks the task. The mutated workspace is not reset, committed or adopted, and the
-task does not advance on it. Evidence rows already written around the detection are not deleted.
+Use `stagemesh task-doctor` before any repair. Contract rebinding, rebaselining, baseline advancement, survivor waves, ownership recovery, known gaps, and refusal rules are preserved in [workspace and task recovery](docs/workspace-and-task-recovery.md). Never repair task state by editing SQLite.
 
-**Dead owners.** A lease whose owning process is dead is taken over only if the workspace is exactly what that owner last sealed; then
-`workspace.lease_recovered` is audited. If anything differs (a commit, a tracked edit, any added file) the claim is refused as an external
-mutation instead, so a killed agent's half-written output also needs an operator. An execution interrupted by an exception or Ctrl+C
-after the before-agent check seals what it left, but only if HEAD is still the sealed HEAD or a linear descendant of it; an unrelated HEAD
-is refused. An interrupt before that check does not adopt a change that appeared first.
+## Profiles, handoff, and delivery
 
-**Older worktrees.** A worktree with no ownership record (created before this feature) is adopted only when its tracked files are clean
-and, if the task has a recorded candidate or baseline, HEAD equals it (a task with neither recorded is not compared). Untracked files in
-such a worktree are not checked.
+Monorepos and projects that cannot infer root-level gates should commit `.stagemesh/profile.json`. Profiles define task types, gates, file scopes, size limits, and label behavior; a hand-written task contract still wins. See [profiles](docs/profiles.md) and the [Caventra profile](docs/profiles/caventra.md).
 
-**Recovery is explicit.** Inspect the workspace and either reset it to the event's `expected_sha` or remove it
-(`git worktree remove --force <workspace>`), then `stagemesh retry-task --task <id>`. StageMesh never reconciles on its own.
+`stagemesh handoff export` writes a redacted, schema-validated JSON snapshot inside the project. It includes task, queue, execution, gate, contract-scope, and advisory next-command metadata while excluding prompts, gate environments, canonical contract JSON, configuration, and secret-looking values.
 
-**What this guarantees, and what it does not.** StageMesh provides exclusive StageMesh ownership of a task worktree, verification of the
-exact starting state, a bounded window in which changes are authorized, a linear sealed candidate, and fail-closed detection at lifecycle
-boundaries. It does *not* prove which process changed or committed files during the authorized agent execution window: git cannot tell the
-lease holder's agent from an unrelated process running as the same user, and StageMesh does not try to infer it from commit identity,
-timestamps or process guesses. Cryptographic, process or container isolation of same-user filesystem writers is separate future hardening
-work; until then, same-user mutation during that window is not solved, only bounded.
+Projects remain PR-only unless they explicitly configure hosted or StageMesh-controlled merging. Required checks must be green for the exact reviewed candidate; missing, pending, skipped, failed, or uncertain checks never count as success. Concurrency, ancestry, repository identity, base movement, post-landing verification, and interrupted delivery all fail closed. See [run-window merge policy](docs/run-window.md#pr-merging) and [reliable delivery](docs/reliable-delivery.md).
 
-**Known gaps (follow-up hardening).** The fingerprint does not cover the index state alone (staging an already-dirty file), skip-worktree
-or assume-unchanged edits, ignored files, or a branch switch at the same SHA. Claimants hold the per-workspace lock across the
-owner-file create and JSON write, so they wait instead of reading a partial record; a reader that does not take that lock can still see
-an unreadable record and fail closed, and on Windows the owner's own rewrite of that file (`os.replace`) can fail with a sharing error
-when such a read lands in the same instant. Validation evidence recorded before a detection is reused after `retry-task`. `parallel`
-partial-edit cleanup, `adopt-candidate --validate` and `recovery` revalidation do not go through the guard, and `adopt-candidate` on a
-worktree with no ownership record makes the next boundary check refuse it (remove the worktree and `retry-task`). A gate that dirties
-its checkout without moving HEAD is not detected. Git calls elsewhere in StageMesh still decode with the process locale.
+## Documentation map
 
-### Repairing a stuck task without touching SQLite
-
-All three commands go through the store, refuse while the task has an active claim or running execution, never delete candidates,
-findings, evidence or audit events, and write an audit event (`task.contract_rebound`, `task.rebaselined`).
-
-* `stagemesh task-doctor --task <id> [--json]` (read-only): stage/status, claims and executions, latest candidate, baseline (and
-  whether it is stale), contract digest/version, latest validation failures and review findings, typed tool failures, contextual
-  research receipts, planning-spec/challenge status, exact-candidate adverse-review status, candidate-bound browser/API evaluation
-  status and artifact references, diagnosis, and the next command. Research output is projected as provider/identity/count metadata,
-  including opt-in recommended/no-touch scope counts and candidate-admission status;
-  planning output never exposes spec or challenge contents; configured planner/challenger receipts show bounded provider,
-  command/execution identity and artifact digests only. E2E artifact contents are never read by the doctor.
-* `stagemesh rebind-contract --task <id> [--validate] [--force] [--reason TEXT] [--json]` re-reads
-  `.stagemesh/contracts/<id>.json`, canonicalizes it and replaces the frozen contract. The stored version is always this build's
-  supported version, never copied from the old row (this repairs `unsupported bound contract version: 2`). It refuses when passed
-  evidence bound to the old contract would stop counting, unless `--force` (the evidence is kept). `--validate` validates the
-  latest candidate and advances the task if it passes.
-  Invalid invariants are refused before implementation, validation or review provider calls; they are not code-remediation work.
-  Legacy strings are never guessed to be prose. To classify selected requirements, use repeatable one-based
-  `--review-invariant INDEX` or `--command-invariant INDEX` with `--reason`. First add `--plan` to preview the exact
-  original text, new hash and evidence invalidation. Classification uses the verified frozen contract when present,
-  adds only the selected type prefixes, preserves all other requirements and gates, and never edits contract files.
-  Recognized executable checks cannot be downgraded to review. Unselected ambiguous invariants still refuse admission.
-  Applying the plan snapshots the exact original payload, new canonical contract and each explicit classification in
-  a durable authorization event before any binding write, followed by a completion event. Unknown contract fields
-  refuse classification rather than risk losing requirements.
-  Passed evidence needs `--force` to stop counting and is retained as history. The current candidate must pass fresh validation
-  and review under the new hash; review requirements cannot pass via the builtin fallback. Only a fresh passed validation
-  resolves prior parser-error findings, never substantive code or review findings. `--plan` runs no checks or providers.
-  Older missing-program failures caused by executing the explicitly reclassified prose are resolved only after fresh
-  independent review passes, with matching candidate, old/new contract hashes, original command and audit provenance.
-  Unrelated gate failures and real code/review findings remain open.
-* `stagemesh rebaseline-task --task <id> --to <integration-ref> [--validate] [--force] [--json]` moves a stale baseline to the
-  candidate's merge-base with the integration ref, removing files integrated by other work from the task diff. It refuses when the
-  baseline is not stale, the candidate is already integrated, or the history is ambiguous (`--force` only overrides the ambiguous
-  cases).
-* `stagemesh advance-baseline --task <id> [--to <ref>] [--reason TEXT] --yes [--json]` moves the task baseline (and the frozen
-  contract's baseline) forward to the integration ref, resets the task's idle worktree onto it and returns the task to `IMPLEMENT`
-  with a fresh remediation budget, so the next run starts from current code instead of stacking on an old worktree. Use it when a
-  task's candidates keep failing on code that has since been fixed on the integration ref (`rebaseline-task` cannot help there,
-  because the candidates descend from the old baseline). It refuses without `--yes`, with an active claim or running execution, at
-  `INTEGRATE`, for a quarantined, unreadable, live-owned or non-checkout worktree, and unless the old baseline is an ancestor of the target. Before anything
-  changes, the worktree state (including uncommitted files) and every earlier candidate are kept under
-  `refs/stagemesh/preserved/<task>/<sha>`; candidates, evidence and findings are never deleted, they stay bound to the old baseline
-  and cannot satisfy a candidate built on the new one. One `task.baseline_advanced` audit event records old/new baseline, reason,
-  operator, preserved refs and superseded candidates. The baseline move, the stage reset, the cleared remediation budget and the audit
-  event are written in one database transaction.
-
-* `stagemesh survivor-wave --tasks 155,156,159 [--concurrency 2] [--max-steps-per-task 12] [--to REF] [--no-advance-baselines] [--no-pr]
-  [--stop-on-blocked] [--report PATH] [--json]` runs a chosen set of stuck or open tasks end to end. For each eligible task (it exists, is
-  not done, is not an objective root and has no claim or running execution) it unblocks a BLOCKED task, advances a stale baseline with
-  `advance-baseline` only when that cannot discard validated progress (a task whose latest candidate already passed validation keeps it;
-  integration refreshes it onto the new base), then runs `continue --task N` in a child process with at most `--concurrency` at once.
-  A task that reaches DONE locally gets a PR (`wave/task-<id>` pushed without force, then `gh pr create`); the wave never merges and
-  never cleans a worktree. Review failures are remediated by the normal loop. A task blocked with unresolved review findings is reported
-  as `blocked_needs_decision` and the others carry on (`--stop-on-blocked` stops instead). The wave stops starting tasks when two tasks
-  fail with the same infrastructure signature (for example `CURRENT_PROBLEM`, a runner crash, an external workspace mutation) or when
-  the `recovery.orphan_execution_failed` count rises, and exits 1. Tasks already running finish; nothing is killed. The report lists
-  per task baseline before/after, candidates touched, validation/review/integration results, PR URL and final status.
-
-`queue-run` auto-plans a task that has no contract with the same deterministic path as `continue` (log line
-`task <id>: auto-planned contract ...`), and still refuses it when no safe bounded contract can be derived or with `--no-auto-plan`.
-
-`dispatch` is `every_failure` (before each further attempt), `on_repeat` (only when the failure repeats) or `never`. Without
-`provider` there is no provider pass. A provider that is unavailable or fails never blocks the lifecycle; the diagnosis is still
-recorded without its analysis. `stop_on_repeat: false` keeps diagnosing but spends the whole budget as before.
-
-## Project profiles
-
-A project that cannot be validated by guessing root-level test commands (a monorepo) ships `.stagemesh/profile.json`: task types
-(prep, frontend, backend, schema, full), their gates, allowed/forbidden files and size limits, and label behavior. Auto-planning
-builds contracts from it, `stagemesh profile --task <id>` shows what a task would get, and a hand-written contract still wins.
-See `docs/profiles.md` and the Caventra profile in `docs/profiles/caventra.md`.
-
-### Packaging state for review
-
-* `stagemesh handoff export [--out FILE] [--to INTEGRATION_REF] [--force] [--json]` (read-only) writes one redacted JSON file
-  (default `.stagemesh/handoff/<UTC timestamp>.json`, always inside the project, never over an existing file without `--force`).
-  It holds the branch and SHA, task states, queue state (ready/blocked/claimed, work packets, retries, workers, dirty tree), active
-  executions, the latest run (recent executions and audit events), stored gate commands/results, changed files, each task's contract
-  scope (allowed/forbidden/protected files, limits, gate names) and an advisory next command. Schema: `stagemesh.handoff/1`;
-  `stagemesh.handoff.validate_handoff` checks a document. Secret-looking keys and values, URL credentials, environment secrets and
-  absolute paths are redacted; gate environments and output, prompts, canonical contract JSON and configuration are never read in.
-
-
-
-### Project-controlled automatic merging
-
-Projects remain PR-only unless they explicitly opt in via command or `.stagemesh/config.json`:
-
-```json
-"merging": {
-  "mode": "stagemesh",
-  "required_checks": ["backend", "web", "contracts"],
-  "check_app_id": 15368
-}
-```
-
-The check names and publisher ID above are Caventra's verified GitHub Actions
-checks; other projects must specify their own reviewed values. Supported modes
-are `pr_only` (global default), `hosted` (requires the existing server-enforced
-branch safeguards), and `stagemesh` (explicit client-enforced landing policy).
-The latter works without paid private-repository branch protection. It requires
-verified repository identity/write access, independent review, latest successful candidate-and-contract-bound
-validation and review evidence, no unresolved blockers, all named hosted checks
-from the configured publisher, and every other observed CI gate to be green.
-Missing, skipped, pending, failed or uncertain required checks never count as green.
-
-`run-window` resolves the project policy automatically and defaults to concurrency
-1 when merging. `--pr-only` explicitly disables automatic merging for that window;
-`--merge-policy hosted|stagemesh` chooses a policy for one window. Existing
-`--auto-merge-ff` explicitly chooses the hosted policy. An explicit concurrency
-above 1 is refused for automatic merging. Command-line required check names add
-to the project's list and cannot remove its required gates.
-
-Run-window child steps, wave runs, outer continuations, restart behavior, audit
-receipts, and their independent CI acceptance checks are defined in
-[docs/run-window-budgets.md](docs/run-window-budgets.md).
-
-Both policies reuse supervised exact-candidate fast-forward landing. The client
-proves ancestry, pins repository URLs, and atomically compares the remote main
-with the previously verified base before updating it to the reviewed SHA. A
-concurrent base change refuses the push. Post-landing verification and local
-fast-forward synchronization must succeed before queue continuation. Unknown or
-partial landing is journaled for reconciliation, never blindly pushed again.
-
-The controlled policy governs StageMesh's own merges. It does not prevent other
-writers from rewriting branches or bypassing checks. A PR-head change during
-landing may be observed only after the reviewed commit has landed: the runtime
-then records partial success and stops, preserving the reviewed candidate and
-requiring reconciliation. This differs from globally enforced immutable branch
-heads. Existing GitHub restrictions are not changed; any server rejection remains
-fatal. There is no automatic fallback from hosted mode after a 403.
-
-Use `run-window --plan` to verify resolved defaults and access without starting
-providers or pushing. It does not prove a real unattended development cycle.
-
-Completed legacy landing records without repository metadata are ignored only when
-GitHub confirms the same task PR was merged at that exact commit into the current
-integration branch and Git proves it remains an ancestor of remote main. Incomplete
-or unverifiable legacy intents still refuse admission, including in read-only plans.
-No historical records or approvals are synthesized or rewritten.
+- [Current implementation and acceptance boundaries](docs/status.md)
+- [Operator flow](docs/operator-flow.md)
+- [Run-window reference](docs/run-window.md)
+- [Capabilities, skills, MCP, and plugin safety](docs/capabilities.md)
+- [Bundled skills and proof of use](docs/agent-skills.md)
+- [Provider readiness](docs/provider-readiness.md)
+- [Workspace and task recovery](docs/workspace-and-task-recovery.md)
+- [Reliable delivery](docs/reliable-delivery.md)
+- [README information-architecture review](docs/readme-review.md)

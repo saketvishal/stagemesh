@@ -70,6 +70,7 @@ def test_mandatory_steps_never_depend_on_focused_mode() -> None:
         assert "python scripts/check_ci_range.py" in _step(
             job, "Attribution and static range policy"
         )
+        assert "tests/test_docs_links.py" in _step(job, "Focused validation policy")
 
 
 def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:

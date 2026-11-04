@@ -27,6 +27,39 @@ Selection uses the persisted title and the bound project's objective, allowed fi
 non-UI tasks still receive verification guidance. A generic "design component" objective or backend `app/` path alone does not select
 frontend-design. The selection is deterministic; it is a relevance heuristic, not a model classifier.
 
+## Inspect selection and verify actual use
+
+The built-in pack currently contains five skills: four reviewed Superpowers snapshots and Anthropic's `frontend-design`. Inspect the
+installed pins, then preview the automatic choices for a queued task without launching a provider or writing runtime state:
+
+```powershell
+stagemesh --project C:\path\to\project skills --json
+stagemesh --project C:\path\to\project skills --task TASK_ID --json
+```
+
+The task preview reports implementation, remediation, and review choices as `selection-preview-only`. It does not claim that a worker
+received, opened, followed, or correctly applied a skill. After an attempted run, inspect durable privacy-bounded evidence with:
+
+```powershell
+stagemesh --project C:\path\to\project capabilities --task TASK_ID --json
+stagemesh --project C:\path\to\project task-doctor --task TASK_ID --json
+```
+
+An automatically selected bundled or project skill can appear with `registered: false`: the project capability registry is for explicit
+project-owned opt-ins, while the event still identifies the observed built-in attachment. Read the states narrowly:
+
+- installed and pin-verified: the reviewed bytes ship with StageMesh;
+- selected: deterministic policy would choose the skill for that task and stage;
+- `attached-unverified`: StageMesh put its validated path in the worker prompt, but did not observe a read;
+- `loaded`: structured provider events showed an exact selected `SKILL.md` read;
+- `activated`: a validated skills-only Claude plugin root was present when the Claude process started;
+- `invoked`: an allowlisted MCP tool call was observed; this state is not used for ordinary skill prompts;
+- correctly applied: never inferred from the states above; contract gates and independent review supply acceptance evidence.
+
+The default `attachment-required` policy permits prompt attachment without an observed read. Projects that require a structured read
+receipt can explicitly opt into `observed-load-required`; see [capabilities](capabilities.md). Neither mode proves that model behavior
+followed the guidance.
+
 ## Authority and approved UI
 
 The adapter places the user's instructions, applicable installed-project AGENTS/CLAUDE/GEMINI guidance, project-owned referenced
@@ -42,7 +75,10 @@ or replace enforced file scope, validation gates and independent review. Never r
 
 StageMesh retains scheduling, worker/worktree ownership, Git commits and merging. It does not load Superpowers' blanket
 `using-superpowers` bootstrap or its brainstorming, parallel-agent, worktree or branch-finishing workflows into bounded workers.
-Only the five engineering/design skills above are shipped. Native global plugins, hooks and automatic script execution are not installed.
+Only the five engineering/design skills above—four from Superpowers—are shipped. The omitted workflow skills would overlap StageMesh's
+own scheduler, isolated worktrees, Git integration, review, and delivery ownership. Additional reviewed Superpowers `SKILL.md` packages
+remain available through project-local capability vendoring and explicit per-task `capability_refs`; native global plugins, hooks and
+automatic script execution are not installed.
 
 The adapter explicitly overrides upstream full-suite-per-task instructions: run focused behavioral checks for changed surfaces and
 affected callers, plus all required contract gates. Broaden for a failure, new change or unresolved risk. Do not repeat successful

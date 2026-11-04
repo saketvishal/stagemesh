@@ -1899,6 +1899,49 @@ def test_capabilities_task_query_does_not_create_missing_runtime_database(
     assert not database.exists()
 
 
+def test_capabilities_task_query_preserves_observed_unregistered_bundled_skill(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    store = Store(database)
+    store.migrate()
+    task_id = store.upsert_task("Fix parser", source_id="bundled-skill-task")
+    _record_capability_attachments(
+        store,
+        task_id,
+        "codex",
+        "IMPLEMENT",
+        [
+            {
+                "capability_id": "verification-before-completion",
+                "kind": "skill",
+                "origin": "bundled",
+                "source": "superpowers/verification-before-completion/SKILL.md",
+                "content_sha256": "a" * 64,
+                "permissions": ["workspace-read"],
+                "selection": "policy",
+                "status": "attached",
+                "invocation": "unverified",
+                "_path": "C:/private/skill-pack/SKILL.md",
+            }
+        ],
+    )
+    store.close()
+    before = database.stat().st_mtime_ns
+
+    assert main(["--project", str(tmp_path), "capabilities", "--task", task_id, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = next(item for item in payload["capabilities"] if item["id"] == "verification-before-completion")
+
+    assert row["registered"] is False
+    assert row["requested"] is False
+    assert row["invocation"] == "attached-unverified"
+    assert row["usage"]["attached"] == 1
+    assert row["usage"]["loaded"] == 0
+    assert row["usage"]["invoked"] == 0
+    assert database.stat().st_mtime_ns == before
+
+
 def test_registry_skill_evidence_mode_is_explicit_and_validated(tmp_path: Path) -> None:
     path = tmp_path / ".stagemesh" / "capabilities.json"
     path.parent.mkdir(parents=True)

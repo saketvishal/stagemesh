@@ -20,6 +20,7 @@ from . import __version__
 from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
 from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
+from .agent_skills import SkillPackError, builtin_skill_inventory, skill_selection_preview
 from .audit import AuditValidationError, export_audit_jsonl
 from .autonomy.cli import register_autonomy_commands
 from .autonomy.github_adapter import GitHubHostedCI
@@ -42,10 +43,10 @@ from .capabilities import (
     set_capability_pin,
     set_skill_evidence_mode,
     skill_evidence_mode,
+    task_capability_report,
 )
 from .capabilities import REGISTRY_PATH as CAPABILITY_REGISTRY_PATH
 from .capabilities import inventory as capability_inventory
-from .capabilities import task_usage as capability_task_usage
 from .capability_contracts import (
     plan_task_capabilities,
     set_task_capabilities,
@@ -3888,6 +3889,83 @@ def command_capacity(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_skills(args: argparse.Namespace) -> int:
+    """Inspect the pinned built-in pack and deterministic task selection without writes."""
+    project = Path(args.project).resolve()
+    rows = builtin_skill_inventory()
+    payload: dict[str, object] = {
+        "project": str(project),
+        "skills": rows,
+        "count": len(rows),
+        "provider_calls": 0,
+        "network_calls": 0,
+        "database_writes": 0,
+    }
+    if args.task:
+        database = db_path(project)
+        if not database.is_file():
+            raise CapabilityRegistryError(f"unknown task: {args.task}")
+        connection = sqlite3.connect(
+            f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=2
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            task = connection.execute(
+                "SELECT title FROM tasks WHERE id=?", (args.task,)
+            ).fetchone()
+            if task is None:
+                raise CapabilityRegistryError(f"unknown task: {args.task}")
+            frozen = connection.execute(
+                "SELECT canonical_json FROM task_contracts WHERE task_id=?", (args.task,)
+            ).fetchone()
+            if frozen is not None:
+                from .contracts import parse_contract
+
+                contract = parse_contract(json.loads(str(frozen["canonical_json"])))
+                contract_source = "frozen"
+            else:
+                from .contracts import load_contract
+
+                contract = load_contract(project, args.task)
+                contract_source = "project"
+            payload.update(
+                {
+                    "task_id": args.task,
+                    "task_title": str(task["title"]),
+                    "contract_source": contract_source,
+                    "selection": skill_selection_preview(str(task["title"]), contract),
+                }
+            )
+        except (sqlite3.DatabaseError, json.JSONDecodeError) as exc:
+            raise CapabilityRegistryError(f"cannot preview task skill selection: {exc}") from exc
+        finally:
+            connection.close()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"bundled skills: {len(rows)} installed and pin-verified")
+    for row in rows:
+        print(
+            f"{row['id']} origin={row['origin']} stages={','.join(row['stages'])} "
+            f"installed=true integrity={row['integrity']} automatic=true"
+        )
+    if args.task:
+        selection = payload["selection"]
+        assert isinstance(selection, dict)
+        stages = selection["stages"]
+        assert isinstance(stages, dict)
+        print(
+            f"task={args.task} contract={payload['contract_source']} "
+            "evidence=selection-preview-only"
+        )
+        for stage, selected in stages.items():
+            assert isinstance(selected, list)
+            print(f"{stage}: {','.join(selected) or '(none)'}")
+    print("writes: none; provider calls: 0; network calls: 0; database writes: 0")
+    return 0
+
+
 def command_capabilities(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     action = getattr(args, "capability_command", None)
@@ -4057,55 +4135,28 @@ def command_capabilities(args: argparse.Namespace) -> int:
                 "package installs: 0; database writes: 0"
             )
         return 0 if payload["ready"] else 2
-    rows = capability_inventory(project)
-    history_available = None
-    task_exists = None
     if args.task:
-        history_available, task_exists, observed = capability_task_usage(
-            db_path(project), args.task
-        )
-        for row in rows:
-            usage = observed.get(
-                str(row["id"]),
-                {
-                    "status": "not-observed",
-                    "attached": 0,
-                    "loaded": 0,
-                    "invoked": 0,
-                    "evidence_missing": 0,
-                    "providers": [],
-                    "stages": [],
-                    "content_sha256s": [],
-                    "last_observed_at": None,
-                },
-            )
-            invocation = usage["status"]
-            current_digest = row.get("observed_content_sha256")
-            evidence_digests = usage.get("content_sha256s", [])
-            evidence_matches_current = (
-                None
-                if not evidence_digests
-                else isinstance(current_digest, str) and current_digest in evidence_digests
-            )
-            if invocation in {"loaded", "invoked"} and evidence_matches_current is not True:
-                invocation = "evidence-digest-mismatch"
-            row["invocation"] = invocation
-            row["evidence_matches_current"] = evidence_matches_current
-            row["usage"] = usage
-    payload = {
-        "project": str(project),
-        "registry": CAPABILITY_REGISTRY_PATH.as_posix(),
-        "skill_evidence_mode": skill_evidence_mode(project),
-        "capabilities": rows,
-    }
-    if args.task:
+        payload = task_capability_report(project, db_path(project), args.task)
         payload.update(
             {
-                "task_id": args.task,
-                "history_available": history_available,
-                "task_exists": task_exists,
+                "project": str(project),
+                "registry": CAPABILITY_REGISTRY_PATH.as_posix(),
             }
         )
+        rows = payload["capabilities"]
+        assert isinstance(rows, list)
+        history_available = payload["history_available"]
+        task_exists = payload["task_exists"]
+    else:
+        rows = capability_inventory(project)
+        history_available = None
+        task_exists = None
+        payload = {
+            "project": str(project),
+            "registry": CAPABILITY_REGISTRY_PATH.as_posix(),
+            "skill_evidence_mode": skill_evidence_mode(project),
+            "capabilities": rows,
+        }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -4122,6 +4173,7 @@ def command_capabilities(args: argparse.Namespace) -> int:
             f"task_exists={str(task_exists).lower()}"
         )
     for row in rows:
+        assert isinstance(row, dict)
         usage = row.get("usage")
         counts = ""
         if isinstance(usage, dict):
@@ -4129,12 +4181,17 @@ def command_capabilities(args: argparse.Namespace) -> int:
                 f" attached={usage['attached']} loaded={usage['loaded']} "
                 f"invoked={usage['invoked']} evidence_missing={usage['evidence_missing']}"
             )
-        print(
-            f"{row['id']} kind={row['kind']} enabled={str(row['enabled']).lower()} "
-            f"installed={str(row['installed']).lower()} adapter={str(row['adapter_supported']).lower()} "
-            f"available={str(row['available']).lower()} usable={str(row['usable']).lower()} "
-            f"integrity={row['integrity']} invocation={row['invocation']}{counts}"
-        )
+        if row.get("registered") is False:
+            print(
+                f"{row['id']} registered=false invocation={row['invocation']}{counts}"
+            )
+        else:
+            print(
+                f"{row['id']} kind={row['kind']} enabled={str(row['enabled']).lower()} "
+                f"installed={str(row['installed']).lower()} adapter={str(row['adapter_supported']).lower()} "
+                f"available={str(row['available']).lower()} usable={str(row['usable']).lower()} "
+                f"integrity={row['integrity']} invocation={row['invocation']}{counts}"
+            )
     return 0
 
 
@@ -5532,6 +5589,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
+    skills = sub.add_parser(
+        "skills",
+        help="Read-only inventory of the pinned built-in skill pack; --task previews deterministic selection",
+    )
+    skills.add_argument("--task", help="Preview automatic implementation, remediation and review choices for this task")
+    skills.add_argument("--json", action="store_true")
+    skills.set_defaults(func=command_skills)
     capabilities = sub.add_parser(
         "capabilities",
         help="Inspect project-local capability declarations without installing or invoking them",
@@ -5945,6 +6009,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except CapabilityRegistryError as exc:
         print(f"capability registry error: {exc}", file=sys.stderr)
+        return 2
+    except SkillPackError as exc:
+        print(f"skill pack error: {exc}", file=sys.stderr)
         return 2
     except AuditValidationError as exc:
         print(f"audit error: {exc}", file=sys.stderr)
