@@ -17,7 +17,7 @@ from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.contracts import changed_files
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.git import GitWorkspace
-from stagemesh.workspaces import task_workspace
+from stagemesh.workspaces import sweep_task_worktrees, task_workspace
 
 
 def _follow_up_candidate(rig: Rig, worktree: Path, rel: str) -> str:
@@ -107,6 +107,12 @@ def test_failed_integration_never_marks_task_done_and_preserves_candidate_and_wo
     assert task_workspace(rig.project, TASK) == recovery_worktree
     assert GitWorkspace(rig.project).run("cat-file", "-e", f"{candidate}^{{commit}}", check=False).returncode == 0
     assert replacement["preserved_workspace"] == str(failed_candidate_worktree)
+    sweep = sweep_task_worktrees(rig.project, rig.store)
+    recovery_paths = {Path(item["worktree"]) for item in sweep if item["task_id"] == TASK}
+    assert recovery_paths == {failed_candidate_worktree, recovery_worktree}
+    assert {item["action"] for item in sweep if item["task_id"] == TASK} == {"RETAINED"}
+    assert failed_candidate_worktree.exists() and recovery_worktree.exists()
+    assert task_workspace(rig.project, TASK) == recovery_worktree
     diagnostic = next(
         f
         for row in rig.store.conn.execute("SELECT payload FROM evidence WHERE task_id=? AND kind=?", (TASK, EvidenceKind.INTEGRATION))
