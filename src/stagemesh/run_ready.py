@@ -46,7 +46,7 @@ from .recovery import (
 )
 from .review import adverse_gate
 from .scheduling import Scheduler
-from .spec_planning import evaluate_planning_gate, load_planning_artifacts
+from .spec_planning import evaluate_planning_gate, load_planning_artifacts, load_planning_challenge
 from .stage_dispatch import stage_dispatch_refusal
 from .step_progress import (
     STEP_CAP_STALL_LIMIT,
@@ -324,11 +324,15 @@ def _ensure_contract(
 
 def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: bool | None) -> None:
     """Opt-in: refuse to start implementation without an approved, identity-current planning spec."""
-    if enabled is None:
+    require_challenge = False
+    if enabled is None or enabled:
         try:
-            enabled = load_config(project).require_approved_spec
+            config = load_config(project)
         except ConfigValidationError as exc:
             raise RunReadyRefusal("invalid_config", f"config is invalid, planning gate state unknown: {exc}", task_id=task_id) from exc
+        if enabled is None:
+            enabled = config.require_approved_spec
+        require_challenge = config.require_plan_challenge
     if not enabled:
         return
     record = store.task_contract(task_id)
@@ -341,8 +345,15 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
     baseline = store.task_baseline(task_id) or GitWorkspace(project).head()
     spec_payload, approval = load_planning_artifacts(project, task_id)
+    challenge_payload = load_planning_challenge(project, task_id)
     decision = evaluate_planning_gate(
-        enabled=True, spec_payload=spec_payload, approval=approval, contract_hash=contract_hash, baseline_sha=baseline
+        enabled=True,
+        spec_payload=spec_payload,
+        approval=approval,
+        contract_hash=contract_hash,
+        baseline_sha=baseline,
+        require_challenge=require_challenge,
+        challenge_payload=challenge_payload,
     )
     if not decision.allowed:
         raise RunReadyRefusal(

@@ -52,12 +52,18 @@ from .remediation import latest_candidate_findings
 from .review import adverse_gate, adverse_outcome
 from .spec_planning import (
     NEXT_APPROVE_SPEC,
+    NEXT_CHALLENGE_SPEC,
+    NEXT_REFRESH_CHALLENGE,
     NEXT_REFRESH_SPEC,
+    NEXT_RESOLVE_CHALLENGE_DECISIONS,
     NEXT_RESOLVE_DECISIONS,
+    NEXT_REVISE_SPEC,
     NEXT_WRITE_SPEC,
     evaluate_planning_gate,
     load_planning_artifacts,
+    load_planning_challenge,
     planning_artifact_paths,
+    planning_challenge_path,
 )
 from .timing import format_task_summary, task_timing
 from .validation import Validator
@@ -1083,18 +1089,25 @@ def _research_summary(store: Store, project: Path, task_id: str) -> dict[str, An
 def _planning_summary(store: Store, project: Path, task_id: str) -> dict[str, Any]:
     """Read-only planning gate state without exposing spec contents."""
     spec_path, approval_path = planning_artifact_paths(project, task_id)
+    challenge_path = planning_challenge_path(project, task_id)
     try:
-        required = load_config(project).require_approved_spec
+        config = load_config(project)
     except ConfigValidationError as exc:
         return {"required": None, "status": "config-invalid", "reason": str(exc)[:300]}
+    required = config.require_approved_spec
+    challenge_required = config.require_plan_challenge
     spec_payload, approval = load_planning_artifacts(project, task_id)
+    challenge_payload = load_planning_challenge(project, task_id)
     summary: dict[str, Any] = {
         "required": required,
+        "challenge_required": challenge_required,
         "status": "not-required",
         "spec_path": spec_path.relative_to(project).as_posix(),
         "approval_path": approval_path.relative_to(project).as_posix(),
+        "challenge_path": challenge_path.relative_to(project).as_posix(),
         "spec_present": spec_payload is not None,
         "approval_present": approval is not None,
+        "challenge_present": challenge_path.is_file(),
         "next_action": None,
         "reason": "" if required else "the approved-spec gate is disabled",
         "approved_scope": [],
@@ -1112,11 +1125,19 @@ def _planning_summary(store: Store, project: Path, task_id: str) -> dict[str, An
         approval=approval,
         contract_hash=str(contract["digest"]),
         baseline_sha=baseline,
+        require_challenge=challenge_required,
+        challenge_payload=challenge_payload,
     )
     statuses = {
         NEXT_WRITE_SPEC: "missing" if spec_payload is None else "invalid",
         NEXT_RESOLVE_DECISIONS: "needs-decision",
         NEXT_REFRESH_SPEC: "stale",
+        NEXT_CHALLENGE_SPEC: "challenge-missing"
+        if not challenge_path.is_file()
+        else "challenge-invalid",
+        NEXT_REFRESH_CHALLENGE: "challenge-stale",
+        NEXT_REVISE_SPEC: "revision-required",
+        NEXT_RESOLVE_CHALLENGE_DECISIONS: "challenge-needs-decision",
         NEXT_APPROVE_SPEC: "awaiting-approval",
     }
     summary.update(

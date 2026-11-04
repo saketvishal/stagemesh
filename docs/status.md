@@ -18,6 +18,7 @@
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
 - Local backlog, configured JSON and Google AX export task-source adapters, and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
 - Structured objective planner validation, including duplicate task and unknown dependency rejection.
+- Disabled-by-default, identity-bound planning-spec and bounded challenge gates with distinct provider names, typed revise/human-decision outcomes, approval binding, challenger write isolation, read-only operator status, and exact-baseline accepted context delivered to implementation and independent review with digest-only evidence. Challenge artifacts do not yet prove that an independent agent process ran.
 - Built-in deterministic validation, independent contract review, and integration evidence.
 - Integration refuses `DONE` unless exact-SHA validation and review evidence already passed and the candidate still satisfies the contract.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.

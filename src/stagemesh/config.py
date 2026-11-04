@@ -188,15 +188,22 @@ def _adverse_review_policy(data: dict[str, object]) -> AdverseReviewPolicy:
     return AdverseReviewPolicy(tuple(sorted({item.strip().casefold() for item in severities})), behavior)
 
 
-def _require_approved_spec(data: dict[str, object]) -> bool:
-    """Opt-in planning gate; absent means the legacy policy (no pre-implementation approval required)."""
-    unknown = set(data) - {"require_approved_spec"}
+def _planning_gate_policy(data: dict[str, object]) -> tuple[bool, bool]:
+    """Opt-in planning policy; absent means no pre-implementation gate."""
+    unknown = set(data) - {"require_approved_spec", "require_plan_challenge"}
     if unknown:
         raise ConfigValidationError(f"planning_gate has unsupported keys: {', '.join(sorted(unknown))}")
-    value = data.get("require_approved_spec", False)
-    if not isinstance(value, bool):
+    require_spec = data.get("require_approved_spec", False)
+    require_challenge = data.get("require_plan_challenge", False)
+    if not isinstance(require_spec, bool):
         raise ConfigValidationError("planning_gate.require_approved_spec must be a boolean")
-    return value
+    if not isinstance(require_challenge, bool):
+        raise ConfigValidationError("planning_gate.require_plan_challenge must be a boolean")
+    if require_challenge and not require_spec:
+        raise ConfigValidationError(
+            "planning_gate.require_plan_challenge requires require_approved_spec=true"
+        )
+    return require_spec, require_challenge
 
 
 @dataclass(frozen=True)
@@ -250,6 +257,7 @@ class StageMeshConfig:
     authorized_providers: tuple[str, ...] | None = None  # None: the project has not authorized any provider list
     adverse_review: AdverseReviewPolicy = field(default_factory=AdverseReviewPolicy)
     require_approved_spec: bool = False
+    require_plan_challenge: bool = False
     research: ResearchConfig | None = None
     driver: DriverInstallConfig | None = None
 
@@ -344,6 +352,9 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     if integration_ref and not integration_ref.startswith("refs/"):
         integration_ref = f"refs/heads/{integration_ref}"
     runtime = _runtime(project, _optional_mapping(data, "runtime"))
+    require_approved_spec, require_plan_challenge = _planning_gate_policy(
+        _optional_mapping(data, "planning_gate")
+    )
     return StageMeshConfig(
         project=project,
         github=github,
@@ -372,7 +383,8 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         budgets=_budgets(_optional_mapping(data, "budgets")),
         authorized_providers=_authorization(_optional_mapping(data, "authorization"), known),
         adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
-        require_approved_spec=_require_approved_spec(_optional_mapping(data, "planning_gate")),
+        require_approved_spec=require_approved_spec,
+        require_plan_challenge=require_plan_challenge,
         research=_research_config(_optional_mapping(data, "research"), known),
         driver=_driver_install_config(_optional_mapping(data, "driver")) if "driver" in data else None,
     )
