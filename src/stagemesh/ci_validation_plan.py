@@ -12,13 +12,14 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal
 
-CI_VALIDATION_CONTRACT = "stagemesh.ci-validation/2"
+CI_VALIDATION_CONTRACT = "stagemesh.ci-validation/3"
 FULL = "full"
 OPERATOR = "operator"
+COMPONENT = "component"
 DOCS = "docs"
 SMOKE = "smoke"
 
-Mode = Literal["full", "operator", "docs", "smoke"]
+Mode = Literal["full", "operator", "component", "docs", "smoke"]
 
 MANDATORY_CHECKS = (
     "attribution-and-static-range-policy",
@@ -47,6 +48,38 @@ OPERATOR_DEPENDENT_TESTS = (
     "tests/test_windows_user_installer.py",
 )
 
+CAPABILITY_DIRECT_TESTS = (
+    "tests/test_agent_skills.py",
+    "tests/test_capability_registry.py",
+    "tests/test_codex_mcp_authorization.py",
+    "tests/test_mcp_proxy.py",
+    "tests/test_provider_events.py",
+)
+
+CAPABILITY_DEPENDENT_TESTS = (
+    "tests/test_provider_acceptance.py",
+    "tests/test_provider_authorization.py",
+    "tests/test_provider_registry.py",
+    "tests/test_run_window.py",
+    "tests/test_task_recovery.py",
+)
+
+TASK_SOURCE_DIRECT_TESTS = (
+    "tests/test_github_task_sources.py",
+    "tests/test_invariants.py",
+    "tests/test_outbound_lifecycle.py",
+    "tests/test_source_sync_preserves_progress.py",
+    "tests/test_zero_config_github.py",
+)
+
+TASK_SOURCE_DEPENDENT_TESTS = (
+    "tests/test_admission_diagnosis_regression.py",
+    "tests/test_objective_root_reconciliation.py",
+    "tests/test_queue_reconcile.py",
+    "tests/test_selection_scope.py",
+    "tests/test_source_admission_publication.py",
+)
+
 _OPERATOR_COMPONENTS = {
     "src/stagemesh/activity.py": "activity_read_model",
     "src/stagemesh/activity_periods.py": "activity_read_model",
@@ -56,7 +89,56 @@ _OPERATOR_COMPONENTS = {
     "src/stagemesh/ui/index.html": "packaged_operator_ui",
     "src/stagemesh/ui/app.css": "packaged_operator_ui",
 }
-_OPERATOR_SUPPORT = frozenset((*OPERATOR_DIRECT_TESTS, *OPERATOR_DEPENDENT_TESTS))
+@dataclass(frozen=True)
+class AuditedComponent:
+    family: str
+    roots: tuple[tuple[str, str], ...]
+    direct_tests: tuple[str, ...]
+    dependent_tests: tuple[str, ...]
+    required_os: tuple[str, ...] = ("windows", "linux")
+    browser_required: bool = False
+    windows_installer_required: bool = False
+
+    @property
+    def root_paths(self) -> frozenset[str]:
+        return frozenset(path for path, _component in self.roots)
+
+    @property
+    def support_paths(self) -> frozenset[str]:
+        return frozenset((*self.direct_tests, *self.dependent_tests))
+
+
+_AUDITED_COMPONENTS = (
+    AuditedComponent(
+        "operator",
+        tuple(_OPERATOR_COMPONENTS.items()),
+        OPERATOR_DIRECT_TESTS,
+        OPERATOR_DEPENDENT_TESTS,
+        browser_required=True,
+        windows_installer_required=True,
+    ),
+    AuditedComponent(
+        "capabilities",
+        (
+            ("src/stagemesh/agent_skills.py", "bundled_agent_skills"),
+            ("src/stagemesh/capabilities.py", "capability_registry"),
+            ("src/stagemesh/capability_contracts.py", "capability_contracts"),
+            ("src/stagemesh/capability_discovery.py", "capability_discovery"),
+            ("src/stagemesh/capability_vendor.py", "capability_vendoring"),
+            ("src/stagemesh/claude_plugin_capabilities.py", "claude_plugin_capabilities"),
+            ("src/stagemesh/mcp_capabilities.py", "mcp_capabilities"),
+            ("src/stagemesh/provider_events.py", "capability_evidence"),
+        ),
+        CAPABILITY_DIRECT_TESTS,
+        CAPABILITY_DEPENDENT_TESTS,
+    ),
+    AuditedComponent(
+        "task-sources",
+        (("src/stagemesh/task_sources.py", "task_source_sync"),),
+        TASK_SOURCE_DIRECT_TESTS,
+        TASK_SOURCE_DEPENDENT_TESTS,
+    ),
+)
 
 # These files define selection, protected jobs, developer admission, dependencies,
 # packaging, or shared interfaces.  They can never select themselves into a narrow
@@ -81,9 +163,11 @@ _FULL_EXACT_PATHS = frozenset(
         "src/stagemesh/validation_services.py",
         "src/stagemesh/validation_plan.py",
         "scripts/ci_validation_plan.py",
+        "scripts/run_ci_component_tests.py",
         "scripts/check_ci_range.py",
         "scripts/install-stagemesh.ps1",
         "tests/test_ci_validation_plan.py",
+        "tests/test_ci_component_runner.py",
         "tests/test_ci_workflow_policy.py",
         "docs/focused-validation.md",
         "docs/validation-components.md",
@@ -196,36 +280,77 @@ def derive_ci_validation_plan(changed_paths: Iterable[str]) -> CiValidationPlan:
             ),
         )
 
-    operator_roots = tuple(path for path in paths if path in _OPERATOR_COMPONENTS)
+    selected = tuple(
+        component
+        for component in _AUDITED_COMPONENTS
+        if component.root_paths.intersection(paths)
+    )
+    selected_families = {component.family for component in selected}
+    if "operator" in selected_families and len(selected_families) > 1:
+        return full_ci_validation_plan(
+            paths,
+            "audited operator roots cannot be combined with another component fast path",
+        )
+    allowed = frozenset(
+        path
+        for component in selected
+        for path in (*component.root_paths, *component.support_paths)
+    )
+    known_support = frozenset(
+        path for component in _AUDITED_COMPONENTS for path in component.support_paths
+    )
     unknown = tuple(
         path
         for path in paths
-        if path not in _OPERATOR_COMPONENTS and path not in _OPERATOR_SUPPORT and not _is_documentation(path)
+        if path not in allowed
+        and not _is_documentation(path)
+        and not (not selected and path in known_support)
     )
-    if operator_roots and not unknown:
-        components = tuple(sorted({_OPERATOR_COMPONENTS[path] for path in operator_roots}))
+    if selected and not unknown:
+        direct = tuple(
+            sorted({target for component in selected for target in component.direct_tests})
+        )
+        dependent = tuple(
+            sorted(
+                {
+                    target
+                    for component in selected
+                    for target in component.dependent_tests
+                    if target not in direct
+                }
+            )
+        )
+        root_components = {
+            path: name for component in selected for path, name in component.roots
+        }
         return CiValidationPlan(
-            mode=OPERATOR,
+            mode=OPERATOR if selected_families == {"operator"} else COMPONENT,
             changed_paths=paths,
-            components=components,
-            direct_test_targets=OPERATOR_DIRECT_TESTS,
-            dependent_test_targets=OPERATOR_DEPENDENT_TESTS,
+            components=tuple(
+                sorted({root_components[path] for path in paths if path in root_components})
+            ),
+            direct_test_targets=direct,
+            dependent_test_targets=dependent,
             mandatory_checks=MANDATORY_CHECKS,
-            required_os=("windows", "linux"),
-            browser_required=True,
-            windows_installer_required=True,
+            required_os=_ordered_os(
+                os_name for component in selected for os_name in component.required_os
+            ),
+            browser_required=any(component.browser_required for component in selected),
+            windows_installer_required=any(
+                component.windows_installer_required for component in selected
+            ),
             runtime_coverage=True,
             reasons=(
-                "every executable path is an exact audited read-only operator root",
-                "supporting paths are limited to the exact operator tests or documentation",
+                "every executable path is an exact audited component root or support target",
+                "direct and dependent tests are immutable repository policy",
             ),
         )
 
-    reasons = ["changed scope is mixed, unmapped, or lacks an exact audited operator root"]
+    reasons = ["changed scope is mixed, unmapped, or lacks an exact audited component root"]
     if unknown:
         reasons.append(f"unmapped paths: {', '.join(unknown)}")
-    elif not operator_roots:
-        reasons.append("no exact audited operator source root changed")
+    elif not selected:
+        reasons.append("no exact audited component source root changed")
     return full_ci_validation_plan(paths, *reasons)
 
 
@@ -294,6 +419,21 @@ def post_merge_ci_validation_plan(
             "main push retains exact range, bootstrap, focused policy, import, and invariants",
         ),
     )
+
+
+def audited_pytest_targets() -> frozenset[str]:
+    """Return the immutable target allowlist consumed by the component runner."""
+    return frozenset(
+        target
+        for component in _AUDITED_COMPONENTS
+        for target in (*component.direct_tests, *component.dependent_tests)
+    )
+
+
+def _ordered_os(values: Iterable[str]) -> tuple[str, ...]:
+    selected = set(values)
+    order = ("windows", "linux", "portable")
+    return tuple(name for name in order if name in selected)
 
 
 def _normalize_path(raw: str) -> str:

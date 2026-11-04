@@ -11,7 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 from stagemesh.ci_validation_plan import (
+    CAPABILITY_DEPENDENT_TESTS,
+    CAPABILITY_DIRECT_TESTS,
     CI_VALIDATION_CONTRACT,
+    COMPONENT,
     DOCS,
     FULL,
     MANDATORY_CHECKS,
@@ -19,6 +22,8 @@ from stagemesh.ci_validation_plan import (
     OPERATOR_DEPENDENT_TESTS,
     OPERATOR_DIRECT_TESTS,
     SMOKE,
+    TASK_SOURCE_DEPENDENT_TESTS,
+    TASK_SOURCE_DIRECT_TESTS,
     derive_ci_validation_plan,
 )
 
@@ -80,13 +85,86 @@ def test_exact_operator_roots_are_normalized_and_deterministic() -> None:
     assert plan.browser_required and plan.windows_installer_required and plan.runtime_coverage
 
 
+def test_exact_capability_roots_select_bounded_cross_platform_component_tests() -> None:
+    plan = derive_ci_validation_plan(
+        (
+            "src/stagemesh/agent_skills.py",
+            r"SRC\StageMesh\CAPABILITIES.PY",
+            "tests/test_agent_skills.py",
+            "docs/agent-skills.md",
+        )
+    )
+
+    assert plan.mode == COMPONENT
+    assert plan.components == ("bundled_agent_skills", "capability_registry")
+    assert plan.direct_test_targets == tuple(sorted(CAPABILITY_DIRECT_TESTS))
+    assert plan.dependent_test_targets == tuple(sorted(CAPABILITY_DEPENDENT_TESTS))
+    assert plan.required_os == ("windows", "linux")
+    assert plan.runtime_coverage is True
+    assert plan.browser_required is False
+    assert plan.windows_installer_required is False
+
+
+def test_exact_task_source_root_selects_progress_and_admission_contracts() -> None:
+    plan = derive_ci_validation_plan(
+        ("src/stagemesh/task_sources.py", "tests/test_github_task_sources.py")
+    )
+
+    assert plan.mode == COMPONENT
+    assert plan.components == ("task_source_sync",)
+    assert plan.direct_test_targets == tuple(sorted(TASK_SOURCE_DIRECT_TESTS))
+    assert plan.dependent_test_targets == tuple(sorted(TASK_SOURCE_DEPENDENT_TESTS))
+    assert plan.required_os == ("windows", "linux")
+
+
+def test_multiple_audited_families_union_targets_deterministically() -> None:
+    paths = (
+        "src/stagemesh/task_sources.py",
+        "src/stagemesh/provider_events.py",
+        "tests/test_provider_events.py",
+        "tests/test_source_sync_preserves_progress.py",
+    )
+    plan = derive_ci_validation_plan(reversed(paths))
+
+    assert plan.mode == COMPONENT
+    assert plan.components == ("capability_evidence", "task_source_sync")
+    assert plan.direct_test_targets == tuple(
+        sorted({*CAPABILITY_DIRECT_TESTS, *TASK_SOURCE_DIRECT_TESTS})
+    )
+    assert plan.dependent_test_targets == tuple(
+        sorted({*CAPABILITY_DEPENDENT_TESTS, *TASK_SOURCE_DEPENDENT_TESTS})
+    )
+    assert plan.to_dict() == derive_ci_validation_plan(paths).to_dict()
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ("tests/test_capability_registry.py",),
+        ("src/stagemesh/capabilities.py", "tests/test_unknown_capability.py"),
+        ("src/stagemesh/task_sources.py", "src/stagemesh/persistence.py"),
+        ("src/stagemesh/agent_skills.py", "src/stagemesh/providers.py"),
+        ("src/stagemesh/activity.py", "src/stagemesh/capabilities.py"),
+        ("src/stagemesh/mcp_proxy.py",),
+        ("src/stagemesh/github.py",),
+    ],
+)
+def test_component_support_only_unknown_and_shared_boundary_scopes_fail_safe(
+    paths: tuple[str, ...],
+) -> None:
+    plan = derive_ci_validation_plan(paths)
+
+    assert plan.mode == FULL
+    assert plan.required_os == ("windows", "linux")
+
+
 @pytest.mark.parametrize(
     "paths,reason",
     [
         ((), "empty"),
         (("src/stagemesh/activity.py", "src/stagemesh/persistence.py"), "full-regression paths"),
         (("src/stagemesh/activity.py", "tests/test_unknown_operator_case.py"), "unmapped paths"),
-        (("tests/test_activity.py",), "no exact audited operator source root"),
+        (("tests/test_activity.py",), "no exact audited component source root"),
         (("src/stagemesh/not_a_real_boundary.py",), "unmapped paths"),
     ],
 )
@@ -121,6 +199,8 @@ def test_empty_mixed_support_only_and_unmapped_scopes_fail_safe(
         "src/stagemesh/validation_services.py",
         "src/stagemesh/public/schema/model.py",
         "scripts/ci_validation_plan.py",
+        "scripts/run_ci_component_tests.py",
+        "tests/test_ci_component_runner.py",
         "tests/test_ci_validation_plan.py",
     ],
 )
@@ -149,6 +229,7 @@ def test_invalid_paths_fail_safe_without_escaping_repository(path: str) -> None:
 
 def test_cli_emits_versioned_json_and_github_outputs(tmp_path: Path, capsys) -> None:
     output = tmp_path / "github-output"
+    plan_file = tmp_path / "plan.json"
     assert script.main(
         [
             "--path",
@@ -157,6 +238,8 @@ def test_cli_emits_versioned_json_and_github_outputs(tmp_path: Path, capsys) -> 
             "tests/test_api_server.py",
             "--github-output",
             str(output),
+            "--plan-file",
+            str(plan_file),
         ]
     ) == 0
 
@@ -164,14 +247,41 @@ def test_cli_emits_versioned_json_and_github_outputs(tmp_path: Path, capsys) -> 
     assert payload["contract"] == CI_VALIDATION_CONTRACT
     assert payload["mode"] == OPERATOR
     assert payload["required_os"] == ["windows", "linux"]
+    assert json.loads(plan_file.read_text(encoding="utf-8")) == payload
     assert output.read_text(encoding="utf-8").splitlines() == [
         "mode=operator",
         "run_full=false",
         "run_operator=true",
+        "run_component=false",
         "run_docs=false",
         "run_smoke=false",
         "required_os=windows,linux",
     ]
+
+
+def test_cli_emits_explicit_component_output_without_shell_targets(
+    tmp_path: Path, capsys
+) -> None:
+    output = tmp_path / "github-output"
+    plan_file = tmp_path / "plan.json"
+
+    assert script.main(
+        [
+            "--path",
+            "src/stagemesh/capabilities.py",
+            "--github-output",
+            str(output),
+            "--plan-file",
+            str(plan_file),
+        ]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert payload["mode"] == COMPONENT
+    assert "run_component=true" in lines
+    assert not any("test_capability_registry" in line for line in lines)
+    assert json.loads(plan_file.read_text(encoding="utf-8")) == payload
 
 
 def test_cli_derives_exact_changed_paths_from_git_range(tmp_path: Path) -> None:

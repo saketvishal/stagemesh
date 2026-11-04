@@ -96,13 +96,16 @@ unrelated behavior, and failed checks must not be removed to make work pass.
 ## StageMesh Hosted CI Plan
 
 StageMesh's own protected `windows` and `linux` jobs consume the separate
-`stagemesh.ci-validation/2` plan. This is not a generic client-repository selector.
-It recognizes one audited read-only operator boundary by exact paths and retains a
-fixed operator regression on both operating systems, including the real-browser
-and Windows installer/timezone checks. The plan is data only; it does not execute
-tests, providers or network calls.
+`stagemesh.ci-validation/3` plan. This is not a generic client-repository selector.
+It recognizes only exact audited StageMesh roots for the read-only operator,
+skills/capability, and task-source families. The operator mode retains its fixed
+cross-platform browser and installer regression. Component mode writes a bounded
+JSON plan, then a separate runner validates every pytest target against immutable
+repository policy before executing an argument list without a shell. Both current
+component families require Windows and Linux. The planner itself remains data only;
+it does not execute tests, providers or network calls.
 
-Unknown, empty, mixed or policy-sensitive changes select the complete regression.
+Support-test-only, unknown, empty, incompatible mixed, or policy-sensitive changes select the complete regression.
 That includes workflow/selector/profile, dependency, schema, persistence,
 lifecycle, claims, authorization, security, packaging and shared-interface changes.
 Documentation-only plans explicitly claim no runtime coverage. Mandatory static

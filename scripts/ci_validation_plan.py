@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.ci_validation_plan import (
+    COMPONENT,
     DOCS,
     FULL,
     OPERATOR,
@@ -113,6 +114,7 @@ def _write_github_outputs(path: Path, mode: str, required_os: tuple[str, ...]) -
         "mode": mode,
         "run_full": str(mode == FULL).lower(),
         "run_operator": str(mode == OPERATOR).lower(),
+        "run_component": str(mode == COMPONENT).lower(),
         "run_docs": str(mode == DOCS).lower(),
         "run_smoke": str(mode == SMOKE).lower(),
         "required_os": ",".join(required_os),
@@ -131,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--event", default=os.environ.get("STAGEMESH_CI_EVENT", ""))
     parser.add_argument("--force-full", action="store_true")
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--plan-file", type=Path)
     args = parser.parse_args(argv)
 
     forced = args.force_full or _truthy(os.environ.get("STAGEMESH_CI_FORCE_FULL", ""))
@@ -143,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         force_full=forced,
     )
     print(json.dumps(plan.to_dict(), indent=2, sort_keys=True))
+    if args.plan_file is not None:
+        if args.plan_file.is_symlink():
+            raise ValueError("plan file must not be a symlink")
+        args.plan_file.write_text(
+            json.dumps(plan.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     output = args.github_output or (
         Path(os.environ["GITHUB_OUTPUT"]) if os.environ.get("GITHUB_OUTPUT") else None
     )

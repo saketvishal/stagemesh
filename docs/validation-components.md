@@ -124,23 +124,39 @@ decision.
 
 ## Hosted-CI decision boundary
 
-The separate `stagemesh.ci-validation/2` planner consumes exact changed paths. It
-recognizes only the seven operator roots above, the exact 15 operator test files
-in the table, and supporting documentation. Ordering, case and Windows separators
-normalize deterministically. An empty, mixed or unmapped scope selects `full`; so
+The separate `stagemesh.ci-validation/3` planner consumes exact changed paths. It
+recognizes only 16 explicitly listed roots: the seven operator roots above, eight
+skills/capability roots, and `task_sources.py`. Each family owns immutable direct
+and dependent pytest targets; documentation is neutral support. Ordering, case and
+Windows separators normalize deterministically. Compatible capability/task-source
+roots union their targets; the browser/installer-sensitive operator family does not
+combine with another fast path. Support-only, empty, incompatible mixed, or unmapped scope selects `full`; so
 do changes to the selector, workflow, profile, dependency manifests, schema,
 persistence, coordinator lifecycle, claims, authorization, security, packaging,
 shared CLI or public interfaces. It never infers safety from issue title, file
 count, extension alone or arbitrary directory membership.
 
+| Hosted family | Exact source/asset roots | Direct and dependent contract | Required OS |
+| --- | --- | --- | --- |
+| Operator | `activity.py`, `activity_periods.py`, `operator.py`, `api_server.py`, and the three packaged UI assets | Existing eight direct and seven browser/API/installer dependent tests | Windows + Linux |
+| Skills/capabilities | `agent_skills.py`, `capabilities.py`, `capability_contracts.py`, `capability_discovery.py`, `capability_vendor.py`, `claude_plugin_capabilities.py`, `mcp_capabilities.py`, `provider_events.py` | Agent-skill, registry, MCP proxy/authorization, and provider-event direct tests plus provider acceptance/authorization/registry and run-window/recovery contracts | Windows + Linux |
+| Task sources | `task_sources.py` | GitHub/local source, invariant, outbound lifecycle, progress-preservation, and zero-config direct tests plus admission diagnosis, objective, queue, selection, and publication contracts | Windows + Linux |
+
 An `operator` plan requires both protected Windows and Linux jobs, the real-browser
-test and Windows installer/timezone acceptance. A `docs` plan records portable
+test and Windows installer/timezone acceptance. A `component` plan also requires
+both operating systems for the currently audited skills/capability and task-source
+families. The planner writes versioned JSON; a separate runner rejects symlinks,
+oversized/malformed plans, unsupported contracts/modes/OS values, empty direct
+targets, pytest options, traversal, shell text, and every target outside the immutable
+component allowlist. It launches pytest with an argument list, never interpolated
+shell text. A `docs` plan records portable
 policy checks and explicitly sets `runtime_coverage=false`. A post-merge `smoke`
 plan retains both operating systems, exact-range policy, bootstrap/import,
 focused-policy tests, and executable/declarative invariants without repeating the
 complete regression. Every mode retains the mandatory checks. The workflow prints
 the versioned JSON plan. Its existing complete regression groups run for `full`;
-the fixed operator command runs only for `operator` or `full`. The protected job
+the fixed operator command runs only for `operator` or `full`; the validated component
+runner runs only for `component`. The protected job
 names remain `windows` and `linux`.
 
 Pull requests and merge groups use their explicit base/head identities with a
