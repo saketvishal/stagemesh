@@ -99,3 +99,32 @@ def test_document_cannot_claim_the_gate_without_ten_consecutive_clean_tasks() ->
 def test_readme_points_to_the_document_instead_of_duplicating_it() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/founder-hands-off.md" in readme
+
+
+def test_canonical_docs_do_not_reintroduce_implemented_hands_off_limitations() -> None:
+    founder = DOC.read_text(encoding="utf-8")
+    driver = (ROOT / "docs" / "continuous-driver.md").read_text(encoding="utf-8")
+    status = (ROOT / "docs" / "status.md").read_text(encoding="utf-8")
+
+    stale_claims = (
+        "integration guard of `continue` does not consult it",
+        "Job-log retrieval is not implemented",
+        "Reruns cannot be requested",
+        "StageMesh's own git calls are not routed through it",
+        "not a real Task Scheduler round trip",
+        "NOT_RUN for real provider CLIs, real Windows Task Scheduler execution, hosted CI/PR landing",
+        "`37 passed`",
+        "Real CI execution results from GitHub-hosted Windows and Linux runners.",
+    )
+    combined = f"{founder}\n{driver}\n{status}"
+    normalized = " ".join(combined.split())
+    assert not any(claim in normalized for claim in stale_claims)
+
+    for current_fact in (
+        "bounded GitHub Actions job logs",
+        "durable rerun budget",
+        "execute_preserved_cleanup",
+        "real hosted Task Scheduler round trip",
+        "post-merge `main` push smoke",
+    ):
+        assert current_fact in combined

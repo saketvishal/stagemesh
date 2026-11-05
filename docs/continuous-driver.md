@@ -116,5 +116,8 @@ the mock before installing anything.
 Deterministic tests use fake window runners and a recording Task Scheduler adapter. They prove exact command construction,
 project-bound scheduling, cross-tick continuation, crash checkpoints, idempotent schedule cleanup, bounded failures, and idle semantics.
 Real local subprocess tests additionally prove that an in-flight child finishes after its driver parent is killed, the next tick
-recovers without overlap, and the Windows hard timeout terminates a temporary child process tree. These are not a real-provider run,
-a real Task Scheduler round trip, a hosted-CI result, or a ten-task Founder Hands-Off streak.
+recovers without overlap, and the Windows hard timeout terminates a temporary child process tree. Separate hosted Windows acceptance
+installed the actual Task Scheduler entry and exercised repeated scheduled ticks, pause/resume, overlap prevention, a whole-tree kill,
+automatic recovery, stop, uninstall and cleanup using deterministic mock providers. That is a real hosted Task Scheduler round trip,
+but it is not an authorized real-provider run, an owner-PC sign-in/reboot proof or a ten-task Founder Hands-Off streak. See the dated
+verification ledger in `founder-hands-off.md` for exact evidence boundaries.
