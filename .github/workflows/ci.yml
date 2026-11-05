@@ -33,7 +33,7 @@ jobs:
           STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-        run: python scripts/ci_validation_plan.py
+        run: python scripts/ci_validation_plan.py --plan-file .stagemesh-ci-plan.json
       - name: Attribution and static range policy
         env:
           STAGEMESH_CI_EVENT: ${{ github.event_name }}
@@ -49,6 +49,9 @@ jobs:
         run: .stagemesh\tooling\venv\Scripts\python.exe scripts/stabilization_gate.py
       - name: Declarative and executable contract invariants
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_invariant_semantics.py
+      - name: Audited component tests
+        if: ${{ steps.validation-plan.outputs.mode == 'component' }}
+        run: .stagemesh\tooling\venv\Scripts\python.exe scripts/run_ci_component_tests.py --plan .stagemesh-ci-plan.json --os windows
       - name: Delivery and window regressions
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_fast_forward.py tests/test_landing_recovery.py tests/test_run_window.py tests/test_autonomous_window.py tests/test_continuous_capacity.py tests/test_source_sync_preserves_progress.py tests/test_operator_report.py tests/test_handoff.py tests/test_survivor_wave.py tests/test_contract_admission.py tests/test_controlled_merge.py tests/test_candidate_environments.py tests/test_workspace_environment_repair.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
@@ -118,7 +121,7 @@ jobs:
           STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-        run: python scripts/ci_validation_plan.py
+        run: python scripts/ci_validation_plan.py --plan-file .stagemesh-ci-plan.json
       - name: Attribution and static range policy
         env:
           STAGEMESH_CI_EVENT: ${{ github.event_name }}
@@ -134,6 +137,9 @@ jobs:
         run: .stagemesh/tooling/venv/bin/python scripts/stabilization_gate.py
       - name: Declarative and executable contract invariants
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_invariant_semantics.py
+      - name: Audited component tests
+        if: ${{ steps.validation-plan.outputs.mode == 'component' }}
+        run: .stagemesh/tooling/venv/bin/python scripts/run_ci_component_tests.py --plan .stagemesh-ci-plan.json --os linux
       - name: Delivery and window regressions
         if: ${{ steps.validation-plan.outputs.mode == 'full' }}
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_fast_forward.py tests/test_landing_recovery.py tests/test_run_window.py tests/test_autonomous_window.py tests/test_continuous_capacity.py tests/test_source_sync_preserves_progress.py tests/test_operator_report.py tests/test_handoff.py tests/test_survivor_wave.py tests/test_contract_admission.py tests/test_controlled_merge.py tests/test_candidate_environments.py tests/test_workspace_environment_repair.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py

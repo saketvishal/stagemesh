@@ -59,6 +59,7 @@ def test_protected_jobs_compute_and_publish_exact_diff_plan_without_renaming() -
         assert "github.event.pull_request.head.sha" in plan
         assert "github.event.merge_group.head_sha" in plan
         assert "python scripts/ci_validation_plan.py" in plan
+        assert "--plan-file .stagemesh-ci-plan.json" in plan
         assert "STAGEMESH_CI_FORCE_FULL:" in plan
 
 
@@ -71,6 +72,17 @@ def test_mandatory_steps_never_depend_on_focused_mode() -> None:
             job, "Attribution and static range policy"
         )
         assert "tests/test_docs_links.py" in _step(job, "Focused validation policy")
+
+
+def test_component_mode_uses_validated_plan_file_on_each_required_os() -> None:
+    jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
+    condition = "if: ${{ steps.validation-plan.outputs.mode == 'component' }}"
+    for os_name, job in jobs.items():
+        component = _step(job, "Audited component tests")
+        assert condition in component
+        assert "scripts/run_ci_component_tests.py" in component
+        assert "--plan .stagemesh-ci-plan.json" in component
+        assert f"--os {os_name}" in component
 
 
 def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:
