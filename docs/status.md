@@ -61,6 +61,8 @@
 - Release-readiness report aggregates local gates, structured live proof gaps, external evidence records, and explicit evidence gaps with artifact and direct JSON output.
 - External evidence registry idempotently records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs, with deduped structured add and candidate-match listing.
 - Hosted CI diagnosis can enrich failed GitHub Actions checks with bounded, credential-safe, redacted job logs; third-party checks and unavailable logs remain gate-level evidence and cannot satisfy strict baseline-detail policy.
+- Supervised integration consults exact candidate/base hosted checks when explicit GitHub credentials are configured; bounded failed-job reruns spend a durable budget only after GitHub accepts the request.
+- StageMesh-owned destructive reset/clean recovery paths preserve work first, apply deterministic policy, and record command receipts; arbitrary provider-issued Git commands remain outside that interception boundary.
 - Passing external evidence must name a candidate SHA and only counts for the matching candidate.
 - Acceptance matrix artifact maps each major requirement to proven local evidence or an explicit external gap, with direct JSON output.
 - End-to-end acceptance artifact maps the requested 18 clean-environment acceptance steps to local proof evidence, with direct JSON output.
@@ -72,31 +74,27 @@
 - Local `stagemesh ci` covers compile, invariants, provider acceptance, GitHub acceptance, structured live acceptance, clean acceptance, and optional full acceptance.
 - Canary regression tests cover forbidden/out-of-scope edits, dependency-manifest changes without gates, unrelated change-size expansion, exact-SHA evidence mismatch prevention, reviewer and validator false-positive prevention, integration evidence prerequisites, provider prompt contract injection, and isolated task workspaces.
 
-## Verified Locally
+## Verified evidence snapshot (2026-11-05)
 
-- `python -m compileall -q src scripts build_backend.py`
-- `python scripts/invariants.py`
-- `python scripts/acceptance.py`
-- `python scripts/clean_acceptance.py`
-- `.venv\Scripts\python.exe -m pytest -q --basetemp work\pytest-root -o cache_dir=work\pytest-cache` (`37 passed`)
-- `.venv\Scripts\python.exe -m ruff check src\stagemesh\contracts.py src\stagemesh\execution.py src\stagemesh\providers.py src\stagemesh\integration.py src\stagemesh\workspaces.py tests\test_change_contracts.py tests\test_canary_regression.py`
-- `python -m stagemesh.cli --project . ci --future-feature-gate`
-- `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`
+- The latest recorded complete local Windows baseline before PR #680 was `4247 passed, 3 skipped, 26 subtests passed` in
+  `6451.68s` on commit `123aa659`; it is performance evidence for that exact commit, not current-main full-suite evidence.
+- PR #680 exact head `7dd2e32a5d76e7d4c12985ab8ac1da4ef26191ae` passed the protected full StageMesh CI on Linux and Windows before merge.
+- PR #680 merged to `main` as `08c671e3b7093eb4dc67a939e781eef4ec5f2dae`; its post-merge push smoke run
+  `41939786942` completed successfully in about one minute rather than repeating the full PR regression.
+- The exact PR head also had `82` focused planner/runner/workflow/documentation tests passing locally, plus separately recorded
+  component evidence of `459` capability tests and `107` task-source tests.
 
-Current generated reports show local checks passing while proof remains blocked on external evidence:
-
-- acceptance report: `PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE`
-- completion audit: `complete=False`
-- acceptance matrix: `INCOMPLETE`
-- end-to-end acceptance: `COMPLETE`
+These observations do not prove real-provider operation, the ten-task Founder Hands-Off streak, every external service, or the current
+full-regression performance target. See `founder-hands-off.md` and `validation-components.md` for those boundaries.
 
 ## Still Required For Full Product Acceptance
 
-- Live GitHub API acceptance with credentials, outbound issue synchronization, and permission/auth matrix.
+- Project-specific live GitHub permission/outbound synchronization acceptance; read-only check-run and job-log behavior already has
+  bounded live evidence.
 - Full production provider adapters for Codex, Claude, Grok, and other approved workers.
 - Networked distributed worker transport beyond local durable queue plus file-envelope handoff.
 - Networked/live operator dashboard UI beyond the generated static HTML status dashboard.
 - Live PostgreSQL acceptance against a real service behind the persistence interface.
-- Real CI execution results from GitHub-hosted Windows and Linux runners.
+- Faster authoritative full-regression execution without weakening Windows/Linux coverage (tracked separately by the regression-performance program).
 - Public release publishing destination and hosted artifact URLs.
 - Deeper security hardening for sandbox, secrets, git attribution, and multi-project registry operation.

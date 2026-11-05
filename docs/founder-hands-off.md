@@ -57,7 +57,7 @@ BASE_HISTORY_REWRITTEN old_base=141d756 new_base=970efeb tree_equivalent=true or
 | Isolation guard | `isolation.py` | fails closed if any runtime path, git store, database or running code belongs to another StageMesh checkout |
 | `Supervisor` | `supervisor.py` | the facade that observes, applies the policies, acts non-destructively and records |
 | Wiring | `wiring.py`, `hooks.py`, `integration.py`, `cli.py` | opt-in integration with the existing coordinator, executors, integrator and CLI |
-| GitHub boundary | `github_adapter.py` | pull requests, check runs, base retargeting, head-pinned merge on the existing `GitHubTransport` |
+| GitHub boundary | `github_adapter.py` | pull requests, check runs, bounded GitHub Actions job logs, one budgeted failed-job rerun, base retargeting, and head-pinned merge on the existing `GitHubTransport` |
 
 Reused unchanged: the state machine and evidence model (`coordinator.py`, `lifecycle.py`), exact-SHA evidence and change contracts,
 `SerializedIntegrator` (subclassed), provider pools and independent-review verification, failure diagnosis, process-identity
@@ -102,15 +102,15 @@ checkouts this one must never touch in `.stagemesh/isolation.json` (`{"forbidden
 | 3 | Ordinary main advancement | 2 | `SupervisedIntegrator` refreshes the candidate and returns the task to VALIDATE |
 | 4 | History rewrite detection | 2 | retargeted replacement with tree-equivalence proof and lineage |
 | 5 | PR dependency / stacked PR handling | 2 | `run-window` schedules eligible dependency work and delivery follow-through rechecks pending PRs |
-| 6 | CI diagnosis (candidate vs base) | 2 | gates integration when a `HostedCI` is supplied, and runs in `autonomy deliver` against hosted check runs |
-| 7 | Broken/fragile test detection | 1 | classification and remediation guard; no test harness emits observations yet |
+| 6 | CI diagnosis (candidate vs base) | 2 | the supervised integration guard and `autonomy deliver` compare exact candidate/base checks; GitHub Actions failures can include bounded job logs and one durable-budget rerun |
+| 7 | Broken/fragile test detection | 1 | classification, validated test-observation producer and remediation guard; project test harnesses must opt in to emitting markers |
 | 8 | Independent review lifecycle | 2 | scope policy wraps the reviewer adapter in the CLI |
 | 9 | Scope discipline | 2 | deferred-work ledger, scoped review (contract enforcement already existed) |
 | 10 | Merge policy and post-merge verification | 2 | `autonomy deliver` evaluates the policy (merge only on `--merge`); verification precedes DONE |
 | – | Isolation guard | 2 | enforced by the CLI whenever the supervisor is enabled |
 | – | Decision trace and escalation contract | 2 | every decision persisted; escalations typed and validated |
 | – | Unknown process identity recovery | 2 | the coordinator fences an UNKNOWN execution onto a replacement worktree |
-| – | Destructive git operation policy | 1 | policy and preservation; no git wrapper routes requests through it yet |
+| – | Destructive git operation policy | 1 | policy plus preserved reset/clean execution is wired into StageMesh recovery and integration cleanup; arbitrary provider-issued Git requests are not intercepted |
 
 ## Incident corpus
 
@@ -138,29 +138,32 @@ Ordered by value for reaching the gate:
 
 1. **No real task has run under the supervisor.** Every claim above is proven on deterministic local fixtures and, for the GitHub
    boundary, on recorded and read-only live payloads. The ten-task streak is the only thing that can raise any capability to level 3.
-2. **The executable driver exists but is not live-proven.** `run-window` now selects and advances multiple eligible tasks, continues
-   through guarded PR delivery/landing when explicitly authorized, and delivery follow-through rechecks pending PRs. The opt-in
-   Windows-local `stagemesh driver` supervisor adds single-instance scheduled ticks, durable crash checkpoints, bounded failed-tick
-   suspension and status/pause/resume/stop. Deterministic fixtures are not a real provider run, a real Task Scheduler round trip or a
-   ten-task streak; no persistent driver was installed while implementing this slice.
-3. **Hosted CI observation is on-demand.** `GitHubHostedCI` is used by `autonomy deliver` and verified read-only against live GitHub, but the
-   integration guard of `continue` does not consult it. Check runs carry no logs, so baseline comparison is gate-level (`GATE_LEVEL` evidence, reported in the
-   trace) and, by default (`baseline_requires_detail: true`), is not enough to call a candidate merge-ready: the policy asks for log-level base
-   evidence instead. Job-log retrieval is not implemented.
+2. **The driver is not real-provider proven.** Hosted Windows acceptance installed the actual Task Scheduler entry and exercised
+   repeated ticks, pause/resume, overlap prevention, whole-tree termination, automatic recovery, stop and uninstall with deterministic
+   mock providers. That proves the host lifecycle but not an authorized real-provider run, an owner-PC sign-in/reboot cycle or a
+   ten-task hands-off streak. Persistent installation in a consuming project remains an explicit operator action.
+3. **Hosted CI observation is explicit and GitHub-scoped.** When a supervised project supplies explicit GitHub owner/repository/token
+   configuration, both the `continue` integration guard and `autonomy deliver` compare the exact candidate with its base. Failed
+   GitHub Actions checks are enriched with bounded, redacted job logs when the transport exposes them; third-party checks and unavailable
+   logs remain gate-level evidence and cannot satisfy `baseline_requires_detail: true`. Infrastructure/ambiguous failures may request
+   one failed Actions-job rerun on the identical SHA; only an accepted request spends the durable rerun budget. Other hosts have no
+   runtime adapter yet, and missing credentials fail closed rather than silently weakening the gate.
 4. **Test-observation production is explicit, not automatic.** `stagemesh test-observation` emits the validated
    `STAGEMESH_TEST_OBSERVATION` format for a fixture or CI harness without running a provider. Existing project fixtures must invoke it;
    StageMesh does not inject a global pytest plugin or infer observations from arbitrary logs.
-5. **Destructive git requests are not intercepted.** `decide_git_operation` is policy only; StageMesh's own git calls are not routed through it.
-6. **Reruns cannot be requested.** A failure classified as infrastructure is retried only by waiting for a new observation; StageMesh cannot yet ask the host to rerun failed jobs (the bounded budget ends in a typed escalation).
-7. A scheduled driver tick runs `run-window` preflight across active executions and automatically recovers only identities proven DEAD.
+5. **Arbitrary provider Git requests are not intercepted.** StageMesh-owned reset/clean recovery paths are routed through
+   `execute_preserved_cleanup`, which snapshots work, applies policy and records per-command receipts. A provider CLI can still issue its
+   own destructive Git command outside that helper; workspace ownership detects the resulting state, but there is no shell/Git wrapper
+   that prevents the command before execution.
+6. A scheduled driver tick runs `run-window` preflight across active executions and automatically recovers only identities proven DEAD.
    UNKNOWN identities intentionally remain a typed operator inspection gate; there is no unsafe periodic release.
-8. Escalations are persisted and shown in the trace, but there is no push notification to the founder.
-9. `Coordinator.recover` and `recover-stale --release-unknown` remain available as manual operator tools and are outside the supervisor.
-10. **Providers that commit on their own fail closed.** StageMesh registers its own commits; a provider CLI that commits itself is treated as
+7. Escalations are persisted and shown in the trace, but there is no push notification to the founder.
+8. `Coordinator.recover` and `recover-stale --release-unknown` remain available as manual operator tools and are outside the supervisor.
+9. **Providers that commit on their own fail closed.** StageMesh registers its own commits; a provider CLI that commits itself is treated as
     an external writer until its email is listed in `trusted_committer_emails`. This is safe but would stall a hands-off run; the right fix is to learn the provider's identity from the adapter.
-11. **Refresh budget.** Supervised runs allow at least 5 automatic refreshes (`SUPERVISED_MIN_REFRESH_ATTEMPTS`); a ref that advances
+10. **Refresh budget.** Supervised runs allow at least 5 automatic refreshes (`SUPERVISED_MIN_REFRESH_ATTEMPTS`); a ref that advances
     more often still ends in the typed `integration_stale_base` block and needs `retry-task`.
-12. **Driver installation remains explicit.** Reusable install defaults may live under `driver` in `.stagemesh/config.json` and
+11. **Driver installation remains explicit.** Reusable install defaults may live under `driver` in `.stagemesh/config.json` and
     `driver install --plan --use-project-config` previews them without writes. Reading config never installs a schedule, and mutable
     driver state remains in the separate project-owned runtime record.
 
@@ -229,15 +232,22 @@ plus one Windows sandbox-only local Git-process failure; that exact test passed 
 tests passing**. Independent review initially found launch ownership, timeout cleanup, scheduler diagnostics and evidence-overclaim gaps;
 all were fixed, regression-tested and accepted on re-review.
 
-Acceptance status: **VERIFIED_COMPONENT** for deterministic local fixtures. **NOT_RUN** for real provider CLIs, real Windows Task
-Scheduler execution, hosted CI/PR landing and the real ten-task streak. No service/schedule was installed and no provider credit was
-consumed by this evidence.
+Acceptance status for this original implementation slice: **VERIFIED_COMPONENT** for deterministic local fixtures. Subsequent ledger
+entries above separately establish **LIVE_VERIFIED** real hosted Windows Task Scheduler execution with mock providers and exact-head
+hosted Linux/Windows CI. Real provider CLIs, an owner-PC sign-in/reboot cycle, hosted PR landing by the unattended driver and the real
+ten-task streak remain **NOT_RUN**. No persistent service/schedule was installed on the owner's machine and no provider credit was
+consumed by the hosted scheduler proof.
 
-## Baseline failures observed (deferred, deliberately not fixed here)
+## Historical baseline failures observed (deferred, deliberately not fixed in that slice)
 
-* `main` hosted CI is red on `linux` and `windows` (StageMesh CI): `invariants`, `clean_acceptance` (`doctor missing ['schema version: 3']`)
-  and `acceptance` fail because the schema-version expectation was not updated after the v4 migration. This predates this work and is
-  outside its scope; it is the real instance of scenario E.
+This section is incident evidence, not current-main status. At the recorded pre-driver `main` (`726a74d`), hosted `linux` and `windows`
+failed `invariants`, `clean_acceptance` (`doctor missing ['schema version: 3']`) and `acceptance` because the schema-version expectation
+was not updated after the v4 migration. That was the real instance of scenario E.
+
+Current evidence snapshot (2026-11-05): PR #680 exact head `7dd2e32` completed its full StageMesh CI on Linux and Windows successfully;
+it merged as `08c671e`, and the post-merge `main` push smoke run `41939786942` completed successfully in about one minute. This proves
+those exact checks and commits only; it does not establish the Founder Hands-Off gate or a real-provider streak.
+
 * A global editable install makes `import stagemesh` resolve to a different checkout (`C:\stagemesh-vnext`) unless `PYTHONPATH=src`; the
   isolation guard now refuses supervised runs in that state (`RUNNING_CODE_FROM_OTHER_CHECKOUT`).
 * `stagemesh init --register` defaults to the shared global registry `~/.stagemesh/registry.json`; the isolation guard reports a
