@@ -68,6 +68,7 @@ def test_ui_registry_launches_separate_servers_tokens_and_projections(
         control=None,
         projects=None,
         doctor=None,
+        provider_status=None,
     ):
         index = len(created) + 1
         server = FakeServer(44000 + index)
@@ -78,6 +79,7 @@ def test_ui_registry_launches_separate_servers_tokens_and_projections(
         )
         created.append((server, api, control))
         assert doctor is not None
+        assert provider_status is not None
         return server, api
 
     opened: list[str] = []

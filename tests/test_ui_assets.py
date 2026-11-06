@@ -70,6 +70,7 @@ def test_ui_source_is_csp_safe_and_never_injects_html():
     assert "/api/v5/health" in js and "/api/v5/periods" in js and "/api/v1/operator" in js
     assert "/api/v1/objectives" in js
     assert "/api/v1/doctor" in js
+    assert "/api/v1/providers" in js
     assert "/api/v1/task?task_id=" in js and "/api/v1/execution?execution_id=" in js
     assert "include_task_history" in js and "include_retry_history" in js and "retry_state" in js
     assert "include_evidence_history" in js and "evidence_status" in js
@@ -87,9 +88,10 @@ def test_ui_covers_contract_states_and_filters():
     assert 'aria-live="polite"' in html
     for marker in (
         "This week", "This month", 'id="series-table"', 'id="interval-table"', 'id="drill"',
-        'id="status-view"', 'id="objectives-view"', 'id="doctor-view"', 'id="task-view"', 'id="execution-view"',
+        'id="status-view"', 'id="objectives-view"', 'id="doctor-view"', 'id="providers-view"', 'id="task-view"', 'id="execution-view"',
         'id="objective-children-table"', "Objectives and planned work", "Recorded pending decisions", "Provider selections",
         "Project configuration and readiness", "Configured and authorized do not mean available or invoked",
+        "Provider status and recorded use", "Executable discovery does not invoke a provider",
         "Recorded lifecycle timeline", "Validation, review and integration evidence",
         "Claim ownership and cleanup", "Exact-candidate evidence",
     ):

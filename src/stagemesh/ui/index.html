@@ -22,6 +22,7 @@
   <button type="button" id="show-status" aria-pressed="false">Status</button>
   <button type="button" id="show-objectives" aria-pressed="false">Objectives</button>
   <button type="button" id="show-doctor" aria-pressed="false">Doctor</button>
+  <button type="button" id="show-providers" aria-pressed="false">Providers</button>
   <button type="button" id="show-control" aria-pressed="false" hidden>Control</button>
   <button type="button" id="show-task" aria-pressed="false" hidden>Task detail</button>
   <button type="button" id="show-execution" aria-pressed="false" hidden>Execution detail</button>
@@ -207,6 +208,34 @@
     <h3 id="doctor-policy-heading">Safety and execution policy</h3>
     <dl id="doctor-policies" class="metrics"></dl>
   </section>
+</main>
+<main id="providers-view" hidden>
+  <h2>Provider status and recorded use</h2>
+  <p id="providers-summary" class="muted" role="status" aria-live="polite">Provider status has not been loaded.</p>
+  <form id="provider-filters" aria-label="Provider status filters">
+    <label>Search <input id="provider-search" type="search" maxlength="100" placeholder="provider name"></label>
+    <label>Capability
+      <select id="provider-capability"><option value="">All</option><option>IMPLEMENT</option><option>REVIEW</option></select>
+    </label>
+    <label>Posture
+      <select id="provider-posture">
+        <option value="">All</option><option value="authorized">Authorized</option><option value="not-authorized">Not authorized</option>
+        <option value="discovered">Executable discovered</option><option value="not-discovered">Executable not discovered</option>
+        <option value="cooling">Cooling down</option><option value="invoked">Recorded invocation</option><option value="never-invoked">No recorded invocation</option>
+      </select>
+    </label>
+    <label>Sort
+      <select id="provider-sort"><option value="name">Name</option><option value="invocations">Invocations</option><option value="recent">Recent recorded use</option></select>
+    </label>
+    <button type="button" id="providers-refresh">Refresh providers</button>
+  </form>
+  <p id="providers-message" role="status" aria-live="polite"></p>
+  <p class="muted">Executable discovery does not invoke a provider. Durable live acceptance and recorded executions are independent evidence. Billing usage remains unknown unless a provider reports it.</p>
+  <table id="providers-table" tabindex="-1">
+    <caption class="sr">Configured, authorized, locally discovered, live-accepted, cooling, and recorded provider invocation states.</caption>
+    <thead><tr><th scope="col">Provider</th><th scope="col">Source</th><th scope="col">Capabilities</th><th scope="col">Authorization</th><th scope="col">Executable</th><th scope="col">Live acceptance</th><th scope="col">Cooldown</th><th scope="col">Invocations</th><th scope="col">Last recorded use</th></tr></thead>
+    <tbody id="provider-rows"></tbody>
+  </table>
 </main>
 <main id="control-view" hidden>
   <h2>Bounded operator control</h2>

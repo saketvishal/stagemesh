@@ -26,6 +26,7 @@ from stagemesh.api_server import UI_ASSETS, ActivityApi, make_server
 from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from stagemesh.operator_doctor import ProjectDoctor
+from stagemesh.operator_providers import ProviderStatusProjection
 from stagemesh.persistence import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -335,6 +336,27 @@ DRIVER = r"""
       out.refreshed = $("doctor-summary").textContent.includes("Local-only");
     },
 
+    async providers() {
+      $("show-providers").click();
+      await until(() => $("providers-summary").textContent.includes("Observed"), "provider snapshot");
+      out.viewVisible = !$("providers-view").hidden && $("activity-view").hidden;
+      out.summary = $("providers-summary").textContent;
+      out.initialRows = document.querySelectorAll("#provider-rows tr").length;
+      out.initialText = $("provider-rows").textContent;
+      $("provider-posture").value = "invoked";
+      $("provider-posture").dispatchEvent(new Event("change"));
+      out.invokedRows = document.querySelectorAll("#provider-rows tr").length;
+      $("provider-search").value = "does-not-exist";
+      $("provider-search").dispatchEvent(new Event("input"));
+      out.emptyRows = document.querySelectorAll("#provider-rows tr").length;
+      out.emptyMessage = $("providers-message").textContent;
+      $("provider-search").value = "";
+      $("provider-search").dispatchEvent(new Event("input"));
+      $("providers-refresh").click();
+      await until(() => $("providers-summary").textContent.includes("Observed"), "provider refresh");
+      out.refreshed = $("providers-summary").textContent.includes("Provider calls 0");
+    },
+
     // Load more is accepted but its second-page response is still in flight when a refresh happens.
     async pending() {
       await until(() => rows() === 100, "first page");
@@ -520,6 +542,7 @@ def fixture_base(tmp_path: Path):
         static_dir=site,
         api_class=FixtureApi,
         doctor=ProjectDoctor(tmp_path),
+        provider_status=ProviderStatusProjection(tmp_path),
     )
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -562,6 +585,7 @@ def period_base(tmp_path: Path):
         static_dir=site,
         api_class=FixtureApi,
         doctor=ProjectDoctor(tmp_path),
+        provider_status=ProviderStatusProjection(tmp_path),
     )
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -636,6 +660,7 @@ def status_base(tmp_path: Path):
         static_dir=site,
         api_class=FixtureApi,
         doctor=ProjectDoctor(tmp_path),
+        provider_status=ProviderStatusProjection(tmp_path),
     )
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -752,6 +777,16 @@ def test_doctor_view_renders_local_configuration_and_provider_boundaries(status_
     assert "Network checkedno" in result["system"] and "Mutation performedno" in result["system"]
     assert "Unattended allowlist configuredno" in result["policies"]
     assert "not authorized" in result["providerText"] and result["refreshed"] is True
+
+
+def test_provider_view_distinguishes_recorded_invocation_and_never_probes_providers(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "providers", tmp_path)
+    assert result["viewVisible"] is True and "Provider calls 0" in result["summary"]
+    assert result["initialRows"] == 4
+    assert "codex" in result["initialText"] and "claude" in result["initialText"]
+    assert result["invokedRows"] == 2
+    assert result["emptyRows"] == 0 and "No loaded providers match" in result["emptyMessage"]
+    assert result["refreshed"] is True
 
 
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):
