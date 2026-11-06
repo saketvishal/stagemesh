@@ -39,6 +39,17 @@ def _prepared_contract(project: Path, task: str) -> None:
     (directory / f"{task}.json").write_text(json.dumps(FAKE_CONTRACT), encoding="utf-8")
 
 
+def _disable_independent_review_for_plan(project: Path) -> None:
+    """Keep read-only plan tests scoped to planning instead of host provider inventory."""
+    config_path = project / ".stagemesh" / "config.json"
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["routing"] = {
+        **data.get("routing", {}),
+        "require_independent_review": False,
+    }
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+
+
 def test_repository_detection_reuses_unchanged_local_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -128,9 +139,9 @@ def test_run_window_plan_previews_ready_issues_without_persisting_them(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
-    monkeypatch.setenv("STAGEMESH_CLAUDE_CMD", sys.executable)
     project = _github_project(tmp_path)
     assert cli_module.main(["--project", str(project), "init"]) == 0
+    _disable_independent_review_for_plan(project)
     _prepared_contract(project, "17")
     capsys.readouterr()
 
@@ -173,11 +184,18 @@ def test_run_window_plan_previews_ready_issues_without_persisting_them(
 
 def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
-    monkeypatch.setenv("STAGEMESH_CLAUDE_CMD", sys.executable)
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     config_path = project / ".stagemesh" / "config.json"
-    config_path.write_text(json.dumps({"github": {"owner": "acme", "repo": "widgets"}}), encoding="utf-8")
+    config_path.write_text(
+        json.dumps(
+            {
+                "github": {"owner": "acme", "repo": "widgets"},
+                "routing": {"require_independent_review": False},
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(GitHubApiIssueSource, "discover", lambda self: ([DiscoveredTask("github", "3", "T", labels=("stagemesh:ready",))], "OK", None))
     assert cli_module.main(["--project", str(project), "init"]) == 0
     capsys.readouterr()
@@ -196,7 +214,6 @@ def test_run_window_plan_preserves_explicit_legacy_source_policy(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
-    monkeypatch.setenv("STAGEMESH_CLAUDE_CMD", sys.executable)
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     config_path = project / ".stagemesh" / "config.json"
@@ -205,6 +222,7 @@ def test_run_window_plan_preserves_explicit_legacy_source_policy(
             {
                 "github": {"owner": "acme", "repo": "widgets"},
                 "task_sources": [{"name": "github", "type": "github", "labels": ["status:QUEUED"]}],
+                "routing": {"require_independent_review": False},
             }
         ),
         encoding="utf-8",

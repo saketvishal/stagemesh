@@ -1185,11 +1185,13 @@ def drive_task(
                 summary.stop_reason, summary.message = "CURRENT_PROBLEM", ", ".join(problems)
                 summary.detail["problems"] = list(problems)
                 break
-        lifecycle_moved = progressed or any(
+        boundary_moved = progressed or any(
+            new[key] != previous[key]
+            for key in ("stage", "latest_candidate")
+        )
+        lifecycle_moved = boundary_moved or any(
             new[key] != previous[key]
             for key in (
-                "stage",
-                "latest_candidate",
                 "latest_validation",
                 "latest_review",
                 "latest_integration",
@@ -1200,7 +1202,7 @@ def drive_task(
         # queue supervision can honor a temporary provider cooldown before another attempt;
         # otherwise a fast host can retry immediately and turn a recoverable outage into a
         # blocked task while a slower host happens to pass.
-        if not lifecycle_moved and failure is not None:
+        if not boundary_moved and failure is not None:
             summary.stop_reason = "NO_PROGRESS"
             summary.detail["failure"] = failure
             summary.message = f"{failure['event']}: {failure.get('reason', 'unknown')}" + (
