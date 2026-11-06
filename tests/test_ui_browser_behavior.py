@@ -45,16 +45,19 @@ DRIVER = r"""
   }
   const realFetch = window.fetch.bind(window);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const control = { held: [], hold: null, fail: false, executionAuth: false, dropKey: null, log: [] };
+  const control = { held: [], hold: null, fail: false, attentionFail: false, executionAuth: false, dropKey: null, log: [] };
   const release = () => { control.hold = null; control.held.splice(0).forEach((r) => r()); };
   // Test-only wrapper around the page's real fetch: it can withhold, fail or alter ACTUAL server responses.
   window.fetch = async (url, opts) => {
     const u = String(url);
     const activity = u.includes("/api/v5/activity");
     const periods = u.includes("/api/v5/periods");
+    const attention = u.includes("/api/v1/attention");
     const executionDetail = u.includes("/api/v1/execution");
     if (activity || periods) control.log.push("request " + u);
+    if (attention) control.log.push("attention " + u);
     if (activity && control.fail) { control.log.push("fail " + u); throw new TypeError("network down"); }
+    if (attention && control.attentionFail) { throw new TypeError("attention network down"); }
     if (executionDetail && control.executionAuth) {
       return new Response(JSON.stringify({error: {message: "missing or invalid credential"}}), {
         status: 401, headers: {"Content-Type": "application/json"},
@@ -267,6 +270,39 @@ DRIVER = r"""
       await until(() => !$("drill").hidden, "status task drill-down");
       out.drillVisible = !$("drill").hidden;
       out.activityVisible = !$("activity-view").hidden && $("status-view").hidden;
+    },
+
+    async attention() {
+      out.requestsBeforeOpen = control.log.filter((entry) => entry.startsWith("attention ")).length;
+      $("show-attention").click();
+      await until(() => document.querySelectorAll("#attention-items tr").length === 1, "attention snapshot");
+      out.requestsAfterOpen = control.log.filter((entry) => entry.startsWith("attention ")).length;
+      out.viewVisible = !$("attention-view").hidden && $("activity-view").hidden;
+      out.summary = $("attention-summary").textContent;
+      out.count = $("attention-count").textContent;
+      out.approvalBoundary = $("attention-view").textContent;
+      $("attention-kind").value = "DELIVERY_PERMISSION";
+      $("attention-kind").dispatchEvent(new Event("change"));
+      out.filteredRows = document.querySelectorAll("#attention-items tr").length;
+      out.emptyMessage = $("attention-message").textContent;
+      $("attention-kind").value = "HUMAN_DECISION";
+      $("attention-kind").dispatchEvent(new Event("change"));
+      const task = document.querySelector("#attention-items button");
+      task.focus(); task.click();
+      await until(() => !$("task-view").hidden, "attention task detail");
+      out.taskVisible = !$("task-view").hidden;
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("attention-view").hidden, "attention return from task detail");
+      out.focusRestored = document.activeElement === task;
+      control.attentionFail = true;
+      $("attention-refresh").click();
+      await until(() => $("attention-summary").textContent.includes("stale"), "attention stale snapshot");
+      out.staleSummary = $("attention-summary").textContent;
+      out.staleRows = document.querySelectorAll("#attention-items tr").length;
+      $("show-activity").click();
+      const hiddenStart = control.log.filter((entry) => entry.startsWith("attention ")).length;
+      await sleep(11000);
+      out.requestsWhileHidden = control.log.filter((entry) => entry.startsWith("attention ")).length - hiddenStart;
     },
 
     async executionAuth() {
@@ -751,6 +787,18 @@ def test_status_view_renders_bounded_operator_sections_and_links_to_history(stat
     assert result["executionRaceKeptNewer"] is True and result["executionRaceReturnFocus"] is True
     assert "REVIEW" in result["executionFacts"] and "FAILED" in result["executionFacts"]
     assert result["drillVisible"] is True and result["activityVisible"] is True
+
+
+def test_attention_view_filters_opens_task_and_preserves_last_good_snapshot(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "attention", tmp_path)
+    assert result["viewVisible"] is True and "1 recorded human actions" in result["summary"]
+    assert result["requestsBeforeOpen"] == 0 and result["requestsAfterOpen"] == 1
+    assert result["count"] == "(1)" and "Approval coverage UNKNOWN" in result["approvalBoundary"]
+    assert result["filteredRows"] == 0 and "No recorded human actions match" in result["emptyMessage"]
+    assert result["taskVisible"] is True and result["focusRestored"] is True
+    assert "attention network down" in result["staleSummary"] and "stale" in result["staleSummary"]
+    assert result["staleRows"] == 1
+    assert result["requestsWhileHidden"] == 0
 
 
 def test_execution_detail_preserves_last_good_snapshot_on_auth_failure(status_base, tmp_path: Path):

@@ -40,6 +40,7 @@ from .activity_periods import (
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .operator import OperatorReport, execution_runtime_row, operator_report, pending_decision_rows
+from .operator_attention import ATTENTION_CONTRACT, serialize_attention_queue
 from .operator_control import (
     CONTROL_CONTRACT,
     MAX_CONTROL_BODY_BYTES,
@@ -1031,6 +1032,8 @@ class ActivityApi:
                 contract = DOCTOR_CONTRACT
             elif urlsplit(target).path == "/api/v1/providers":
                 contract = PROVIDERS_CONTRACT
+            elif urlsplit(target).path == "/api/v1/attention":
+                contract = ATTENTION_CONTRACT
             elif urlsplit(target).path.startswith("/api/v5/"):
                 contract = CONTRACT_V5
             elif urlsplit(target).path.startswith("/api/v4/"):
@@ -1152,6 +1155,15 @@ class ActivityApi:
             finally:
                 store.conn.close()
             return _json(200, projection, PROVIDERS_CONTRACT)
+        if path == "/api/v1/attention":
+            if parts.query:
+                raise ApiError(400, "invalid_query", "attention takes no parameters")
+            store = self._open()
+            try:
+                projection = serialize_attention_queue(store)
+            finally:
+                store.conn.close()
+            return _json(200, projection, ATTENTION_CONTRACT)
         if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health", "/api/v4/health", "/api/v5/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")
