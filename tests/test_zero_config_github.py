@@ -128,6 +128,7 @@ def test_run_window_plan_previews_ready_issues_without_persisting_them(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
+    monkeypatch.setenv("STAGEMESH_CLAUDE_CMD", sys.executable)
     project = _github_project(tmp_path)
     assert cli_module.main(["--project", str(project), "init"]) == 0
     _prepared_contract(project, "17")
@@ -172,6 +173,7 @@ def test_run_window_plan_previews_ready_issues_without_persisting_them(
 
 def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
+    monkeypatch.setenv("STAGEMESH_CLAUDE_CMD", sys.executable)
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     config_path = project / ".stagemesh" / "config.json"
@@ -194,6 +196,7 @@ def test_run_window_plan_preserves_explicit_legacy_source_policy(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
+    monkeypatch.setenv("STAGEMESH_CLAUDE_CMD", sys.executable)
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     config_path = project / ".stagemesh" / "config.json"

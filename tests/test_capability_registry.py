@@ -1085,7 +1085,12 @@ def test_claude_review_activates_validated_skills_only_plugin(
     monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
     monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
     monkeypatch.setattr(providers_module, "_authorization_refusal", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(providers_module, "resolve_executable", lambda *_args, **_kwargs: "claude")
+    real_which = providers_module.shutil.which
+    monkeypatch.setattr(
+        providers_module.shutil,
+        "which",
+        lambda command: "claude" if command == "claude" else real_which(command),
+    )
     monkeypatch.setattr(providers_module, "_review_provider_environment", lambda *_args: {})
     monkeypatch.setattr(providers_module, "popen_session_kwargs", dict)
     monkeypatch.setattr(providers_module.subprocess, "Popen", popen)
@@ -1215,7 +1220,12 @@ def test_claude_review_mcp_is_isolated_invoked_and_audited(
     monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
     monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
     monkeypatch.setattr(providers_module, "_authorization_refusal", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(providers_module, "resolve_executable", lambda *_args, **_kwargs: "claude")
+    real_which = providers_module.shutil.which
+    monkeypatch.setattr(
+        providers_module.shutil,
+        "which",
+        lambda command: "claude" if command == "claude" else real_which(command),
+    )
     monkeypatch.setattr(providers_module, "_review_provider_environment", lambda *_args: {})
     monkeypatch.setattr(providers_module, "popen_session_kwargs", dict)
     monkeypatch.setattr(providers_module.subprocess, "Popen", popen)
