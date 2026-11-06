@@ -27,6 +27,7 @@
   let doctorSnapshot = null, doctorGeneration = 0, doctorLastGood = null, doctorInflight = false;
   let providersSnapshot = null, providersGeneration = 0, providersLastGood = null, providersInflight = false;
   let attentionSnapshot = null, attentionGeneration = 0, attentionLastGood = null, attentionInflight = false;
+  let diagnosticsSnapshot = null, diagnosticsGeneration = 0, diagnosticsLastGood = null, diagnosticsInflight = false;
   let controlCapabilities = null, controlIntent = null, controlBusy = false;
   let projectTargets = new Map();
 
@@ -287,6 +288,39 @@
     }
   }
 
+  async function loadDiagnostics(quiet) {
+    if (!token) {
+      $("diagnostics-summary").textContent = "No access token. Open the URL printed by `stagemesh serve`.";
+      $("diagnostics-summary").className = "error";
+      return;
+    }
+    if (diagnosticsInflight) return;
+    const mine = ++diagnosticsGeneration;
+    diagnosticsInflight = true;
+    if (!quiet) {
+      $("diagnostics-summary").textContent = "Loading safe execution diagnostics...";
+      $("diagnostics-summary").className = "muted";
+    }
+    try {
+      const projection = await api("/api/v1/diagnostics");
+      if (mine !== diagnosticsGeneration) return;
+      diagnosticsSnapshot = projection;
+      diagnosticsLastGood = new Date();
+      renderDiagnostics();
+    } catch (error) {
+      if (mine !== diagnosticsGeneration) return;
+      const authorizationFailed = error.status === 401 || error.status === 403;
+      if (authorizationFailed) diagnosticsSnapshot = null;
+      renderDiagnostics();
+      const stale = diagnosticsLastGood && !authorizationFailed
+        ? " Showing the last diagnostic snapshot from " + diagnosticsLastGood.toLocaleTimeString() + " (stale)." : "";
+      $("diagnostics-summary").textContent = "Could not load execution diagnostics: " + error.message + "." + stale;
+      $("diagnostics-summary").className = authorizationFailed ? "error" : "warn";
+    } finally {
+      if (mine === diagnosticsGeneration) diagnosticsInflight = false;
+    }
+  }
+
   async function fetchActivity(target, mine) {
     const fresh = new Map();
     let offset = 0, page, fetched = 0;
@@ -358,6 +392,7 @@
   const refresh = () => {
     if (!$("providers-view").hidden) loadProviders(false);
     else if (!$("doctor-view").hidden) loadDoctor(false);
+    else if (!$("diagnostics-view").hidden) loadDiagnostics(false);
     else if (!$("attention-view").hidden) loadAttention(false);
     else if (!$("objectives-view").hidden) loadObjectives(false);
     else loadRange(false);
@@ -442,6 +477,7 @@
 
   function visibleView() {
     if (!$("task-view").hidden) return "task";
+    if (!$("diagnostics-view").hidden) return "diagnostics";
     if (!$("attention-view").hidden) return "attention";
     if (!$("objectives-view").hidden) return "objectives";
     if (!$("doctor-view").hidden) return "doctor";
@@ -729,6 +765,70 @@
       cell(row, item.stage + " / " + item.task_status);
       cell(row, item.title + " — " + item.detail);
       cell(row, new Date(item.recorded_at * 1000).toLocaleString());
+    }
+  }
+
+  function diagnosticRows() {
+    if (!diagnosticsSnapshot) return [];
+    const search = $("diagnostics-search").value.trim().toLocaleLowerCase();
+    const status = $("diagnostics-status").value;
+    const kind = $("diagnostics-kind").value;
+    const mode = $("diagnostics-sort").value;
+    const result = diagnosticsSnapshot.executions.filter((item) => {
+      const matchesText = !search || [item.id, item.task.id, item.task.title, item.provider, item.outcome.code].some(
+        (value) => String(value || "").toLocaleLowerCase().includes(search)
+      );
+      return matchesText && (!status || item.status === status) && (!kind || item.kind === kind);
+    });
+    result.sort((left, right) => {
+      if (mode === "task") return String(left.task.id).localeCompare(String(right.task.id)) || right.timing.updated_at - left.timing.updated_at;
+      if (mode === "status") return left.status.localeCompare(right.status) || right.timing.updated_at - left.timing.updated_at;
+      if (mode === "duration") return (right.timing.recorded_duration_seconds ?? -1) - (left.timing.recorded_duration_seconds ?? -1);
+      return (right.timing.updated_at || 0) - (left.timing.updated_at || 0) || String(left.id).localeCompare(String(right.id));
+    });
+    return result;
+  }
+
+  function renderDiagnostics() {
+    const body = $("diagnostics-items");
+    body.replaceChildren();
+    const snapshot = diagnosticsSnapshot;
+    if (!snapshot) {
+      $("diagnostics-message").textContent = "";
+      return;
+    }
+    $("diagnostics-summary").textContent = [
+      "Observed " + new Date(snapshot.observed_at).toLocaleString() + ".",
+      snapshot.executions.length + " shown of " + snapshot.execution_total + " executions; limit " + snapshot.execution_limit + ".",
+      "Raw logs and free-form results " + snapshot.raw_logs.toLocaleLowerCase() + ".",
+      "Database writes " + snapshot.database_writes + ", external calls " + snapshot.external_calls + ".",
+      snapshot.truncated ? "Older executions are outside this bounded view." : "The execution list is complete.",
+    ].join(" ");
+    $("diagnostics-summary").className = snapshot.truncated ? "warn" : "muted";
+    const items = diagnosticRows();
+    $("diagnostics-message").textContent = items.length ? "" : "No loaded executions match these filters.";
+    for (const item of items) {
+      const row = body.insertRow();
+      taskCell(row, item.task.id);
+      const execution = cell(row, "");
+      if (item.id) execution.append(executionButton(item.id, item.id.slice(0, 8)));
+      else execution.textContent = "unavailable";
+      cell(row, item.kind + " / " + item.status + (item.current_for_task ? " / current" : " / history"));
+      cell(row, item.provider || "withheld or unavailable");
+      cell(row, item.outcome.code
+        ? item.outcome.code + " / " + item.outcome.classification
+        : item.outcome.raw_result_available ? "free-form result withheld" : "no recorded result");
+      const evidenceCount = Object.values(item.evidence.counts).reduce(
+        (total, statuses) => total + Object.values(statuses).reduce((subtotal, value) => subtotal + value, 0), 0
+      );
+      cell(row, item.evidence.correlation.replaceAll("_", " ").toLocaleLowerCase() +
+        " / " + evidenceCount + " scanned" + (item.evidence.truncated ? " / truncated" : ""));
+      cell(row, [
+        item.timing.updated_at == null ? "time unavailable" : new Date(item.timing.updated_at * 1000).toLocaleString(),
+        item.timing.recorded_duration_seconds == null ? "duration unavailable" : item.timing.recorded_duration_seconds + " seconds",
+        item.runtime.process_state,
+        item.runtime.cleanup_state,
+      ].filter(Boolean).join(" / "));
     }
   }
 
@@ -1298,6 +1398,7 @@
     $("activity-view").hidden = name !== "activity";
     $("status-view").hidden = name !== "status";
     $("attention-view").hidden = name !== "attention";
+    $("diagnostics-view").hidden = name !== "diagnostics";
     $("objectives-view").hidden = name !== "objectives";
     $("doctor-view").hidden = name !== "doctor";
     $("providers-view").hidden = name !== "providers";
@@ -1307,6 +1408,7 @@
     $("show-activity").setAttribute("aria-pressed", String(name === "activity"));
     $("show-status").setAttribute("aria-pressed", String(name === "status"));
     $("show-attention").setAttribute("aria-pressed", String(name === "attention"));
+    $("show-diagnostics").setAttribute("aria-pressed", String(name === "diagnostics"));
     $("show-objectives").setAttribute("aria-pressed", String(name === "objectives"));
     $("show-doctor").setAttribute("aria-pressed", String(name === "doctor"));
     $("show-providers").setAttribute("aria-pressed", String(name === "providers"));
@@ -1359,6 +1461,7 @@
       if (!doctorInflight && !$("doctor-view").hidden) loadDoctor(true);
       if (!providersInflight && !$("providers-view").hidden) loadProviders(true);
       if (!attentionInflight && !$("attention-view").hidden) loadAttention(true);
+      if (!diagnosticsInflight && !$("diagnostics-view").hidden) loadDiagnostics(true);
     }, POLL_MS);
   }
 
@@ -1387,6 +1490,10 @@
   $("show-attention").addEventListener("click", () => {
     setView("attention");
     loadAttention(Boolean(attentionSnapshot));
+  });
+  $("show-diagnostics").addEventListener("click", () => {
+    setView("diagnostics");
+    loadDiagnostics(Boolean(diagnosticsSnapshot));
   });
   $("show-objectives").addEventListener("click", () => {
     setView("objectives");
@@ -1423,6 +1530,12 @@
   $("attention-kind").addEventListener("change", renderAttention);
   $("attention-sort").addEventListener("change", renderAttention);
   $("attention-refresh").addEventListener("click", () => loadAttention(false));
+  $("diagnostics-filters").addEventListener("submit", (event) => event.preventDefault());
+  $("diagnostics-search").addEventListener("input", renderDiagnostics);
+  $("diagnostics-status").addEventListener("change", renderDiagnostics);
+  $("diagnostics-kind").addEventListener("change", renderDiagnostics);
+  $("diagnostics-sort").addEventListener("change", renderDiagnostics);
+  $("diagnostics-refresh").addEventListener("click", () => loadDiagnostics(false));
   $("close-objective").addEventListener("click", closeObjective);
   $("auto").addEventListener("change", schedule);
   $("control-action").addEventListener("change", () => { clearControlPlan(); updateControlTarget(); });
