@@ -194,18 +194,26 @@ def test_dirty_paths_outside_every_scope_do_not_block(tmp_path: Path) -> None:
 
 def test_integration_is_serialized(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A", "B"])
-    state = {"inside": 0, "max": 0}
+    state = {"inside": 0, "max": 0, "attempts": 0, "entries": 0}
     guard = threading.Lock()
+    two_integrations_attempting = threading.Event()
     real_hold = rig.lock.hold
 
     @contextlib.contextmanager
     def watched(owner):
+        with guard:
+            state["attempts"] += 1
+            if state["attempts"] == 2:
+                two_integrations_attempting.set()
         with real_hold(owner):
             with guard:
                 state["inside"] += 1
                 state["max"] = max(state["max"], state["inside"])
-            time.sleep(0.15)
+                state["entries"] += 1
+                first_entry = state["entries"] == 1
             try:
+                if first_entry:
+                    assert two_integrations_attempting.wait(20), "second integration never contended for the lock"
                 yield
             finally:
                 with guard:
@@ -274,6 +282,7 @@ def test_pause_prevents_new_queue_admissions_until_resume(tmp_path: Path) -> Non
     rig = Rig(tmp_path, ["A", "B"])
     holder: dict[str, QueueRunner] = {}
     errors: list[str] = []
+    resume_checked = threading.Event()
 
     class SlowFirst(ScriptedExecutor):
         def run(self, store, task_id, claim_id, project):
@@ -281,13 +290,13 @@ def test_pause_prevents_new_queue_admissions_until_resume(tmp_path: Path) -> Non
                 holder["runner"].pause_admission("maintenance")
 
                 def resume_later() -> None:
-                    time.sleep(0.4)
                     if any(kind == "start" and task == "B" for kind, task, _ in executor.log):
                         errors.append("B started while admission was paused")
                     holder["runner"].resume_admission("maintenance complete")
+                    resume_checked.set()
 
                 threading.Thread(target=resume_later).start()
-                time.sleep(0.6)
+                assert resume_checked.wait(5), "admission was not resumed"
             return super().run(store, task_id, claim_id, project)
 
     executor = SlowFirst(rig.files)
@@ -330,9 +339,7 @@ def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_pat
             partial.parent.mkdir(parents=True, exist_ok=True)
             partial.write_text("partial\n", encoding="utf-8")
             holder["runner"].stop_admission("operator stop", terminate_running=True)
-            deadline = time.monotonic() + 10
-            while not holder["runner"].stop.is_set() and time.monotonic() < deadline:
-                time.sleep(0.02)
+            assert holder["runner"].stop.wait(10), "operator stop was not observed"
             raise OperatorStopRequested("operator stop")
 
     runner = queue(rig, HangingImplementation(rig.files), concurrency=1, interrupt_grace_seconds=5)

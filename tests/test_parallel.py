@@ -388,14 +388,17 @@ def test_concurrency_limit_is_respected(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A", "B", "C"])
     executor = ScriptedExecutor(rig.files)
     peak = {"now": 0, "max": 0}
+    two_workers_entered = threading.Event()
     original = executor.run
 
     def counted(store, task_id, claim_id, project):
         with executor.lock:
             peak["now"] += 1
             peak["max"] = max(peak["max"], peak["now"])
-        time.sleep(0.3)
+            if peak["now"] == 2:
+                two_workers_entered.set()
         try:
+            assert two_workers_entered.wait(20), "two executor calls never overlapped"
             return original(store, task_id, claim_id, project)
         finally:
             with executor.lock:
@@ -475,19 +478,26 @@ def test_exclusive_resources_do_not_change_existing_contract_digests() -> None:
 
 def test_integration_is_serialized_and_main_advancing_is_rebased(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A", "B"])
-    state = {"inside": 0, "max": 0, "entries": []}
+    state = {"inside": 0, "max": 0, "attempts": 0, "entries": []}
     guard = threading.Lock()
+    two_integrations_attempting = threading.Event()
     real_hold = rig.lock.hold
 
     @contextlib.contextmanager
     def watched(owner):
+        with guard:
+            state["attempts"] += 1
+            if state["attempts"] == 2:
+                two_integrations_attempting.set()
         with real_hold(owner):
             with guard:
                 state["inside"] += 1
                 state["max"] = max(state["max"], state["inside"])
                 state["entries"].append(owner)
-            time.sleep(0.15)
+                first_entry = len(state["entries"]) == 1
             try:
+                if first_entry:
+                    assert two_integrations_attempting.wait(20), "second integration never contended for the lock"
                 yield
             finally:
                 with guard:
@@ -510,43 +520,74 @@ def test_integration_is_serialized_and_main_advancing_is_rebased(tmp_path: Path)
 def test_integration_lock_excludes_threads_and_survives_holder_failure(tmp_path: Path) -> None:
     lock = IntegrationLock(tmp_path / "x.lock", timeout_seconds=10)
     order: list[str] = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_attempting = threading.Event()
 
-    def hold(name: str, delay: float, fail: bool = False) -> None:
+    def hold(name: str, fail: bool = False) -> None:
         try:
+            if name == "two":
+                second_attempting.set()
             with lock.hold(name):
                 order.append(f"{name}:in")
-                time.sleep(delay)
+                if name == "one":
+                    first_entered.set()
+                    assert release_first.wait(5), "test did not release the first lock holder"
                 order.append(f"{name}:out")
                 if fail:
                     raise RuntimeError("boom")
         except RuntimeError:
             pass
 
-    first = threading.Thread(target=hold, args=("one", 0.3, True))
+    first = threading.Thread(target=hold, args=("one", True))
     first.start()
-    time.sleep(0.1)
-    second = threading.Thread(target=hold, args=("two", 0.0))
+    assert first_entered.wait(5), "first thread never acquired the integration lock"
+    second = threading.Thread(target=hold, args=("two",))
     second.start()
-    first.join(); second.join()
+    assert second_attempting.wait(5), "second thread never attempted the integration lock"
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
     assert order == ["one:in", "one:out", "two:in", "two:out"]  # a crashed holder still releases the lock
 
 
 def test_integration_lock_excludes_other_processes(tmp_path: Path) -> None:
     path = tmp_path / "p.lock"
     code = (
-        "import sys, time; from pathlib import Path\n"
+        "import sys; from pathlib import Path\n"
         "from stagemesh.concurrency import IntegrationLock\n"
         "lock = IntegrationLock(Path(sys.argv[1]), timeout_seconds=30)\n"
         "with lock.hold('child'):\n"
-        "    print('held', flush=True); time.sleep(1.0)\n"
+        "    print('held', flush=True); sys.stdin.readline()\n"
     )
-    child = subprocess.Popen([sys.executable, "-c", code, str(path)], stdout=subprocess.PIPE, text=True, env={**__import__("os").environ, "PYTHONPATH": str(Path(__file__).parent.parent / "src")})
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(Path(__file__).parent.parent / "src")},
+    )
+    assert child.stdin is not None and child.stdout is not None
     assert child.stdout.readline().strip() == "held"
-    started = time.monotonic()
-    with IntegrationLock(path, timeout_seconds=30).hold("parent"):
-        waited = time.monotonic() - started
+    attempting = threading.Event()
+    acquired = threading.Event()
+
+    def acquire_parent() -> None:
+        attempting.set()
+        with IntegrationLock(path, timeout_seconds=30).hold("parent"):
+            acquired.set()
+
+    parent = threading.Thread(target=acquire_parent)
+    parent.start()
+    assert attempting.wait(5)
+    assert not acquired.wait(0.05), "parent acquired an integration lock still held by child"
+    child.stdin.write("release\n")
+    child.stdin.flush()
+    assert acquired.wait(5), "parent did not acquire the released integration lock"
+    parent.join(timeout=5)
     child.wait(timeout=10)
-    assert waited >= 0.5  # blocked until the other process let go
+    assert not parent.is_alive() and child.returncode == 0
 
 
 def test_unresolvable_main_advance_leaves_a_typed_state_and_keeps_other_tasks(tmp_path: Path) -> None:
@@ -579,21 +620,39 @@ def test_one_task_crashing_does_not_stop_the_others(tmp_path: Path) -> None:
 def test_provider_limiter_caps_concurrent_runs_and_waits_for_a_slot() -> None:
     limiter = ProviderLimiter(default_limit=1)
     inside = {"now": 0, "max": 0}
+    contenders_ready = {"count": 0}
     guard = threading.Lock()
+    first_inside = threading.Event()
+    all_contenders_ready = threading.Event()
+    release_first = threading.Event()
 
-    def use() -> None:
+    def use(index: int) -> None:
+        if index:
+            with guard:
+                contenders_ready["count"] += 1
+                if contenders_ready["count"] == 3:
+                    all_contenders_ready.set()
         with limiter.slot(["codex"]) as name:
             assert name == "codex"
             with guard:
                 inside["now"] += 1
                 inside["max"] = max(inside["max"], inside["now"])
-            time.sleep(0.1)
+            if index == 0:
+                first_inside.set()
+                assert release_first.wait(5), "test did not release the first provider slot"
             with guard:
                 inside["now"] -= 1
 
-    threads = [threading.Thread(target=use) for _ in range(4)]
-    [t.start() for t in threads]
-    [t.join() for t in threads]
+    threads = [threading.Thread(target=use, args=(index,)) for index in range(4)]
+    threads[0].start()
+    assert first_inside.wait(5), "first thread never acquired the provider slot"
+    for thread in threads[1:]:
+        thread.start()
+    assert all_contenders_ready.wait(5), "contending provider calls never became ready"
+    release_first.set()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not any(thread.is_alive() for thread in threads)
     assert inside["max"] == 1 and limiter.active("codex") == 0
 
 
@@ -617,6 +676,17 @@ def test_pooled_executor_never_overloads_a_provider_across_tasks(tmp_path: Path)
     rig = Rig(tmp_path, ["A", "B", "C"])
     active = {"now": 0, "max": 0}
     guard = threading.Lock()
+    first_execution_started = threading.Event()
+
+    class ObservedLimiter(ProviderLimiter):
+        def __init__(self) -> None:
+            super().__init__(default_limit=1)
+            self.contention = threading.Event()
+
+        def acquire(self, candidates: list[str], timeout: float | None = None) -> str | None:
+            if any(not self.has_room(name) for name in candidates):
+                self.contention.set()
+            return super().acquire(candidates, timeout)
 
     class CountingAdapter(RuntimeCommandAdapter):
         def check_capacity(self) -> str:
@@ -627,13 +697,15 @@ def test_pooled_executor_never_overloads_a_provider_across_tasks(tmp_path: Path)
                 active["now"] += 1
                 active["max"] = max(active["max"], active["now"])
             try:
-                time.sleep(0.2)
+                if not first_execution_started.is_set():
+                    first_execution_started.set()
+                    assert limiter.contention.wait(20), "parallel tasks never contended for the provider slot"
                 return ScriptedExecutor(rig.files).run(store, task_id, claim_id, project)
             finally:
                 with guard:
                     active["now"] -= 1
 
-    limiter = ProviderLimiter(default_limit=1)
+    limiter = ObservedLimiter()
     adapter = CountingAdapter("codex", (sys.executable,))
     integrator = SerializedIntegrator(rig.ref, False, rig.lock)
 
@@ -643,6 +715,7 @@ def test_pooled_executor_never_overloads_a_provider_across_tasks(tmp_path: Path)
 
     runner = ParallelRunner(rig.store, rig.project, make, concurrency=3, poll_seconds=0.05, limiter=limiter)
     summary = runner.run()
+    assert first_execution_started.is_set() and limiter.contention.is_set()
     assert set(rig.outcomes(summary).values()) == {"DONE"}, summary.to_dict()
     assert active["max"] == 1  # three tasks in flight, one provider run at a time
     assert summary.providers["limits"]["codex"]["limit"] == 1
@@ -712,9 +785,7 @@ def test_interrupt_releases_claims_keeps_worktrees_and_a_restart_finishes(tmp_pa
                 self.barrier.wait(timeout=20)
             if task_id == "A":
                 _thread.interrupt_main()  # Ctrl+C while both providers are mid-run
-            deadline = time.monotonic() + 20
-            while not holder["runner"].stop.is_set() and time.monotonic() < deadline:
-                time.sleep(0.02)
+            holder["runner"].stop.wait(timeout=20)
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason="killed")
 
@@ -828,18 +899,29 @@ def test_review_providers_honour_shared_cooldown_and_cool_down_on_failure(tmp_pa
     assert calls == ["codex", "grok", "grok", "claude", "grok"] and limiter.active("codex") == 0
 
 
-def test_interrupt_kills_review_style_provider_processes_without_a_recorded_pid() -> None:
+def test_interrupt_kills_review_style_provider_processes_without_a_recorded_pid(
+    monkeypatch,
+) -> None:
+    from stagemesh import execution as execution_module
     from stagemesh.execution import (
         communicate_bounded,
         kill_active_provider_processes,
         popen_session_kwargs,
     )
 
+    provider_registered = threading.Event()
+    communicate = execution_module._communicate_bounded
+
+    def signal_registration(*args, **kwargs):
+        provider_registered.set()
+        return communicate(*args, **kwargs)
+
+    monkeypatch.setattr(execution_module, "_communicate_bounded", signal_registration)
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **popen_session_kwargs())
     result: list[tuple] = []
     worker = threading.Thread(target=lambda: result.append(communicate_bounded(proc, "prompt", 120)))
     worker.start()
-    time.sleep(0.5)
+    assert provider_registered.wait(5), "provider process was not registered for interruption"
     started = time.monotonic()
     assert kill_active_provider_processes() == 1
     worker.join(timeout=15)

@@ -44,9 +44,11 @@ For StageMesh development, bootstrap the project-owned provider pool and run the
 ```bash
 python scripts/bootstrap_stagemesh.py --providers codex,claude,grok,agy
 python scripts/stabilization_gate.py
+# Final, authoritative local gate (writes bounded machine-readable evidence):
+python scripts/run_regression.py --report .stagemesh/regression-report.json
 ```
 
-The stabilization gate drives the real coordinator against a fake provider CLI. It tests bounded recovery without calling real providers. Full acceptance, invariants, and hosted CI remain separate merge-readiness gates.
+The stabilization gate drives the real coordinator against a fake provider CLI. It tests bounded recovery without calling real providers. The complete runner proves its audited lane union equals canonical pytest collection, isolates workers, propagates failures, and records exact counts and timings. See [test architecture and regression evidence](docs/test-architecture-redesign.md). Hosted Windows and Linux remain separate merge-readiness gates.
 
 Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default. Do not edit it by hand.
 
