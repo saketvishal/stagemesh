@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_run_ready import _project
 
 import stagemesh.cli as cli_module
 from stagemesh.auto_plan import create_contract, profile_payload, validate_generated
@@ -14,8 +15,6 @@ from stagemesh.contracts import _matches, parse_contract
 from stagemesh.persistence import Store
 from stagemesh.profile import expand_gate, parse_profile, resolve_type
 from stagemesh.task_selection import select_next_task
-
-from test_run_ready import _project
 
 PROFILE_PATH = Path(__file__).resolve().parents[1] / "docs" / "profiles" / "caventra.profile.json"
 
@@ -192,3 +191,22 @@ def test_gates_use_only_caventra_native_commands(raw: dict, profile) -> None:
     for variable in raw["variables"].values():
         text = json.dumps(variable)
         assert "/c/" not in text and "stagemesh-vnext" not in text.lower()
+
+
+def test_frontend_profile_protects_e2e_policy_without_claiming_visual_qualification(raw: dict) -> None:
+    frontend = raw["task_types"]["frontend"]
+    gate_names = {raw["gates"][gate_id]["name"] for gate_id in frontend["gates"]}
+
+    assert gate_names == {
+        "docs-static-hygiene",
+        "docs-static-diff-check",
+        "frontend-install",
+        "frontend-vitest",
+        "frontend-ui-lint",
+        "frontend-typecheck",
+    }
+    assert {
+        "apps/web-v2/playwright.config.ts",
+        "apps/web-v2/e2e/**",
+    } <= set(frontend["protected_files"])
+    assert not any("browser" in name or "visual" in name or "playwright" in name for name in gate_names)

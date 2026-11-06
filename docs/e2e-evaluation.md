@@ -94,3 +94,7 @@ The focused regressions cover real candidate checkouts, artifact and failure
 handling, and simulated npm evaluation outcomes. They do not claim a live browser
 or remote-service acceptance run. Parent objective #327 and the hands-off
 development acceptance gate require separate evidence.
+
+The Caventra design-to-code qualification, including the exact supported/missing
+boundary and a synthetic visual-fidelity experiment specification, is documented
+in [UI fidelity orchestration qualification](ui-fidelity-qualification.md).
