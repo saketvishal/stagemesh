@@ -52,6 +52,8 @@ The next clean 16-worker run of `4d0ba67` proved that the problem was broader th
 
 The first resource-group run then exposed a catalog error rather than a scheduler failure: `test_regression_architecture_acceptance.py` was labelled deterministic even though it exercises real process groups, timeouts, repository locks, collection subprocesses, and cleanup. It is now native serial, and its nested real-runner test explicitly inherits the installed pytest import root while retaining the worker's isolated environment.
 
+The exact native-tier run on `57cf720` accounted for all 219 tests but exposed the same import-boundary issue in four crash-fence children: those tests intentionally replace `PYTHONPATH`, while worker-isolated `APPDATA` also moved Python's user package base. Workers now pin `PYTHONUSERBASE` to the active interpreter's installed user base, independent of isolated HOME and AppData; a dedicated acceptance test replaces `PYTHONPATH` and proves a nested child can still import the runner dependency.
+
 The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
 
 - canonical collection equals the duplicate-free audited union;

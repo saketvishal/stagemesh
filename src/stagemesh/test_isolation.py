@@ -15,6 +15,7 @@ import hashlib
 import os
 import platform
 import shutil
+import site
 import stat
 import subprocess
 import sys
@@ -198,6 +199,10 @@ class WorkerIsolationContext:
         # Keep the invoking interpreter's installed packages reachable after HOME and
         # USERPROFILE move to the worker root (local Windows installs often use user-site).
         env["PYTHONPATH"] = os.pathsep.join(path for path in sys.path if path)
+        # Nested test subprocesses may intentionally replace PYTHONPATH. Pin the
+        # active interpreter's user package base independently of APPDATA so they
+        # retain the same installed runtime without seeing caller-selected paths.
+        env["PYTHONUSERBASE"] = str(site.getuserbase())
         env["GIT_CONFIG_GLOBAL"] = str(self.git_config_path)
         env["GIT_CONFIG_SYSTEM"] = str(self.git_config_path)
         env["GIT_CONFIG_NOSYSTEM"] = "1"

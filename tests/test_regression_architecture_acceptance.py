@@ -20,6 +20,7 @@ import json
 import os
 import platform
 import signal
+import site
 import subprocess
 import sys
 import threading
@@ -235,6 +236,19 @@ def test_worker_filesystem_and_env_isolation(tmp_path: Path) -> None:
         assert ctx0.env["STAGEMESH_TEST_DATABASE_ROOT"] == str(ctx0.database_dir)
         assert ctx0.env["STAGEMESH_TEST_GIT_ROOT"] == str(ctx0.git_root)
         assert ctx0.env["STAGEMESH_TEST_WORKTREE_ROOT"] == str(ctx0.worktree_root)
+        assert ctx0.env["PYTHONUSERBASE"] == str(site.getuserbase())
+
+        nested_env = dict(ctx0.env)
+        nested_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        nested = subprocess.run(
+            [sys.executable, "-c", "import pytest"],
+            env=nested_env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert nested.returncode == 0, nested.stderr
     finally:
         pool.cleanup()
 
