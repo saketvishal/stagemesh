@@ -89,12 +89,23 @@ def test_documents_bounded_objective_projection_and_privacy_boundary():
         assert phrase in DOC, phrase
 
 
+def test_documents_local_only_doctor_and_provider_observation_boundaries():
+    for phrase in (
+        "`GET /api/v1/doctor`", "`stagemesh.project-doctor/1`", "`CONFIG_UNAVAILABLE`",
+        "never migrates the store", "invokes a provider", "contacts GitHub",
+        "configuration and authorization do not claim command availability",
+        "config or workspace paths", "`network_checked=false`", "`mutation_performed=false`",
+        "100 provider rows", "`provider_total`", "`providers_truncated`",
+    ):
+        assert phrase in DOC, phrase
+
+
 def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
     workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     windows, _, linux = workflow.partition("\n  linux:")
     for module in (
         "test_operator_ui_contract.py", "test_operator_api.py", "test_task_detail_api.py",
-        "test_execution_detail_api.py",
+        "test_execution_detail_api.py", "test_operator_doctor_api.py",
         "test_activity.py", "test_api_server.py",
     ):
         assert module in windows, f"windows job omits {module}"

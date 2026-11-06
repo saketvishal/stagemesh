@@ -21,6 +21,7 @@
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
   <button type="button" id="show-status" aria-pressed="false">Status</button>
   <button type="button" id="show-objectives" aria-pressed="false">Objectives</button>
+  <button type="button" id="show-doctor" aria-pressed="false">Doctor</button>
   <button type="button" id="show-control" aria-pressed="false" hidden>Control</button>
   <button type="button" id="show-task" aria-pressed="false" hidden>Task detail</button>
   <button type="button" id="show-execution" aria-pressed="false" hidden>Execution detail</button>
@@ -183,6 +184,28 @@
       <thead><tr><th scope="col">Task</th><th scope="col">Title</th><th scope="col">Stage</th><th scope="col">Status</th><th scope="col">Recorded</th><th scope="col">Dependencies</th></tr></thead>
       <tbody id="objective-children"></tbody>
     </table>
+  </section>
+</main>
+<main id="doctor-view" hidden>
+  <h2>Project configuration and readiness</h2>
+  <p id="doctor-summary" class="muted" role="status" aria-live="polite">Doctor data has not been loaded.</p>
+  <p><button type="button" id="doctor-refresh">Refresh doctor</button></p>
+  <section aria-labelledby="doctor-attention-heading">
+    <h3 id="doctor-attention-heading">Attention</h3>
+    <table><thead><tr><th scope="col">Severity</th><th scope="col">Code</th><th scope="col">Guidance</th></tr></thead><tbody id="doctor-attention"></tbody></table>
+  </section>
+  <section aria-labelledby="doctor-system-heading">
+    <h3 id="doctor-system-heading">Safe local posture</h3>
+    <dl id="doctor-system" class="metrics"></dl>
+  </section>
+  <section aria-labelledby="doctor-providers-heading">
+    <h3 id="doctor-providers-heading">Configured provider posture</h3>
+    <p id="doctor-provider-note" class="muted">Configured and authorized do not mean available or invoked. This view makes no provider or network calls.</p>
+    <table><thead><tr><th scope="col">Provider</th><th scope="col">Capabilities</th><th scope="col">Command source</th><th scope="col">Unattended authorization</th></tr></thead><tbody id="doctor-providers"></tbody></table>
+  </section>
+  <section aria-labelledby="doctor-policy-heading">
+    <h3 id="doctor-policy-heading">Safety and execution policy</h3>
+    <dl id="doctor-policies" class="metrics"></dl>
   </section>
 </main>
 <main id="control-view" hidden>

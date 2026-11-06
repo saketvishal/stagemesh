@@ -3297,6 +3297,7 @@ def _operator_control(project: Path, enabled: bool):
 
 def command_serve(args: argparse.Namespace) -> int:
     from .api_server import make_server
+    from .operator_doctor import ProjectDoctor
 
     project = Path(args.project).resolve()
     ui_dir = Path(__file__).parent / "ui"
@@ -3306,6 +3307,7 @@ def command_serve(args: argparse.Namespace) -> int:
         port=args.port,
         static_dir=ui_dir if ui_dir.is_dir() else None,
         control=control,
+        doctor=ProjectDoctor(project),
     )
     port = server.server_address[1]
     # The token rides in the URL fragment: browsers never send it to the server or write it to logs.
@@ -3327,6 +3329,7 @@ def command_serve(args: argparse.Namespace) -> int:
 
 def command_ui(args: argparse.Namespace) -> int:
     from .api_server import make_server
+    from .operator_doctor import ProjectDoctor
     from .operator_projects import ProjectProjection, ProjectTarget
     from .ui_launcher import UiLaunchError, launch_ui
 
@@ -3361,6 +3364,7 @@ def command_ui(args: argparse.Namespace) -> int:
                     port=args.port if index == 0 else 0,
                     static_dir=ui_dir if ui_dir.is_dir() else None,
                     control=control,
+                    doctor=ProjectDoctor(item.path),
                 )
                 servers.append((server, api, item.path))
         except Exception:
@@ -3387,6 +3391,7 @@ def command_ui(args: argparse.Namespace) -> int:
             port=args.port,
             static_dir=ui_dir if ui_dir.is_dir() else None,
             control=control,
+            doctor=ProjectDoctor(project),
         )
         servers.append((server, api, project))
     server, api, _current_path = servers[current_index]

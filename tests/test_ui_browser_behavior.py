@@ -25,6 +25,7 @@ import pytest
 from stagemesh.api_server import UI_ASSETS, ActivityApi, make_server
 from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
+from stagemesh.operator_doctor import ProjectDoctor
 from stagemesh.persistence import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -319,6 +320,21 @@ DRIVER = r"""
         document.activeElement.dataset.objectiveKey === objective.dataset.objectiveKey;
     },
 
+    async doctor() {
+      $("show-doctor").click();
+      await until(() => $("doctor-summary").textContent.includes("Verdict"), "doctor snapshot");
+      out.viewVisible = !$("doctor-view").hidden && $("activity-view").hidden;
+      out.summary = $("doctor-summary").textContent;
+      out.attention = document.querySelectorAll("#doctor-attention tr").length;
+      out.providers = document.querySelectorAll("#doctor-providers tr").length;
+      out.system = $("doctor-system").textContent;
+      out.policies = $("doctor-policies").textContent;
+      out.providerText = $("doctor-providers").textContent;
+      $("doctor-refresh").click();
+      await until(() => $("doctor-summary").textContent.includes("Verdict"), "doctor refresh");
+      out.refreshed = $("doctor-summary").textContent.includes("Local-only");
+    },
+
     // Load more is accepted but its second-page response is still in flight when a refresh happens.
     async pending() {
       await until(() => rows() === 100, "first page");
@@ -498,7 +514,13 @@ def fixture_base(tmp_path: Path):
     assert marker in index
     # The driver must run before app.js so its fetch wrapper is in place; the production page is otherwise unchanged.
     (site / "index.html").write_text(index.replace(marker, '<script src="/driver.js"></script>\n' + marker), encoding="utf-8")
-    httpd, _ = make_server(db, token=TOKEN, static_dir=site, api_class=FixtureApi)
+    httpd, _ = make_server(
+        db,
+        token=TOKEN,
+        static_dir=site,
+        api_class=FixtureApi,
+        doctor=ProjectDoctor(tmp_path),
+    )
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
@@ -534,7 +556,13 @@ def period_base(tmp_path: Path):
     index = (UI / "index.html").read_text(encoding="utf-8")
     marker = '<script src="/app.js"></script>'
     (site / "index.html").write_text(index.replace(marker, '<script src="/driver.js"></script>\n' + marker), encoding="utf-8")
-    httpd, _ = make_server(db, token=TOKEN, static_dir=site, api_class=FixtureApi)
+    httpd, _ = make_server(
+        db,
+        token=TOKEN,
+        static_dir=site,
+        api_class=FixtureApi,
+        doctor=ProjectDoctor(tmp_path),
+    )
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
@@ -602,7 +630,13 @@ def status_base(tmp_path: Path):
     (site / "index.html").write_text(
         index.replace(marker, '<script src="/driver.js"></script>\n' + marker), encoding="utf-8"
     )
-    httpd, _ = make_server(db, token=TOKEN, static_dir=site, api_class=FixtureApi)
+    httpd, _ = make_server(
+        db,
+        token=TOKEN,
+        static_dir=site,
+        api_class=FixtureApi,
+        doctor=ProjectDoctor(tmp_path),
+    )
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
@@ -709,6 +743,15 @@ def test_objective_view_filters_drills_into_children_and_restores_focus(status_b
     assert result["taskVisible"] is True
     assert result["childRefreshFocus"] is True
     assert result["childFocusRestored"] is True and result["objectiveFocusRestored"] is True
+
+
+def test_doctor_view_renders_local_configuration_and_provider_boundaries(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "doctor", tmp_path)
+    assert result["viewVisible"] is True and "Local-only" in result["summary"]
+    assert result["attention"] >= 1 and result["providers"] == 4
+    assert "Network checkedno" in result["system"] and "Mutation performedno" in result["system"]
+    assert "Unattended allowlist configuredno" in result["policies"]
+    assert "not authorized" in result["providerText"] and result["refreshed"] is True
 
 
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):
