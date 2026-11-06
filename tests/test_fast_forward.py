@@ -352,7 +352,8 @@ def test_supervised_ff_accepts_publisher_retry_branch(tmp_path, monkeypatch):
     git(repo, "push", "origin", f"{sha}:refs/heads/{retry_branch}")
     monkeypatch.setattr(adapter, "get", lambda number: replace(pr, head_ref=retry_branch))
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(record, time.time() + 20)
+    clock = lambda: 100.0
+    result = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)(record, clock() + 20)
     assert result["merged"], result
     assert git(remote, "rev-parse", "main") == sha == git(repo, "rev-parse", "main")
     assert git(remote, "rev-parse", retry_branch) == sha
@@ -446,15 +447,16 @@ def test_crash_after_push_is_journaled_and_resumable_after_pr_disappears(tmp_pat
             raise TimeoutError("lost acknowledgment after push")
         return result
     monkeypatch.setattr(adapter, "bounded_git", crash)
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    clock = lambda: 100.0
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    result = merger(record, time.time() + 20)
+    result = merger(record, clock() + 20)
     assert not result["merged"] and result["remote_landed"] is True and result["local_synced"] is False
     assert git(repo, "rev-parse", "main") == base
     assert [r.integrated_candidate for r in merger.pending_records()] == [sha]
     monkeypatch.setattr(adapter, "bounded_git", original)
     monkeypatch.setattr(adapter, "get", lambda number: replace(pr, state=PRState.MERGED, merge_commit_sha=sha))
-    resumed = merger(merger.pending_records()[0], time.time() + 20)
+    resumed = merger(merger.pending_records()[0], clock() + 20)
     assert resumed["merged"], resumed
     assert git(repo, "rev-parse", "main") == sha
     assert merger.pending_records() == []
@@ -493,11 +495,12 @@ def test_required_legacy_status_and_app_checks_are_not_replaced_by_named_green_c
 def test_recorded_landing_survives_subsequent_observation_failure(tmp_path, monkeypatch):
     repo, _remote, _base, sha, store, _ci, adapter, _pr = rig(tmp_path, monkeypatch)
     monkeypatch.setattr(adapter, "sync_local", lambda sha: "local sync deliberately blocked")
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    clock = lambda: 100.0
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    first = merger(record, time.time() + 20)
+    first = merger(record, clock() + 20)
     assert first["historical_remote_landed"] and first["remote_landed"]
     monkeypatch.setattr(adapter, "get", lambda number: (_ for _ in ()).throw(OSError("GitHub unavailable")))
-    second = merger(record, time.time() + 20)
+    second = merger(record, clock() + 20)
     assert second["historical_remote_landed"] and second["remote_landed"] is True
     assert not second["merged"] and second["local_synced"] is False

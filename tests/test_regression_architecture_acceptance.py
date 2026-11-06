@@ -199,7 +199,7 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     assert TIER_ISOLATION_CONTRACTS[TestTier.SERIAL_TIMING].max_parallel_workers == 1
     assert MAX_LOCAL_WORKERS == 8
     assert BATCHES_PER_WORKER_AND_TIER == 4
-    assert INTEGRATION_BATCHES_PER_WORKER == 6
+    assert INTEGRATION_BATCHES_PER_WORKER == 8
     assert (
         TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].concurrency_group
         == TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].concurrency_group
@@ -721,8 +721,8 @@ def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> N
         orchestrator._pool_isolation.cleanup()
 
     assert first == second
-    assert len(first) == 6
-    assert max(len(lane.files) for lane in first) - min(len(lane.files) for lane in first) <= 2
+    assert len(first) == INTEGRATION_BATCHES_PER_WORKER
+    assert sorted(len(lane.files) for lane in first) == [9, 9, 9, 9, 9, 10, 11, 12]
     assert {nodeid for lane in first for nodeid in lane.files} == set(nodeids)
     lane_by_nodeid = {
         nodeid: lane.lane_id for lane in first for nodeid in lane.files

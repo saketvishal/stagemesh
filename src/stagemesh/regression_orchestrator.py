@@ -42,7 +42,7 @@ REPORT_SLOWEST_TEST_LIMIT = 50
 MAX_LOCAL_WORKERS = 8
 TARGET_BATCH_SECONDS = 600.0
 BATCHES_PER_WORKER_AND_TIER = 4
-INTEGRATION_BATCHES_PER_WORKER = 6
+INTEGRATION_BATCHES_PER_WORKER = 8
 
 
 def _bounded_failure_output(value: str, limit: int = 20_000) -> str:
@@ -503,7 +503,7 @@ class RegressionOrchestrator:
         current catalog into hundreds of short-lived Python processes and made
         Windows process startup part of nearly every test.  This planner keeps
         every file intact, uses the live canonical collection as its weight,
-        and creates at most two parallel lanes per worker and tier. Files whose
+        and creates a bounded number of parallel lanes per worker and tier. Files whose
         measured Windows runtime exceeds the batch target are split into a few
         stable node-ID ranges; the former blanket twelve-test sharding is not
         used. Native platform tests retain one explicit serial lane.
