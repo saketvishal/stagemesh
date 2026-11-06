@@ -89,11 +89,11 @@ def _is_synthetic(name: str | None = None, email: str | None = None) -> bool:
     return email is not None and email.strip().lower().startswith("stagemesh@") and email.strip().lower().endswith(".invalid")
 
 
-def _git_config_values(path: Path | None, key: str) -> list[str]:
-    """Every value of `key` across system/global/local config, lowest precedence first (git itself uses the last)."""
+def _git_identity_config(path: Path | None) -> dict[str, list[str]]:
+    """All configured identity values, collected in one Git process."""
     try:
         result = subprocess.run(
-            ["git", "config", "--get-all", key],
+            ["git", "config", "--null", "--get-regexp", r"^user\.(name|email)$"],
             cwd=path if path is not None and Path(path).is_dir() else None,
             text=True,
             capture_output=True,
@@ -102,21 +102,31 @@ def _git_config_values(path: Path | None, key: str) -> list[str]:
     except OSError:
         return []
     if result.returncode != 0:
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return {}
+    values: dict[str, list[str]] = {"user.name": [], "user.email": []}
+    for record in result.stdout.split("\0"):
+        if not record or "\n" not in record:
+            continue
+        key, value = record.split("\n", 1)
+        if key in values and value.strip():
+            values[key].append(value.strip())
+    return values
 
 
 def _resolve_identity(path: Path | None, environ: dict[str, str] | None) -> tuple[GitIdentity | None, str | None]:
     """(approved identity or None, legacy synthetic value that was ignored, if any). Raises GitIdentityError for a bad identity."""
     env = os.environ if environ is None else environ
     ignored: str | None = None
+    configured = _git_identity_config(path)
 
     def pick(env_key: str, config_key: str, is_synth) -> tuple[str | None, str | None]:
         nonlocal ignored
         # git's own committer resolution (GIT_COMMITTER_* then config, last level wins), skipping StageMesh's placeholder identity so a
         # legacy `StageMesh <stagemesh@example.invalid>` in the local config cannot hide the owner's identity configured elsewhere.
         # GIT_AUTHOR_* describes only the author and is not a fallback.
-        candidates = [(env.get(env_key), "environment")] + [(v, "git config") for v in reversed(_git_config_values(path, config_key))]
+        candidates = [(env.get(env_key), "environment")] + [
+            (v, "git config") for v in reversed(configured.get(config_key, ()))
+        ]
         for value, origin in candidates:
             if not value:
                 continue

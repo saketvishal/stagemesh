@@ -13,7 +13,7 @@ def _store(root: Path) -> Store:
     runtime = root / ".stagemesh"
     store = Store(runtime / "stagemesh.sqlite3")
     store.migrate()
-    task_id = store.upsert_task("live proof", source_id="T-1")
+    store.upsert_task("live proof", source_id="T-1")
     return store
 
 
@@ -56,6 +56,7 @@ def test_provider_execution_status_ignores_non_provider_stage(tmp_path: Path) ->
 def test_live_acceptance_reports_github_transport_failure_as_unknown(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    monkeypatch.setenv("STAGEMESH_GITHUB_TOKEN", "synthetic-test-token")
     runtime = tmp_path / ".stagemesh"
     runtime.mkdir()
     (runtime / "config.json").write_text(

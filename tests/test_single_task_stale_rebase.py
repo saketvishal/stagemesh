@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -52,8 +53,15 @@ def _executions(rig: Rig, kind: ExecutionKind) -> int:
     return rig.store.conn.execute("SELECT COUNT(*) FROM executions WHERE task_id=? AND kind=?", (TASK, kind)).fetchone()[0]
 
 
-def test_continue_wires_the_serialized_integrator_for_a_single_task(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, [TASK])
+def test_continue_wires_the_serialized_integrator_for_a_single_task(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
+    rig = Rig(
+        tmp_path,
+        [TASK],
+        config={"routing": {"require_independent_review": False}},
+    )
     loaded = load_config(rig.project)
     coord, info = cli_module._build_coordinator(Namespace(dry_run=False), rig.project, loaded, rig.store, None, lambda *a, **k: None)
     assert isinstance(coord.integrator, SerializedIntegrator)

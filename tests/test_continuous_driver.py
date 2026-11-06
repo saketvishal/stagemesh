@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -445,7 +446,11 @@ def test_confirmed_tree_kill_waits_for_delayed_child_reaping(project: Path, monk
         return child if observations < 3 else None
 
     monkeypatch.setattr(continuous_driver, "process_identity", observed)
-    monkeypatch.setattr(continuous_driver.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        continuous_driver,
+        "time",
+        SimpleNamespace(monotonic=continuous_driver.time.monotonic, sleep=lambda _seconds: None),
+    )
 
     assert continuous_driver._wait_to_clear_dead_child_owner(project, timeout_seconds=1)
     assert observations == 3

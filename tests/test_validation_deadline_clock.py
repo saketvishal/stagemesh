@@ -18,7 +18,7 @@ def isolated_boundary(tmp_path, monkeypatch):
 
 def test_window_deadline_uses_the_clock_that_issued_it(monkeypatch):
     now = [0.0]
-    monkeypatch.setattr(slot.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(slot, "time", SimpleNamespace(time=lambda: 1000.0))
     slot.set_window_deadline(10.0, clock=lambda: now[0])
     assert not slot._deadline_exceeded()
     now[0] = 11.0
@@ -29,7 +29,7 @@ def test_window_deadline_uses_the_clock_that_issued_it(monkeypatch):
 
 def test_subprocess_receives_remaining_allowance_in_its_wall_clock(tmp_path, monkeypatch):
     now = [5.0]
-    monkeypatch.setattr(slot.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(slot, "time", SimpleNamespace(time=lambda: 1000.0))
     slot.set_window_deadline(10.0, clock=lambda: now[0])
     seen = []
 
@@ -48,7 +48,7 @@ def test_subprocess_receives_remaining_allowance_in_its_wall_clock(tmp_path, mon
 
 def test_environment_deadline_remains_an_absolute_wall_clock(monkeypatch):
     now = [1000.0]
-    monkeypatch.setattr(slot.time, "time", lambda: now[0])
+    monkeypatch.setattr(slot, "time", SimpleNamespace(time=lambda: now[0]))
     monkeypatch.setenv("STAGEMESH_WINDOW_DEADLINE", "1005")
     assert not slot._deadline_exceeded()
     now[0] = 1006.0

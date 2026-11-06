@@ -10,6 +10,7 @@ import pytest
 from test_provider_pool import IMPLEMENT, REVIEW, TASK, Rig
 
 import stagemesh.cli as cli_module
+import stagemesh.providers as providers_module
 from stagemesh import readiness
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.persistence import Store
@@ -276,6 +277,12 @@ def test_shared_recovery_setup_command_does_not_collapse_provider_independence(t
 def test_capacity_config_and_doctor_show_which_command_runs_for_each_stage(
     project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    real_which = providers_module.shutil.which
+    monkeypatch.setattr(
+        providers_module.shutil,
+        "which",
+        lambda command: "claude" if command == "claude" else real_which(command),
+    )
     providers = {"claude": {"command": "claude -p --permission-mode acceptEdits", "review_command": "claude -p --allowedTools Read Grep"}}
     write_config(project, {"providers": providers})
     Store(project / ".stagemesh" / "stagemesh.sqlite3").migrate()

@@ -144,11 +144,39 @@ def _run(path: Path, *args: str, check: bool = True) -> Any:
 
 def observe(path: Path) -> dict[str, Any]:
     """HEAD plus a fingerprint of every uncommitted path (modified, staged, deleted and untracked) in a worktree."""
-    head = _run(path, "rev-parse", "HEAD").stdout.strip()
-    status = _run(path, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames").stdout
-    entries = [entry for entry in status.split("\0") if len(entry) > 3]
-    dirty = {entry[3:]: _content_hash(path / entry[3:]) for entry in entries}
-    tracked_dirty = sorted(entry[3:] for entry in entries if not entry.startswith("??"))  # modified, staged or deleted tracked paths
+    status = _run(
+        path,
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=all",
+        "--no-renames",
+    ).stdout
+    head: str | None = None
+    entries: list[tuple[str, bool]] = []
+    for entry in status.split("\0"):
+        if entry.startswith("# branch.oid "):
+            head = entry.removeprefix("# branch.oid ")
+        elif entry.startswith("? "):
+            entries.append((entry[2:], False))
+        elif entry.startswith("1 "):
+            fields = entry.split(" ", 8)
+            if len(fields) == 9:
+                entries.append((fields[8], True))
+        elif entry.startswith("2 "):
+            fields = entry.split(" ", 9)
+            if len(fields) == 10:
+                entries.append((fields[9], True))
+        elif entry.startswith("u "):
+            fields = entry.split(" ", 10)
+            if len(fields) == 11:
+                entries.append((fields[10], True))
+    if not head or head == "(initial)":
+        raise GitError("git status did not report a committed branch.oid")
+    dirty = {name: _content_hash(path / name) for name, _tracked in entries}
+    tracked_dirty = sorted(name for name, tracked in entries if tracked)
     digest = hashlib.sha256(json.dumps(sorted(dirty.items())).encode("utf-8")).hexdigest()
     return {
         "head": head,
@@ -176,6 +204,19 @@ def _difference(ledger: dict[str, Any], seen: dict[str, Any]) -> tuple[str, list
 
 
 def _gitdir(path: Path) -> Path:
+    dotgit = Path(path).resolve() / ".git"
+    if dotgit.is_dir():
+        return dotgit.resolve()
+    if dotgit.is_file():
+        try:
+            prefix, raw_target = dotgit.read_text(encoding="utf-8").strip().split(":", 1)
+            target = Path(raw_target.strip())
+            if prefix == "gitdir":
+                resolved = (target if target.is_absolute() else dotgit.parent / target).resolve()
+                if resolved.is_dir():
+                    return resolved
+        except (OSError, UnicodeError, ValueError):
+            pass
     return Path(_run(path, "rev-parse", "--absolute-git-dir").stdout.strip())
 
 

@@ -150,10 +150,10 @@ def coordinator(project: Path, store: Store, executor, **kwargs) -> Coordinator:
     return Coordinator(store, project, executor=executor, target=TargetSelection(TASK), **kwargs)
 
 
-def advance_to(stage: Stage, tmp_path: Path, **kwargs):
+def advance_to(stage: Stage, tmp_path: Path, *, agent_script: str = WRITE_DOC, **kwargs):
     """Drive the real coordinator with a real subprocess agent until the task sits at `stage` with an authorized candidate."""
     project, store = _setup(tmp_path)
-    coord = coordinator(project, store, provider(tmp_path, WRITE_DOC), **kwargs)
+    coord = coordinator(project, store, provider(tmp_path, agent_script), **kwargs)
     for _ in range(10):
         if Stage(store.get_task(TASK)["stage"]) is stage:
             break
@@ -677,7 +677,13 @@ def test_review_checks_out_the_exact_candidate_in_its_own_workspace(tmp_path: Pa
 
 
 def test_review_workspace_disables_autocrlf_before_checkout(tmp_path: Path) -> None:
-    project, _store, _coord, sha = advance_to(Stage.REVIEW, tmp_path)
+    # The contract under test starts with an LF blob. Use bytes so the fixture
+    # does not depend on Python's platform text-mode newline translation.
+    project, _store, _coord, sha = advance_to(
+        Stage.REVIEW,
+        tmp_path,
+        agent_script="import pathlib\npathlib.Path('docs/a.md').write_bytes(b'agent change\\n')\n",
+    )
     seen = tmp_path / "review-eol.json"
     script = tmp_path / "reviewer-eol.py"
     script.write_text(
@@ -1353,6 +1359,7 @@ def test_acquisition_failure_never_deletes_foreign_owner_record(tmp_path: Path) 
 # --- Blocker 2: Windows release contention and typed release failure --------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows delete-sharing semantics")
 def test_release_permanent_sharing_contention_fails_closed_with_typed_error(tmp_path: Path) -> None:
     project, store = _setup(tmp_path)
     handle = None
@@ -1453,6 +1460,7 @@ def test_release_removes_corrupt_owner_file_rather_than_silently_leaving_it(tmp_
     assert not owner_file.exists(), "release must clean up corrupt owner file rather than silently reporting success"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows delete-sharing semantics")
 def test_safe_cleanup_created_owner_raises_when_unlink_permanently_fails(tmp_path: Path) -> None:
     project, _store = _setup(tmp_path)
     prepare_task_workspace(project, TASK)

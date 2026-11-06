@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,7 +37,7 @@ class Clock:
 
 def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: float = 1000.0) -> tuple[Store, Clock]:
     clock = Clock(start)
-    monkeypatch.setattr(persistence_module.time, "time", clock)
+    monkeypatch.setattr(persistence_module, "time", SimpleNamespace(time=clock))
     store = Store(tmp_path / "s.sqlite3")
     store.migrate()
     store.upsert_task("timing", source_id=TASK)
@@ -164,7 +165,7 @@ def test_task_timing_json_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     store.migrate()
     store.upsert_task("timing", source_id=TASK)
     clock = Clock(1791240130.25)
-    monkeypatch.setattr(persistence_module.time, "time", clock)
+    monkeypatch.setattr(persistence_module, "time", SimpleNamespace(time=clock))
     _run(store, clock, ExecutionKind.REVIEW, 138.15, ExecutionStatus.SUCCEEDED, actor="claude", sha="d" * 40)
     store.close()
 

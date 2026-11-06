@@ -350,6 +350,8 @@ class ParallelRunner:
         poll_seconds: float = 0.2,
         wait_for_providers: bool = False,
         sweep_worktrees: bool = True,
+        clock: Callable[[], float] = time.time,
+        provider_waiter: Callable[[float], bool] | None = None,
     ):
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
@@ -367,9 +369,11 @@ class ParallelRunner:
         self.poll_seconds = poll_seconds
         self.wait_for_providers = wait_for_providers
         self.sweep_worktrees = sweep_worktrees
+        self.clock = clock
         self._provider_waits: dict[str, float] = {}
         self._exhaustion_said: set[str] = set()
         self.stop = threading.Event()
+        self.provider_waiter = provider_waiter or self.stop.wait
         self._admission_paused = threading.Event()
         self._admission_stopped = threading.Event()
         self._terminate_requested = threading.Event()
@@ -585,7 +589,11 @@ class ParallelRunner:
                 if self._provider_waits:
                     deadline = min(self._provider_waits.values())
                     self._refresh_control_state()
-                    self.stop.wait(min(30.0, max(0.05, self.poll_seconds), max(0.05, deadline - time.time())))
+                    if self.stop.is_set() or self._admission_paused.is_set() or self._admission_stopped.is_set():
+                        continue
+                    self.provider_waiter(
+                        min(30.0, max(0.05, self.poll_seconds), max(0.05, deadline - self.clock()))
+                    )
                     continue
                 if self._deferred_this_round:
                     continue  # a task was held back for a blocker that has since finished: select again instead of dropping it
@@ -619,7 +627,7 @@ class ParallelRunner:
                 with self._lock:
                     self._provider_waits.pop(task_id, None)
                 continue
-            if time.time() < deadline:
+            if self.clock() < deadline:
                 continue
             with self._lock:
                 self._provider_waits.pop(task_id, None)

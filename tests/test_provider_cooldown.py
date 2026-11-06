@@ -6,11 +6,13 @@ import io
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_provider_pool import TASK, Rig
 
 import stagemesh.cli as cli_module
+import stagemesh.provider_pool as provider_pool_module
 from stagemesh.domain import Stage, TaskStatus
 from stagemesh.execution import classify_failure
 from stagemesh.provider_cooldown import (
@@ -154,7 +156,11 @@ def test_cooldown_can_be_cleared_after_login_and_expires_on_its_own(tmp_path: Pa
     rig.pool.record_failure(rig.store, IMPLEMENT, TASK, "provider-a", "authentication_failure")  # fails again after the clear
     assert [item["provider"] for item in active_cooldowns(rig.store, COOLDOWN)] == ["provider-a"]
     assert active_cooldowns(rig.store, COOLDOWN, now=time.time() + COOLDOWN + 1) == []  # deterministic expiry
-    monkeypatch.setattr("stagemesh.provider_pool.time.time", lambda: time.time_ns() / 1e9 + COOLDOWN + 1)
+    monkeypatch.setattr(
+        provider_pool_module,
+        "time",
+        SimpleNamespace(time=lambda: time.time_ns() / 1e9 + COOLDOWN + 1, monotonic=time.monotonic),
+    )
     assert next(v for v in rig.pool.evaluate(rig.store, IMPLEMENT, TASK) if v.provider == "provider-a").eligible
 
 

@@ -6,22 +6,6 @@ from stagemesh.ci_validation_plan import OPERATOR_DEPENDENT_TESTS, OPERATOR_DIRE
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-FULL_GROUPS = (
-    "Delivery and window regressions",
-    "Isolated validation temporary directories",
-    "Missing provider tool host",
-    "Existing queue stop compatibility",
-    "Execution budgets and review ownership",
-    "Provider output security boundaries",
-    "E2E loop security boundaries",
-    "Autonomous recovery ledger",
-    "Continuous driver control and recovery",
-    "Validation environment and fallback progress",
-    "Reliable execution, validation and delivery",
-    "Provider context and edit scope",
-    "Research, planning and adverse evidence pipeline",
-    "Exact-label selector and scoped automatic recovery",
-)
 MANDATORY_STEPS = (
     "Compute audited validation plan",
     "Attribution and static range policy",
@@ -85,33 +69,55 @@ def test_component_mode_uses_validated_plan_file_on_each_required_os() -> None:
         assert f"--os {os_name}" in component
 
 
-def test_complete_groups_are_retained_and_only_skip_for_audited_modes() -> None:
+def test_full_mode_has_one_authoritative_regression_and_published_evidence() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
     full_condition = "if: ${{ steps.validation-plan.outputs.mode == 'full' }}"
-    focused_condition = (
-        "if: ${{ steps.validation-plan.outputs.mode == 'full' || "
-        "steps.validation-plan.outputs.mode == 'operator' }}"
-    )
-    for job in jobs.values():
-        for name in FULL_GROUPS:
-            block = _step(job, name)
-            assert full_condition in block, name
-            assert "run:" in block, name
-        recovery = _step(job, "Autonomous recovery ledger")
-        assert "tests/test_autonomous_recovery.py" in recovery
-        assert "tests/test_recovery_ledger.py" in recovery
-        provider_security = _step(job, "Provider output security boundaries")
-        assert "tests/test_provider_output_security.py" in provider_security
-        e2e_security = _step(job, "E2E loop security boundaries")
-        assert "tests/test_e2e_loop_security.py" in e2e_security
-        assert "tests/test_e2e_remediation.py" in e2e_security
-        delivery = _step(job, "Delivery and window regressions")
-        assert "tests/test_autonomous_window.py" in delivery
-        assert focused_condition in _step(job, "Stabilization matrix")
+    windows = _step(jobs["windows"], "Authoritative Windows platform regression")
+    assert full_condition in windows
+    assert "scripts/run_regression.py" in windows
+    assert "--profile windows-essential --jobs 1" in windows
+    assert "windows-regression-journal.jsonl" in windows
+    assert "windows-regression-report.json" in windows
+    assert "STAGEMESH_CI_HEAD_SHA:" in windows
+    assert "Authoritative complete regression" not in jobs["windows"]
+
+    linux = _step(jobs["linux"], "Authoritative complete regression")
+    assert full_condition in linux
+    assert "scripts/run_regression.py" in linux
+    assert "--jobs 6" in linux and "--profile" not in linux
+    assert "linux-regression-journal.jsonl" in linux
+    assert "linux-regression-report.json" in linux
+    assert "STAGEMESH_CI_HEAD_SHA:" in linux
+
+    publish_names = {
+        "windows": "Publish Windows platform evidence",
+        "linux": "Publish complete regression evidence",
+    }
+    for os_name, job in jobs.items():
+        publish = _step(job, publish_names[os_name])
+        assert "always()" in publish
+        assert "actions/upload-artifact@v4" in publish
+        assert f"regression-{os_name}-${{{{ github.run_attempt }}}}" in publish
+        assert f"{os_name}-regression-report.json" in publish
+        assert f"{os_name}-regression-journal.jsonl" in publish
+
+        operator_condition = "if: ${{ steps.validation-plan.outputs.mode == 'operator' }}"
+        assert operator_condition in _step(job, "Stabilization matrix")
         operator = _step(job, "Operator activity contract and read-only API")
-        assert focused_condition in operator
+        assert operator_condition in operator
         for target in (*OPERATOR_DIRECT_TESTS, *OPERATOR_DEPENDENT_TESTS):
             assert target in operator, target
+
+        assert job.count("scripts/run_regression.py") == 1
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for removed_group in (
+        "Delivery and window regressions",
+        "Isolated validation temporary directories",
+        "Reliable execution, validation and delivery",
+        "Research, planning and adverse evidence pipeline",
+    ):
+        assert removed_group not in text
 
 
 def test_main_push_is_smoke_while_schedule_and_manual_runs_are_full() -> None:
