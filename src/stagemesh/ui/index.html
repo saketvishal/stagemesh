@@ -21,6 +21,7 @@
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
   <button type="button" id="show-status" aria-pressed="false">Status</button>
   <button type="button" id="show-attention" aria-pressed="false">Attention <span id="attention-count" aria-live="polite"></span></button>
+  <button type="button" id="show-diagnostics" aria-pressed="false">Diagnostics</button>
   <button type="button" id="show-objectives" aria-pressed="false">Objectives</button>
   <button type="button" id="show-doctor" aria-pressed="false">Doctor</button>
   <button type="button" id="show-providers" aria-pressed="false">Providers</button>
@@ -177,6 +178,30 @@
     <caption class="sr">Current recorded human decisions and delivery permissions.</caption>
     <thead><tr><th scope="col">Task</th><th scope="col">Kind</th><th scope="col">Stage / status</th><th scope="col">Recorded context</th><th scope="col">Recorded</th></tr></thead>
     <tbody id="attention-items"></tbody>
+  </table>
+</main>
+<main id="diagnostics-view" hidden>
+  <h2>Execution diagnostics</h2>
+  <p id="diagnostics-summary" class="muted" role="status" aria-live="polite">Execution diagnostics have not been loaded.</p>
+  <p class="muted">This view shows bounded typed lifecycle evidence. Raw logs, free-form results, commands, paths, provider output, and evidence payloads are withheld.</p>
+  <form id="diagnostics-filters" aria-label="Execution diagnostic filters">
+    <label>Search <input id="diagnostics-search" type="search" maxlength="200" placeholder="task, execution, provider, or title"></label>
+    <label>Status
+      <select id="diagnostics-status"><option value="">All</option><option>RUNNING</option><option>SUCCEEDED</option><option>FAILED</option><option>UNKNOWN</option></select>
+    </label>
+    <label>Kind
+      <select id="diagnostics-kind"><option value="">All</option><option>IMPLEMENTATION</option><option>VALIDATION</option><option>REVIEW</option><option>INTEGRATION</option><option>RESEARCH</option></select>
+    </label>
+    <label>Sort
+      <select id="diagnostics-sort"><option value="recent">Recently updated</option><option value="task">Task</option><option value="status">Status</option><option value="duration">Recorded duration</option></select>
+    </label>
+    <button type="button" id="diagnostics-refresh">Refresh diagnostics</button>
+  </form>
+  <p id="diagnostics-message" role="status" aria-live="polite"></p>
+  <table id="diagnostics-table" tabindex="-1">
+    <caption class="sr">Recent bounded execution lifecycle diagnostics.</caption>
+    <thead><tr><th scope="col">Task</th><th scope="col">Execution</th><th scope="col">Kind / status</th><th scope="col">Provider</th><th scope="col">Outcome</th><th scope="col">Evidence</th><th scope="col">Timing / runtime</th></tr></thead>
+    <tbody id="diagnostics-items"></tbody>
   </table>
 </main>
 <main id="objectives-view" hidden>

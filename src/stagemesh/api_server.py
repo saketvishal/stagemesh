@@ -47,6 +47,11 @@ from .operator_control import (
     OperatorControl,
     OperatorControlError,
 )
+from .operator_diagnostics import (
+    DIAGNOSTICS_CONTRACT,
+    RESULT_CLASSES,
+    serialize_execution_diagnostics,
+)
 from .operator_doctor import DOCTOR_CONTRACT, ProjectDoctor
 from .operator_projects import (
     PROJECTS_CONTRACT,
@@ -849,24 +854,6 @@ def serialize_task_detail(store: Store, task_id: str) -> dict[str, Any]:
     }
 
 
-_RESULT_CLASSES = {
-    "capacity": "provider_availability",
-    "provider_permission_denied": "provider_availability",
-    "provider_timeout": "provider_availability",
-    "provider_unavailable": "provider_availability",
-    "cleanup_incomplete": "recovery",
-    "fenced_identity_unknown": "recovery",
-    "orphaned": "recovery",
-    "recovered_stale": "recovery",
-    "executor_aborted": "control",
-    "external_workspace_mutation": "control",
-    "operator_stop": "control",
-    "tool_execution_failure": "control",
-    "findings": "outcome",
-    "no_implementation_change": "outcome",
-}
-
-
 def serialize_execution_detail(store: Store, execution_id: str) -> dict[str, Any]:
     execution = store.conn.execute(
         "SELECT e.*,t.title,t.stage AS task_stage,t.status AS task_status,t.project "
@@ -947,7 +934,7 @@ def serialize_execution_detail(store: Store, execution_id: str) -> dict[str, Any
         },
         "outcome": {
             "code": result_code,
-            "classification": _RESULT_CLASSES.get(result_code, "unavailable"),
+            "classification": RESULT_CLASSES.get(result_code, "unavailable"),
             "raw_result_available": execution["result"] is not None,
             "scope": "current" if latest_execution is not None and latest_execution["id"] == execution["id"] else "history",
         },
@@ -1034,6 +1021,8 @@ class ActivityApi:
                 contract = PROVIDERS_CONTRACT
             elif urlsplit(target).path == "/api/v1/attention":
                 contract = ATTENTION_CONTRACT
+            elif urlsplit(target).path == "/api/v1/diagnostics":
+                contract = DIAGNOSTICS_CONTRACT
             elif urlsplit(target).path.startswith("/api/v5/"):
                 contract = CONTRACT_V5
             elif urlsplit(target).path.startswith("/api/v4/"):
@@ -1164,6 +1153,15 @@ class ActivityApi:
             finally:
                 store.conn.close()
             return _json(200, projection, ATTENTION_CONTRACT)
+        if path == "/api/v1/diagnostics":
+            if parts.query:
+                raise ApiError(400, "invalid_query", "diagnostics takes no parameters")
+            store = self._open()
+            try:
+                projection = serialize_execution_diagnostics(store)
+            finally:
+                store.conn.close()
+            return _json(200, projection, DIAGNOSTICS_CONTRACT)
         if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health", "/api/v4/health", "/api/v5/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")

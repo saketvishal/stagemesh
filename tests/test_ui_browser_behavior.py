@@ -45,7 +45,7 @@ DRIVER = r"""
   }
   const realFetch = window.fetch.bind(window);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const control = { held: [], hold: null, fail: false, attentionFail: false, executionAuth: false, dropKey: null, log: [] };
+  const control = { held: [], hold: null, fail: false, attentionFail: false, diagnosticsFail: false, executionAuth: false, dropKey: null, log: [] };
   const release = () => { control.hold = null; control.held.splice(0).forEach((r) => r()); };
   // Test-only wrapper around the page's real fetch: it can withhold, fail or alter ACTUAL server responses.
   window.fetch = async (url, opts) => {
@@ -53,11 +53,14 @@ DRIVER = r"""
     const activity = u.includes("/api/v5/activity");
     const periods = u.includes("/api/v5/periods");
     const attention = u.includes("/api/v1/attention");
+    const diagnostics = u.includes("/api/v1/diagnostics");
     const executionDetail = u.includes("/api/v1/execution");
     if (activity || periods) control.log.push("request " + u);
     if (attention) control.log.push("attention " + u);
+    if (diagnostics) control.log.push("diagnostics " + u);
     if (activity && control.fail) { control.log.push("fail " + u); throw new TypeError("network down"); }
     if (attention && control.attentionFail) { throw new TypeError("attention network down"); }
+    if (diagnostics && control.diagnosticsFail) { throw new TypeError("diagnostics network down"); }
     if (executionDetail && control.executionAuth) {
       return new Response(JSON.stringify({error: {message: "missing or invalid credential"}}), {
         status: 401, headers: {"Content-Type": "application/json"},
@@ -303,6 +306,42 @@ DRIVER = r"""
       const hiddenStart = control.log.filter((entry) => entry.startsWith("attention ")).length;
       await sleep(11000);
       out.requestsWhileHidden = control.log.filter((entry) => entry.startsWith("attention ")).length - hiddenStart;
+    },
+
+    async diagnostics() {
+      out.requestsBeforeOpen = control.log.filter((entry) => entry.startsWith("diagnostics ")).length;
+      $("show-diagnostics").click();
+      await until(() => document.querySelectorAll("#diagnostics-items tr").length === 2, "diagnostics snapshot");
+      out.requestsAfterOpen = control.log.filter((entry) => entry.startsWith("diagnostics ")).length;
+      out.viewVisible = !$("diagnostics-view").hidden && $("activity-view").hidden;
+      out.summary = $("diagnostics-summary").textContent;
+      out.boundary = $("diagnostics-view").textContent;
+      $("diagnostics-status").value = "FAILED";
+      $("diagnostics-status").dispatchEvent(new Event("change"));
+      out.filteredRows = document.querySelectorAll("#diagnostics-items tr").length;
+      const execution = document.querySelector("#diagnostics-items td:nth-child(2) button");
+      execution.focus(); execution.click();
+      await until(() => !$("execution-view").hidden, "diagnostic execution detail");
+      out.executionVisible = !$("execution-view").hidden;
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("diagnostics-view").hidden, "diagnostics return from execution");
+      out.executionFocusRestored = document.activeElement === execution;
+      const task = document.querySelector("#diagnostics-items td:first-child button");
+      task.focus(); task.click();
+      await until(() => !$("task-view").hidden, "diagnostic task detail");
+      out.taskVisible = !$("task-view").hidden;
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("diagnostics-view").hidden, "diagnostics return from task");
+      out.taskFocusRestored = document.activeElement === task;
+      control.diagnosticsFail = true;
+      $("diagnostics-refresh").click();
+      await until(() => $("diagnostics-summary").textContent.includes("stale"), "diagnostics stale snapshot");
+      out.staleSummary = $("diagnostics-summary").textContent;
+      out.staleRows = document.querySelectorAll("#diagnostics-items tr").length;
+      $("show-activity").click();
+      const hiddenStart = control.log.filter((entry) => entry.startsWith("diagnostics ")).length;
+      await sleep(11000);
+      out.requestsWhileHidden = control.log.filter((entry) => entry.startsWith("diagnostics ")).length - hiddenStart;
     },
 
     async executionAuth() {
@@ -799,6 +838,19 @@ def test_attention_view_filters_opens_task_and_preserves_last_good_snapshot(stat
     assert "attention network down" in result["staleSummary"] and "stale" in result["staleSummary"]
     assert result["staleRows"] == 1
     assert result["requestsWhileHidden"] == 0
+
+
+def test_diagnostics_view_filters_links_details_and_withholds_raw_logs(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "diagnostics", tmp_path)
+    assert result["requestsBeforeOpen"] == 0 and result["requestsAfterOpen"] == 1
+    assert result["viewVisible"] is True and "2 shown of 2 executions" in result["summary"]
+    assert "Raw logs and free-form results withheld" in result["summary"]
+    assert "Raw logs, free-form results, commands, paths, provider output" in result["boundary"]
+    assert result["filteredRows"] == 1
+    assert result["executionVisible"] is True and result["executionFocusRestored"] is True
+    assert result["taskVisible"] is True and result["taskFocusRestored"] is True
+    assert "diagnostics network down" in result["staleSummary"] and "stale" in result["staleSummary"]
+    assert result["staleRows"] == 1 and result["requestsWhileHidden"] == 0
 
 
 def test_execution_detail_preserves_last_good_snapshot_on_auth_failure(status_base, tmp_path: Path):

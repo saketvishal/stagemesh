@@ -636,6 +636,37 @@ retains a last-good snapshot as visibly stale after retryable failure, exposes a
 accessible visible count, filters and sorts loaded rows, and restores focus after
 task detail. It remains a read-only notification surface.
 
+## Execution diagnostics snapshot
+
+`GET /api/v1/diagnostics` uses `stagemesh.execution-diagnostics/1`. It accepts no
+query parameters and shares the loopback, Bearer, `GET`-only, no-store and SQLite
+read-only/query-only boundary. It never migrates or writes the store, contacts an
+external service, invokes a provider, runs recovery, or changes execution state.
+
+The route returns the newest 100 durable execution rows and reports the exact
+`execution_total`, `execution_limit` and `truncated`. It separates allowlisted
+kind/status/provider, current-vs-history scope, current-candidate correlation,
+recorded timing, allowlisted result code/classification, raw-result presence,
+claim posture, and current runtime/cleanup classification. Terminal time and
+duration exist only for a valid ordered SUCCEEDED or FAILED record. Historical
+runtime state is `NOT_CURRENT`; querying diagnostics never inspects it as if it
+were a live process.
+
+For an execution with a valid candidate SHA, exact-task-and-candidate evidence is
+read newest-first with a 500-row `scan_limit`, typed counts, latest typed status,
+and explicit `truncated`. No-candidate correlation is
+`UNAVAILABLE_WITHOUT_CANDIDATE`; it never borrows evidence from another candidate.
+
+This is deliberately not a log endpoint. `raw_logs=WITHHELD` and every outcome
+states `raw_result_projected=false`. Free-form results, prompts, findings,
+commands, URLs, provider output, evidence payloads, PID, executable, process
+identity, environment, worktree and filesystem paths are never returned. Unknown
+or secret-shaped provider identities and unsafe identifiers are unavailable, not
+echoed. The shared UI calls this route only when Diagnostics is opened, polls only while visible,
+retains visibly stale last-good data after retryable failures, and
+links to the existing bounded task and execution detail contracts with focus
+restoration.
+
 ## Execution detail snapshot
 
 `GET /api/v1/execution?execution_id=...` uses

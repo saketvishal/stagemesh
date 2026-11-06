@@ -126,6 +126,17 @@ def test_documents_bounded_human_action_queue_and_non_inference_boundary():
         assert phrase in DOC, phrase
 
 
+def test_documents_safe_bounded_execution_diagnostics_and_log_boundary():
+    for phrase in (
+        "`GET /api/v1/diagnostics`", "`stagemesh.execution-diagnostics/1`",
+        "newest 100 durable execution rows", "500-row `scan_limit`",
+        "`UNAVAILABLE_WITHOUT_CANDIDATE`", "`raw_logs=WITHHELD`",
+        "`raw_result_projected=false`", "This is deliberately not a log endpoint",
+        "polls only while visible", "PID, executable, process",
+    ):
+        assert phrase in DOC, phrase
+
+
 def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
     workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     windows, _, linux = workflow.partition("\n  linux:")
@@ -134,6 +145,7 @@ def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
         "test_execution_detail_api.py", "test_operator_doctor_api.py",
         "test_operator_providers_api.py",
         "test_operator_attention_api.py",
+        "test_operator_diagnostics_api.py",
         "test_activity.py", "test_api_server.py",
     ):
         assert module in windows, f"windows job omits {module}"
