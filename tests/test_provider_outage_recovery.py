@@ -123,7 +123,7 @@ def test_queue_recovers_or_honors_control_during_outage(tmp_path, monkeypatch, c
         assert rig.store.get_task("A")["status"] == "DONE"
         assert summary.tasks[0].summary.detail["provider_wait_history"]
     else:
-        assert sum(provider_waits) <= (0.05 if control == "stop" else 0)
+        assert not provider_waits
         assert calls == ["A"]
         assert rig.store.get_task("A")["status"] == "OPEN"
 

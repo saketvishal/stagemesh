@@ -589,6 +589,8 @@ class ParallelRunner:
                 if self._provider_waits:
                     deadline = min(self._provider_waits.values())
                     self._refresh_control_state()
+                    if self.stop.is_set() or self._admission_paused.is_set() or self._admission_stopped.is_set():
+                        continue
                     self.provider_waiter(
                         min(30.0, max(0.05, self.poll_seconds), max(0.05, deadline - self.clock()))
                     )
