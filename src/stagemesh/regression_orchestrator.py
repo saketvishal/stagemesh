@@ -1096,7 +1096,9 @@ class RegressionOrchestrator:
         agg_failed = sum(r.failed_count for r in results)
         agg_skipped = sum(r.skipped_count for r in results)
         agg_subtests = sum(r.subtests_passed for r in results)
-        accounted_nodeids = agg_passed + agg_failed + agg_skipped + agg_subtests
+        # pytest includes successful subtests in its top-level ``passed`` count. Keep the
+        # subtest total as useful evidence, but do not count it a second time for coverage.
+        accounted_nodeids = agg_passed + agg_failed + agg_skipped
         expected_nodeids = int(collection["canonical_count"])
         coverage_matches = accounted_nodeids == expected_nodeids
         test_duration_totals: dict[str, float] = {}

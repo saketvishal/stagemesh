@@ -839,6 +839,8 @@ TEST_NODEID_OVERRIDES: dict[str, TestTier] = {
     "tests/test_workspace_ownership.py::test_dead_owner_then_untracked_leftover_is_not_recovered": TestTier.NATIVE_PLATFORM,
     "tests/test_workspace_ownership.py::test_task_blocks_when_a_dead_owners_workspace_changed": TestTier.NATIVE_PLATFORM,
     "tests/test_workspace_ownership.py::test_two_simultaneous_takeovers_of_a_dead_owner_have_exactly_one_winner": TestTier.NATIVE_PLATFORM,
+    "tests/test_workspace_ownership.py::test_release_permanent_sharing_contention_fails_closed_with_typed_error": TestTier.NATIVE_PLATFORM,
+    "tests/test_workspace_ownership.py::test_safe_cleanup_created_owner_raises_when_unlink_permanently_fails": TestTier.NATIVE_PLATFORM,
 }
 
 

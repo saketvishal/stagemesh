@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import sys
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 from test_parallel import Rig, ScriptedExecutor
 
+import stagemesh.coordinator as coordinator_module
 import stagemesh.provider_pool as provider_pool_module
 from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.execution import ExecutionResult
@@ -133,6 +135,12 @@ def test_queue_recovers_independent_review_without_reimplementing(tmp_path, monk
     adapter = RuntimeCommandAdapter(name="independent", command=(sys.executable,), capabilities=("review",))
     pool = ProviderPool([adapter], {REVIEW: ("independent",)}, cooldown_seconds=0.2,
                         log=ProviderLog(echo=False))
+    now = [time.time()]
+    monkeypatch.setattr(
+        provider_pool_module,
+        "time",
+        SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic),
+    )
     reviews = []
 
     def review(adapter, prompt, project, candidate_sha):
@@ -142,7 +150,26 @@ def test_queue_recovers_independent_review_without_reimplementing(tmp_path, monk
         return '{"decision":"PASS","findings":[]}'
 
     monkeypatch.setattr(RuntimeCommandAdapter, "review_candidate", review)
-    runner = rig.runner(executor, runner_class=QueueRunner)
+
+    class AvailableDispatch:
+        @contextmanager
+        def hold(self, _owner):
+            yield
+
+    # Dispatch-lock behavior has dedicated native acceptance tests. Isolate this test from
+    # host file-lock semantics so it measures only provider cooldown and review recovery.
+    monkeypatch.setattr(coordinator_module, "stage_dispatch_lock", lambda *_args: AvailableDispatch())
+
+    def provider_waiter(seconds):
+        now[0] += seconds
+        return False
+
+    runner = rig.runner(
+        executor,
+        runner_class=QueueRunner,
+        clock=lambda: now[0],
+        provider_waiter=provider_waiter,
+    )
     make = runner.make_coordinator
 
     def coordinator(target, store, task_id):

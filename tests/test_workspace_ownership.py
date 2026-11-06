@@ -1359,6 +1359,7 @@ def test_acquisition_failure_never_deletes_foreign_owner_record(tmp_path: Path) 
 # --- Blocker 2: Windows release contention and typed release failure --------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows delete-sharing semantics")
 def test_release_permanent_sharing_contention_fails_closed_with_typed_error(tmp_path: Path) -> None:
     project, store = _setup(tmp_path)
     handle = None
@@ -1459,6 +1460,7 @@ def test_release_removes_corrupt_owner_file_rather_than_silently_leaving_it(tmp_
     assert not owner_file.exists(), "release must clean up corrupt owner file rather than silently reporting success"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows delete-sharing semantics")
 def test_safe_cleanup_created_owner_raises_when_unlink_permanently_fails(tmp_path: Path) -> None:
     project, _store = _setup(tmp_path)
     prepare_task_workspace(project, TASK)

@@ -1185,6 +1185,19 @@ def drive_task(
                 summary.stop_reason, summary.message = "CURRENT_PROBLEM", ", ".join(problems)
                 summary.detail["problems"] = list(problems)
                 break
+        failure = _latest_failure(store, selected, tick_started)
+        # Recording failure evidence is not forward progress. Stop at the stage boundary so
+        # queue supervision can honor a temporary provider cooldown before another attempt;
+        # otherwise a fast host can retry immediately and turn a recoverable outage into a
+        # blocked task while a slower host happens to pass.
+        if not progressed and failure is not None:
+            summary.stop_reason = "NO_PROGRESS"
+            summary.detail["failure"] = failure
+            summary.message = f"{failure['event']}: {failure.get('reason', 'unknown')}" + (
+                f" ({failure['providers']})" if failure.get("providers") else ""
+            )
+            _attach_diagnosis(summary, store, project, selected, coordinator)
+            break
         moved = progressed or any(
             new[key] != previous[key]
             for key in (
@@ -1197,15 +1210,8 @@ def drive_task(
             )
         )
         if not moved:
-            failure = _latest_failure(store, selected, tick_started)
             summary.stop_reason = "NO_PROGRESS"
-            if failure is not None:
-                summary.detail["failure"] = failure
-                summary.message = f"{failure['event']}: {failure.get('reason', 'unknown')}" + (
-                    f" ({failure['providers']})" if failure.get("providers") else ""
-                )
-            else:
-                summary.message = "a tick made no progress and recorded no failure (review infrastructure unavailable or an open claim)"
+            summary.message = "a tick made no progress and recorded no failure (review infrastructure unavailable or an open claim)"
             _attach_diagnosis(summary, store, project, selected, coordinator)
             break
     else:

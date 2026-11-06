@@ -710,14 +710,14 @@ def test_windows_essential_profile_is_exact_and_never_claims_complete_catalog() 
     assert evidence["complete_catalog"] is False
     assert evidence["selected_tiers"] == ["native_platform", "serial_timing"]
     assert evidence["tier_counts"] == {
-        "native_platform": 226,
+        "native_platform": 229,
         "serial_timing": 13,
     }
-    assert evidence["canonical_count"] == 239
+    assert evidence["canonical_count"] == 242
     assert {lane.tier for lane in execution_lanes} == WINDOWS_ESSENTIAL_TIERS
     assert all(not lane.parallel_safe for lane in execution_lanes)
     execution_nodeids = [nodeid for lane in execution_lanes for nodeid in lane.files]
-    assert len(execution_nodeids) == len(set(execution_nodeids)) == 239
+    assert len(execution_nodeids) == len(set(execution_nodeids)) == 242
 
 
 def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> None:
@@ -925,6 +925,50 @@ def test_run_fails_when_result_accounting_does_not_match_collection(
             "duration_seconds": 0.75,
         }
     ]
+
+
+def test_subtests_are_reported_without_double_counting_collected_nodeids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lane = Lane("unit", TestTier.DETERMINISTIC_UNIT, True, ("tests/test_docs_links.py",), 60.0)
+    report = tmp_path / "subtests.json"
+    orchestrator = RegressionOrchestrator(lanes=(lane,), jobs=1, report_path=report)
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_collection",
+        lambda: {
+            "canonical_count": 1,
+            "canonical_sha256": "abc",
+            "file_counts": {"tests/test_docs_links.py": 1},
+        },
+    )
+    monkeypatch.setattr(orchestrator, "_validate_or_init_journal", lambda *_args: set())
+    monkeypatch.setattr(
+        orchestrator,
+        "_execute_lane",
+        lambda _lane, _worker_id: LaneResult(
+            lane_id="unit",
+            tier=str(TestTier.DETERMINISTIC_UNIT),
+            passed=True,
+            returncode=0,
+            duration_seconds=0.01,
+            stdout="1 passed, 1 subtests passed",
+            stderr="",
+            worker_id=0,
+            passed_count=1,
+            subtests_passed=1,
+        ),
+    )
+
+    assert orchestrator.run() == 0
+    report_data = json.loads(report.read_text(encoding="utf-8"))
+    assert report_data["aggregate_counts"]["subtests_passed"] == 1
+    assert report_data["coverage"] == {
+        "accounted_nodeids": 1,
+        "expected_nodeids": 1,
+        "matches": True,
+    }
 
 
 def test_external_process_group_never_exceeds_eight_workers(
