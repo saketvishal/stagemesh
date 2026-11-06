@@ -831,19 +831,61 @@ def run_scenario(base: str, scenario: str, tmp_path: Path) -> dict:
         if os.environ.get("CI"):
             pytest.fail("a Chromium-family browser is required in CI")
         pytest.skip("no Chromium-family browser available")
-    command = [
-        browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-        f"--user-data-dir={tmp_path / ('profile-' + scenario)}", "--virtual-time-budget=90000", "--dump-dom",
-        f"{base}/?scenario={scenario}#token={TOKEN}",
-    ]
-    if sys.platform.startswith("linux"):
-        command.insert(1, "--no-sandbox")
-    proc = subprocess.run(command, capture_output=True, text=True, timeout=150, encoding="utf-8", errors="replace", check=False)
-    match = re.search(r'<pre id="result">(.*?)</pre>', proc.stdout, re.DOTALL)
-    assert match, f"driver did not finish; browser exit {proc.returncode}\n{proc.stderr[-800:]}"
+    attempts = []
+    match = None
+    for attempt in range(2):
+        command = [
+            browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={tmp_path / ('profile-' + scenario + '-' + str(attempt))}",
+            "--virtual-time-budget=90000", "--dump-dom", f"{base}/?scenario={scenario}#token={TOKEN}",
+        ]
+        if sys.platform.startswith("linux"):
+            command.insert(1, "--no-sandbox")
+        proc = subprocess.run(
+            command, capture_output=True, text=True, timeout=150, encoding="utf-8", errors="replace", check=False
+        )
+        match = re.search(r'<pre id="result">(.*?)</pre>', proc.stdout, re.DOTALL)
+        attempts.append(f"attempt {attempt + 1}: browser exit {proc.returncode}\n{proc.stderr[-800:]}")
+        if match:
+            break
+    assert match, "driver did not finish after a bounded fresh-profile retry\n" + "\n".join(attempts)
     result = json.loads(html.unescape(match.group(1)))
     assert result["errors"] == [], result
     return result
+
+
+def test_browser_harness_retries_one_missing_result_with_a_fresh_profile(monkeypatch, tmp_path: Path):
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        stdout = "" if len(calls) == 1 else '<pre id="result">{&quot;errors&quot;: []}</pre>'
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(sys.modules[__name__], "_find_browser", lambda: "test-browser")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert run_scenario("http://127.0.0.1:1", "retry", tmp_path) == {"errors": []}
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+    assert "profile-retry-0" in " ".join(str(part) for part in calls[0])
+    assert "profile-retry-1" in " ".join(str(part) for part in calls[1])
+
+
+def test_browser_harness_does_not_retry_a_completed_application_failure(monkeypatch, tmp_path: Path):
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        stdout = '<pre id="result">{&quot;errors&quot;: [&quot;application failure&quot;]}</pre>'
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(sys.modules[__name__], "_find_browser", lambda: "test-browser")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(AssertionError, match="application failure"):
+        run_scenario("http://127.0.0.1:1", "failure", tmp_path)
+    assert len(calls) == 1
 
 
 def test_focus_paging_and_filters_in_a_real_browser(fixture_base, tmp_path: Path):
