@@ -41,6 +41,7 @@ REPORT_SLOWEST_TEST_LIMIT = 50
 MAX_LOCAL_WORKERS = 8
 TARGET_BATCH_SECONDS = 600.0
 BATCHES_PER_WORKER_AND_TIER = 4
+INTEGRATION_BATCHES_PER_WORKER = 6
 
 
 def _bounded_failure_output(value: str, limit: int = 20_000) -> str:
@@ -548,7 +549,11 @@ class RegressionOrchestrator:
                 if not contract.parallel_safe
                 else min(
                     min(self.jobs, contract.max_parallel_workers)
-                    * BATCHES_PER_WORKER_AND_TIER,
+                    * (
+                        INTEGRATION_BATCHES_PER_WORKER
+                        if tier is TestTier.INTEGRATION_PROCESS
+                        else BATCHES_PER_WORKER_AND_TIER
+                    ),
                     len(planning_units),
                 )
             )

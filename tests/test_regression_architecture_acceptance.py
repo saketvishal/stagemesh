@@ -32,6 +32,7 @@ import pytest
 from stagemesh.ci_validation_plan import COMPONENT, FULL, derive_ci_validation_plan
 from stagemesh.regression_orchestrator import (
     BATCHES_PER_WORKER_AND_TIER,
+    INTEGRATION_BATCHES_PER_WORKER,
     MAX_LOCAL_WORKERS,
     Lane,
     LaneResult,
@@ -196,6 +197,7 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     assert TIER_ISOLATION_CONTRACTS[TestTier.SERIAL_TIMING].max_parallel_workers == 1
     assert MAX_LOCAL_WORKERS == 8
     assert BATCHES_PER_WORKER_AND_TIER == 4
+    assert INTEGRATION_BATCHES_PER_WORKER == 6
     assert (
         TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].concurrency_group
         == TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].concurrency_group
@@ -641,7 +643,16 @@ def test_live_canonical_collection_equals_tier_union() -> None:
         lane.tier for lane in execution_lanes if not lane.parallel_safe
     }
     assert len(execution_lanes) <= (
-        BATCHES_PER_WORKER_AND_TIER * jobs * len(parallel_tiers) + len(serial_tiers)
+        sum(
+            jobs
+            * (
+                INTEGRATION_BATCHES_PER_WORKER
+                if tier is TestTier.INTEGRATION_PROCESS
+                else BATCHES_PER_WORKER_AND_TIER
+            )
+            for tier in parallel_tiers
+        )
+        + len(serial_tiers)
     )
     assert len(execution_lanes) < len(build_default_lanes())
     assert all(
@@ -652,7 +663,7 @@ def test_live_canonical_collection_equals_tier_union() -> None:
 
 
 def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> None:
-    files = tuple(f"tests/test_lane_{index}.py" for index in range(6))
+    files = tuple(f"tests/test_lane_{index}.py" for index in range(12))
     lanes = tuple(
         Lane(
             f"integration-{index}",
@@ -663,7 +674,7 @@ def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> N
         )
         for index, file_path in enumerate(files)
     )
-    counts = (8, 7, 6, 5, 4, 3)
+    counts = tuple(range(12, 0, -1))
     nodeids = tuple(
         f"{file_path}::test_{test_index}"
         for file_path, count in zip(files, counts, strict=True)
@@ -678,7 +689,7 @@ def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> N
         orchestrator._pool_isolation.cleanup()
 
     assert first == second
-    assert len(first) == 4
+    assert len(first) == 6
     assert max(len(lane.files) for lane in first) - min(len(lane.files) for lane in first) <= 2
     assert {nodeid for lane in first for nodeid in lane.files} == set(nodeids)
     lane_by_nodeid = {
