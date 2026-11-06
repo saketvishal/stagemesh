@@ -27,6 +27,7 @@ talks to a loopback server it starts or attaches to; the browser talks to the sa
 | `GET /api/v1/activity` | One page of activity entries, newest first |
 | `GET /api/v1/health` | Authenticated liveness and `version`, so a shell can detect an incompatible server |
 | `GET /api/v1/objectives` | Bounded objective plans correlated with current recorded child task state |
+| `GET /api/v1/doctor` | Local-only project configuration, isolation and policy posture |
 
 Task drill-down is `GET /api/v1/activity?task_id=<id>`, which the projection already supports. `health` takes no
 parameters and returns `{"status": "ok", "version": ...}` so a shell can detect an incompatible server.
@@ -516,6 +517,36 @@ The shared browser/desktop UI provides objective text/state filters, determinist
 sorting, an explicit bounded-plan detail, and links only recorded children to the
 existing task-detail projection. Back/Escape restores the Objective view and focus.
 No objective mutation is available in the UI.
+
+## Project doctor snapshot
+
+`GET /api/v1/doctor` uses `stagemesh.project-doctor/1`. It accepts no query
+parameters and shares the loopback, Bearer, `GET`-only, no-store and SQLite
+read-only/query-only boundary. The route reloads project configuration on each
+request but never migrates the store, invokes a provider, probes a provider
+executable, contacts GitHub, fetches Git, or changes project state.
+
+The response is a fixed allowlist bounded to 100 provider rows and 20 distinct
+task-source kinds: a `READY`, `ATTENTION` or `UNAVAILABLE`
+verdict; typed attention codes with static guidance; current/expected database
+schema versions; safe runtime mode/version/provenance state; workspace-isolation
+flags; provider names, declared capabilities, command source classification and
+explicit unattended authorization; and bounded routing, planning, merge,
+research, driver, specification-governance, task-selection and budget policy.
+`provider_total`, `provider_limit` and `providers_truncated` make the provider
+bound explicit. `network_checked=false` and `mutation_performed=false` are explicit. Provider
+configuration and authorization do not claim command availability, successful
+acceptance or actual invocation; those are separate observations.
+
+The projection never returns configuration text, config or workspace paths,
+commands or arguments, executable paths, tokens, GitHub owner/repository names,
+URLs, environment variables, identities, provider output or parser errors. An
+invalid or unreadable configuration returns `UNAVAILABLE` with the fixed
+`CONFIG_UNAVAILABLE` condition. It does not echo the failure. A missing or
+mismatched store still uses the ordinary generic `store_unavailable` behavior.
+The dashboard loads this route only when the Doctor view is opened, retains a
+last-good snapshot as visibly stale after retryable failures, and describes the
+configured/authorized/available/invoked distinction next to provider posture.
 
 ## Execution detail snapshot
 

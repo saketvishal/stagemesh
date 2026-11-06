@@ -59,7 +59,16 @@ def test_ui_registry_launches_separate_servers_tokens_and_projections(
     )
     created: list[tuple[FakeServer, SimpleNamespace, object]] = []
 
-    def fake_server(db, token=None, port=0, static_dir=None, api_class=None, control=None, projects=None):
+    def fake_server(
+        db,
+        token=None,
+        port=0,
+        static_dir=None,
+        api_class=None,
+        control=None,
+        projects=None,
+        doctor=None,
+    ):
         index = len(created) + 1
         server = FakeServer(44000 + index)
         api = SimpleNamespace(
@@ -68,6 +77,7 @@ def test_ui_registry_launches_separate_servers_tokens_and_projections(
             projects=None,
         )
         created.append((server, api, control))
+        assert doctor is not None
         return server, api
 
     opened: list[str] = []

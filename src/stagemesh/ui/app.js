@@ -24,6 +24,7 @@
   let executionReturnView = "activity", executionOpener = null;
   let objectivesSnapshot = null, objectiveGeneration = 0, objectiveLastGood = null;
   let objectiveInflight = false, selectedObjectiveId = null, objectiveOpener = null;
+  let doctorSnapshot = null, doctorGeneration = 0, doctorLastGood = null, doctorInflight = false;
   let controlCapabilities = null, controlIntent = null, controlBusy = false;
   let projectTargets = new Map();
 
@@ -175,6 +176,39 @@
     }
   }
 
+  async function loadDoctor(quiet) {
+    if (!token) {
+      $("doctor-summary").textContent = "No access token. Open the URL printed by `stagemesh serve`.";
+      $("doctor-summary").className = "error";
+      return;
+    }
+    if (doctorInflight) return;
+    const mine = ++doctorGeneration;
+    doctorInflight = true;
+    if (!quiet) {
+      $("doctor-summary").textContent = "Loading safe local readiness...";
+      $("doctor-summary").className = "muted";
+    }
+    try {
+      const projection = await api("/api/v1/doctor");
+      if (mine !== doctorGeneration) return;
+      doctorSnapshot = projection;
+      doctorLastGood = new Date();
+      renderDoctor();
+    } catch (error) {
+      if (mine !== doctorGeneration) return;
+      const authorizationFailed = error.status === 401 || error.status === 403;
+      if (authorizationFailed) doctorSnapshot = null;
+      renderDoctor();
+      const stale = doctorLastGood && !authorizationFailed
+        ? " Showing the last doctor snapshot from " + doctorLastGood.toLocaleTimeString() + " (stale)." : "";
+      $("doctor-summary").textContent = "Could not load project doctor: " + error.message + "." + stale;
+      $("doctor-summary").className = authorizationFailed ? "error" : "warn";
+    } finally {
+      if (mine === doctorGeneration) doctorInflight = false;
+    }
+  }
+
   async function fetchActivity(target, mine) {
     const fresh = new Map();
     let offset = 0, page, fetched = 0;
@@ -244,7 +278,8 @@
   }
 
   const refresh = () => {
-    if (!$("objectives-view").hidden) loadObjectives(false);
+    if (!$("doctor-view").hidden) loadDoctor(false);
+    else if (!$("objectives-view").hidden) loadObjectives(false);
     else loadRange(false);
   };
   const reload = () => { wantedPages = 1; periodWantedPages = 1; loadRange(false); };
@@ -328,6 +363,7 @@
   function visibleView() {
     if (!$("task-view").hidden) return "task";
     if (!$("objectives-view").hidden) return "objectives";
+    if (!$("doctor-view").hidden) return "doctor";
     if (!$("status-view").hidden) return "status";
     if (!$("control-view").hidden) return "control";
     return "activity";
@@ -558,6 +594,85 @@
       cell(row, item.stage); cell(row, item.policy); cell(row, item.order.join(" -> "));
       cell(row, item.verdicts.map((v) => v.provider + ": " + (v.eligible === true ? "eligible" : v.eligible === false ? "ineligible" : "unknown")).join(", "));
     }
+  }
+
+  function renderDoctorFacts(id, facts) {
+    const target = $(id);
+    target.replaceChildren();
+    for (const [label, value] of facts) {
+      const dt = document.createElement("dt"); dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value === true ? "yes" : value === false ? "no" : value ?? "unavailable";
+      target.append(dt, dd);
+    }
+  }
+
+  function renderDoctor() {
+    $("doctor-attention").replaceChildren();
+    $("doctor-providers").replaceChildren();
+    renderDoctorFacts("doctor-system", []);
+    renderDoctorFacts("doctor-policies", []);
+    const snapshot = doctorSnapshot;
+    if (!snapshot) {
+      $("doctor-summary").textContent = "Doctor data is unavailable.";
+      $("doctor-summary").className = "warn";
+      return;
+    }
+    $("doctor-summary").textContent = [
+      "Verdict " + snapshot.verdict + ".",
+      "Observed " + new Date(snapshot.observed_at).toLocaleString() + ".",
+      "Local-only: no network or provider checks were performed.",
+    ].join(" ");
+    $("doctor-summary").className = snapshot.verdict === "READY" ? "muted" : snapshot.verdict === "UNAVAILABLE" ? "error" : "warn";
+    const config = snapshot.configuration || {};
+    renderDoctorFacts("doctor-system", [
+      ["Verdict", snapshot.verdict],
+      ["Configuration", config.status],
+      ["Config source", config.source],
+      ["Database schema", snapshot.database.schema],
+      ["Runtime", snapshot.runtime.mode + " " + snapshot.runtime.version],
+      ["Runtime provenance", snapshot.runtime.provenance],
+      ["Workspace isolation configured", snapshot.workspace.isolation_configured],
+      ["Unsafe worktree root allowed", snapshot.workspace.unsafe_root_allowed],
+      ["Network checked", snapshot.network_checked],
+      ["Mutation performed", snapshot.mutation_performed],
+    ]);
+    if (!snapshot.attention.length) {
+      const row = $("doctor-attention").insertRow(); cell(row, "none"); cell(row, "READY"); cell(row, "No local posture conditions need attention.");
+    }
+    for (const item of snapshot.attention) {
+      const row = $("doctor-attention").insertRow(); cell(row, item.severity); cell(row, item.code); cell(row, item.message);
+    }
+    for (const provider of snapshot.providers) {
+      const row = $("doctor-providers").insertRow(); cell(row, provider.name);
+      cell(row, provider.capabilities.join(", ")); cell(row, provider.command_source);
+      cell(row, provider.authorized_for_unattended ? "authorized" : "not authorized");
+    }
+    $("doctor-provider-note").textContent = [
+      "Configured and authorized do not mean available or invoked. This view makes no provider or network calls.",
+      snapshot.providers.length + " shown of " + snapshot.provider_total +
+        " configured provider records (limit " + snapshot.provider_limit + ").",
+      snapshot.providers_truncated ? "The provider list is truncated." : "",
+    ].filter(Boolean).join(" ");
+    const policies = snapshot.policies;
+    if (!policies) return;
+    renderDoctorFacts("doctor-policies", [
+      ["Routing mode", config.routing.mode],
+      ["Provider selection", config.routing.selection_policy],
+      ["Independent review required", config.routing.independent_review_required],
+      ["Unattended allowlist configured", policies.authorization.allowlist_configured],
+      ["Authorized providers", policies.authorization.authorized_provider_count],
+      ["Approved spec required", policies.planning.approved_spec_required],
+      ["Plan challenge required", policies.planning.challenge_required],
+      ["Merge mode", policies.merging.mode],
+      ["Required hosted checks", policies.merging.required_check_count],
+      ["Research stage enabled", policies.research.enabled],
+      ["Research scope enforced", policies.research.scope_enforced],
+      ["Continuous driver configured", policies.driver.configured],
+      ["Driver auto-merge", policies.driver.auto_merge],
+      ["Spec governance enabled", policies.spec_governance.enabled],
+      ["Automatic task selection", policies.task_selection.automatic],
+    ]);
   }
 
   function objectiveRows() {
@@ -968,12 +1083,14 @@
     $("activity-view").hidden = name !== "activity";
     $("status-view").hidden = name !== "status";
     $("objectives-view").hidden = name !== "objectives";
+    $("doctor-view").hidden = name !== "doctor";
     $("control-view").hidden = name !== "control";
     $("task-view").hidden = name !== "task";
     $("execution-view").hidden = name !== "execution";
     $("show-activity").setAttribute("aria-pressed", String(name === "activity"));
     $("show-status").setAttribute("aria-pressed", String(name === "status"));
     $("show-objectives").setAttribute("aria-pressed", String(name === "objectives"));
+    $("show-doctor").setAttribute("aria-pressed", String(name === "doctor"));
     $("show-control").setAttribute("aria-pressed", String(name === "control"));
     $("show-task").setAttribute("aria-pressed", String(name === "task"));
     $("show-execution").setAttribute("aria-pressed", String(name === "execution"));
@@ -1020,6 +1137,7 @@
       if (document.hidden) return;
       if (!inflight) loadRange(true);
       if (!objectiveInflight && !$("objectives-view").hidden) loadObjectives(true);
+      if (!doctorInflight && !$("doctor-view").hidden) loadDoctor(true);
     }, POLL_MS);
   }
 
@@ -1049,6 +1167,10 @@
     setView("objectives");
     loadObjectives(Boolean(objectivesSnapshot));
   });
+  $("show-doctor").addEventListener("click", () => {
+    setView("doctor");
+    loadDoctor(Boolean(doctorSnapshot));
+  });
   $("show-control").addEventListener("click", () => setView("control"));
   $("show-task").addEventListener("click", () => setView("task"));
   $("show-execution").addEventListener("click", () => setView("execution"));
@@ -1060,6 +1182,7 @@
   $("objective-state").addEventListener("change", renderObjectives);
   $("objective-sort").addEventListener("change", renderObjectives);
   $("objective-refresh").addEventListener("click", () => loadObjectives(false));
+  $("doctor-refresh").addEventListener("click", () => loadDoctor(false));
   $("close-objective").addEventListener("click", closeObjective);
   $("auto").addEventListener("change", schedule);
   $("control-action").addEventListener("change", () => { clearControlPlan(); updateControlTarget(); });
