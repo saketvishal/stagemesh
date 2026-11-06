@@ -115,6 +115,17 @@ def test_documents_bounded_provider_status_and_evidence_distinctions():
         assert phrase in DOC, phrase
 
 
+def test_documents_bounded_human_action_queue_and_non_inference_boundary():
+    for phrase in (
+        "`GET /api/v1/attention`", "`stagemesh.attention-queue/1`",
+        "`BLOCKED_HUMAN_DECISION`", "`approval_coverage=UNKNOWN`",
+        "`queue_total_kind=LOWER_BOUND`", "at most 500", "at most 100 rows",
+        "Recoverable operational blocks", "missing records never establish permission",
+        "polls it only while visible", "read-only notification surface",
+    ):
+        assert phrase in DOC, phrase
+
+
 def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
     workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     windows, _, linux = workflow.partition("\n  linux:")
@@ -122,6 +133,7 @@ def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
         "test_operator_ui_contract.py", "test_operator_api.py", "test_task_detail_api.py",
         "test_execution_detail_api.py", "test_operator_doctor_api.py",
         "test_operator_providers_api.py",
+        "test_operator_attention_api.py",
         "test_activity.py", "test_api_server.py",
     ):
         assert module in windows, f"windows job omits {module}"

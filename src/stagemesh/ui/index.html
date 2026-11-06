@@ -20,6 +20,7 @@
 <nav aria-label="Operator views">
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
   <button type="button" id="show-status" aria-pressed="false">Status</button>
+  <button type="button" id="show-attention" aria-pressed="false">Attention <span id="attention-count" aria-live="polite"></span></button>
   <button type="button" id="show-objectives" aria-pressed="false">Objectives</button>
   <button type="button" id="show-doctor" aria-pressed="false">Doctor</button>
   <button type="button" id="show-providers" aria-pressed="false">Providers</button>
@@ -156,6 +157,27 @@
     <h3 id="selection-heading">Provider selections</h3>
     <table><thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Policy</th><th scope="col">Recorded order</th><th scope="col">Eligibility</th></tr></thead><tbody id="selection-rows"></tbody></table>
   </section>
+</main>
+<main id="attention-view" hidden>
+  <h2>Human action required</h2>
+  <p id="attention-summary" class="muted" role="status" aria-live="polite">Human-action data has not been loaded.</p>
+  <p class="muted">Only current typed human decisions and delivery permissions appear here. Operational failures and unknown approval coverage are not silently treated as requests for a person.</p>
+  <form id="attention-filters" aria-label="Human-action queue filters">
+    <label>Search <input id="attention-search" type="search" maxlength="200" placeholder="task, title, or recorded detail"></label>
+    <label>Kind
+      <select id="attention-kind"><option value="">All</option><option value="HUMAN_DECISION">Human decision</option><option value="DELIVERY_PERMISSION">Delivery permission</option></select>
+    </label>
+    <label>Sort
+      <select id="attention-sort"><option value="recent">Recently recorded</option><option value="task">Task</option><option value="kind">Kind</option></select>
+    </label>
+    <button type="button" id="attention-refresh">Refresh attention</button>
+  </form>
+  <p id="attention-message" role="status" aria-live="polite"></p>
+  <table id="attention-table" tabindex="-1">
+    <caption class="sr">Current recorded human decisions and delivery permissions.</caption>
+    <thead><tr><th scope="col">Task</th><th scope="col">Kind</th><th scope="col">Stage / status</th><th scope="col">Recorded context</th><th scope="col">Recorded</th></tr></thead>
+    <tbody id="attention-items"></tbody>
+  </table>
 </main>
 <main id="objectives-view" hidden>
   <h2>Objectives and planned work</h2>

@@ -33,7 +33,7 @@ td button:focus-visible { outline: 3px solid var(--accent); }
 #control-result.ok { color: var(--good); }
 .state-open::before { content: "\25CB  "; }
 .state-closed::before { content: "\25CF  "; }
-#message.warn, #objectives-message.warn, #doctor-summary.warn, #providers-message.warn { color: var(--warn); }
-#message.error, #objectives-message.error, #doctor-summary.error, #providers-message.error { color: var(--bad); font-weight: 600; }
+#message.warn, #objectives-message.warn, #doctor-summary.warn, #providers-message.warn, #attention-summary.warn { color: var(--warn); }
+#message.error, #objectives-message.error, #doctor-summary.error, #providers-message.error, #attention-summary.error { color: var(--bad); font-weight: 600; }
 .sr, .skip:not(:focus) { position: absolute; left: -9999px; }
 [hidden] { display: none !important; }

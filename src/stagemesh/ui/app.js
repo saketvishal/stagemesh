@@ -26,6 +26,7 @@
   let objectiveInflight = false, selectedObjectiveId = null, objectiveOpener = null;
   let doctorSnapshot = null, doctorGeneration = 0, doctorLastGood = null, doctorInflight = false;
   let providersSnapshot = null, providersGeneration = 0, providersLastGood = null, providersInflight = false;
+  let attentionSnapshot = null, attentionGeneration = 0, attentionLastGood = null, attentionInflight = false;
   let controlCapabilities = null, controlIntent = null, controlBusy = false;
   let projectTargets = new Map();
 
@@ -253,6 +254,39 @@
     }
   }
 
+  async function loadAttention(quiet) {
+    if (!token) {
+      $("attention-summary").textContent = "No access token. Open the URL printed by `stagemesh serve`.";
+      $("attention-summary").className = "error";
+      return;
+    }
+    if (attentionInflight) return;
+    const mine = ++attentionGeneration;
+    attentionInflight = true;
+    if (!quiet) {
+      $("attention-summary").textContent = "Loading recorded human actions...";
+      $("attention-summary").className = "muted";
+    }
+    try {
+      const projection = await api("/api/v1/attention");
+      if (mine !== attentionGeneration) return;
+      attentionSnapshot = projection;
+      attentionLastGood = new Date();
+      renderAttention();
+    } catch (error) {
+      if (mine !== attentionGeneration) return;
+      const authorizationFailed = error.status === 401 || error.status === 403;
+      if (authorizationFailed) attentionSnapshot = null;
+      renderAttention();
+      const stale = attentionLastGood && !authorizationFailed
+        ? " Showing the last human-action snapshot from " + attentionLastGood.toLocaleTimeString() + " (stale)." : "";
+      $("attention-summary").textContent = "Could not load human actions: " + error.message + "." + stale;
+      $("attention-summary").className = authorizationFailed ? "error" : "warn";
+    } finally {
+      if (mine === attentionGeneration) attentionInflight = false;
+    }
+  }
+
   async function fetchActivity(target, mine) {
     const fresh = new Map();
     let offset = 0, page, fetched = 0;
@@ -324,6 +358,7 @@
   const refresh = () => {
     if (!$("providers-view").hidden) loadProviders(false);
     else if (!$("doctor-view").hidden) loadDoctor(false);
+    else if (!$("attention-view").hidden) loadAttention(false);
     else if (!$("objectives-view").hidden) loadObjectives(false);
     else loadRange(false);
   };
@@ -407,6 +442,7 @@
 
   function visibleView() {
     if (!$("task-view").hidden) return "task";
+    if (!$("attention-view").hidden) return "attention";
     if (!$("objectives-view").hidden) return "objectives";
     if (!$("doctor-view").hidden) return "doctor";
     if (!$("providers-view").hidden) return "providers";
@@ -639,6 +675,60 @@
       const row = $("selection-rows").insertRow(); taskCell(row, item.task_id);
       cell(row, item.stage); cell(row, item.policy); cell(row, item.order.join(" -> "));
       cell(row, item.verdicts.map((v) => v.provider + ": " + (v.eligible === true ? "eligible" : v.eligible === false ? "ineligible" : "unknown")).join(", "));
+    }
+  }
+
+  function attentionRows() {
+    if (!attentionSnapshot) return [];
+    const search = $("attention-search").value.trim().toLocaleLowerCase();
+    const kind = $("attention-kind").value;
+    const mode = $("attention-sort").value;
+    const result = attentionSnapshot.items.filter((item) => {
+      const matchesText = !search || [item.task_id, item.title, item.detail].some(
+        (value) => String(value || "").toLocaleLowerCase().includes(search)
+      );
+      return matchesText && (!kind || item.kind === kind);
+    });
+    result.sort((left, right) => {
+      if (mode === "task") return left.task_id.localeCompare(right.task_id) || right.recorded_at - left.recorded_at;
+      if (mode === "kind") return left.kind.localeCompare(right.kind) || right.recorded_at - left.recorded_at;
+      return right.recorded_at - left.recorded_at || left.task_id.localeCompare(right.task_id);
+    });
+    return result;
+  }
+
+  function renderAttention() {
+    const body = $("attention-items");
+    body.replaceChildren();
+    const snapshot = attentionSnapshot;
+    if (!snapshot) {
+      $("attention-count").textContent = "";
+      $("attention-message").textContent = "";
+      return;
+    }
+    const totalLabel = snapshot.queue_total_kind === "LOWER_BOUND"
+      ? "at least " + snapshot.queue_total
+      : snapshot.queue_total;
+    $("attention-count").textContent = snapshot.queue_total_kind === "LOWER_BOUND"
+      ? "(≥" + snapshot.queue_total + ")"
+      : "(" + snapshot.queue_total + ")";
+    $("attention-summary").textContent = [
+      "Observed " + new Date(snapshot.observed_at).toLocaleString() + ".",
+      totalLabel + " recorded human actions; row limit " + snapshot.queue_limit + ".",
+      "Approval coverage " + snapshot.approval_coverage + ".",
+      "Database writes " + snapshot.database_writes + ", external calls " + snapshot.external_calls + ".",
+      snapshot.history_truncated ? "The bounded decision history is truncated; the count is a lower bound." : "The bounded decision history scan completed.",
+    ].join(" ");
+    $("attention-summary").className = snapshot.truncated ? "warn" : "muted";
+    const items = attentionRows();
+    $("attention-message").textContent = items.length ? "" : "No recorded human actions match these filters.";
+    for (const item of items) {
+      const row = body.insertRow();
+      taskCell(row, item.task_id);
+      cell(row, item.kind.replaceAll("_", " ").toLocaleLowerCase());
+      cell(row, item.stage + " / " + item.task_status);
+      cell(row, item.title + " — " + item.detail);
+      cell(row, new Date(item.recorded_at * 1000).toLocaleString());
     }
   }
 
@@ -1207,6 +1297,7 @@
   function setView(name) {
     $("activity-view").hidden = name !== "activity";
     $("status-view").hidden = name !== "status";
+    $("attention-view").hidden = name !== "attention";
     $("objectives-view").hidden = name !== "objectives";
     $("doctor-view").hidden = name !== "doctor";
     $("providers-view").hidden = name !== "providers";
@@ -1215,6 +1306,7 @@
     $("execution-view").hidden = name !== "execution";
     $("show-activity").setAttribute("aria-pressed", String(name === "activity"));
     $("show-status").setAttribute("aria-pressed", String(name === "status"));
+    $("show-attention").setAttribute("aria-pressed", String(name === "attention"));
     $("show-objectives").setAttribute("aria-pressed", String(name === "objectives"));
     $("show-doctor").setAttribute("aria-pressed", String(name === "doctor"));
     $("show-providers").setAttribute("aria-pressed", String(name === "providers"));
@@ -1266,6 +1358,7 @@
       if (!objectiveInflight && !$("objectives-view").hidden) loadObjectives(true);
       if (!doctorInflight && !$("doctor-view").hidden) loadDoctor(true);
       if (!providersInflight && !$("providers-view").hidden) loadProviders(true);
+      if (!attentionInflight && !$("attention-view").hidden) loadAttention(true);
     }, POLL_MS);
   }
 
@@ -1291,6 +1384,10 @@
   $("period-more").addEventListener("click", loadMorePeriods);
   $("show-activity").addEventListener("click", () => setView("activity"));
   $("show-status").addEventListener("click", () => setView("status"));
+  $("show-attention").addEventListener("click", () => {
+    setView("attention");
+    loadAttention(Boolean(attentionSnapshot));
+  });
   $("show-objectives").addEventListener("click", () => {
     setView("objectives");
     loadObjectives(Boolean(objectivesSnapshot));
@@ -1321,6 +1418,11 @@
   $("provider-posture").addEventListener("change", renderProviders);
   $("provider-sort").addEventListener("change", renderProviders);
   $("providers-refresh").addEventListener("click", () => loadProviders(false));
+  $("attention-filters").addEventListener("submit", (event) => event.preventDefault());
+  $("attention-search").addEventListener("input", renderAttention);
+  $("attention-kind").addEventListener("change", renderAttention);
+  $("attention-sort").addEventListener("change", renderAttention);
+  $("attention-refresh").addEventListener("click", () => loadAttention(false));
   $("close-objective").addEventListener("click", closeObjective);
   $("auto").addEventListener("change", schedule);
   $("control-action").addEventListener("change", () => { clearControlPlan(); updateControlTarget(); });

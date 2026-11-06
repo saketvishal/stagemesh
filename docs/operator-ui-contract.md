@@ -602,6 +602,39 @@ The shared browser/desktop UI loads this route only when the Providers view is
 opened. It provides local search, capability/posture filters and deterministic
 sorting while preserving the same bounded snapshot and visibly stale last-good
 behavior. It exposes no provider invocation or cooldown-clear control.
+## Human-action queue snapshot
+
+`GET /api/v1/attention` uses `stagemesh.attention-queue/1`. It accepts no query
+parameters and shares the loopback, Bearer, `GET`-only, no-store and SQLite
+read-only/query-only boundary. It never migrates or writes the store, contacts an
+external service, invokes a provider, asks for notification permission, or infers
+that a person must act from an ordinary failure.
+
+The queue contains only two current durable fact types: a typed
+`BLOCKED_HUMAN_DECISION` for a task that is still blocked, and a recorded external
+delivery permission for the current candidate that has not been explicitly
+cleared. Recoverable operational blocks, provider cooldowns, policy-safety stops,
+historical failures and unknown approval coverage are excluded. The response
+states `human_action_only=true`, `operational_blocks_excluded=true`, and
+`approval_coverage=UNKNOWN`; missing records never establish permission or zero
+pending work.
+
+The projection scans at most 500 newest relevant decision events and returns at most 100 rows.
+`history_scan_limit`, `history_truncated`, `queue_limit`,
+`queue_total`, `queue_total_kind` and `truncated` make both bounds explicit. When
+the history scan is truncated, `queue_total_kind=LOWER_BOUND`; the browser says
+"at least" and never presents the count as exact. `counts` covers only the shown
+rows and is labelled by `counts_scope=SHOWN`.
+
+Each row contains only a stable opaque item identifier, safe task identifier,
+redacted bounded title and detail, fixed kind/reason code, current stage/status,
+validated candidate SHA, recorded timestamp, and `TASK_DETAIL` navigation hint.
+Raw audit payloads, commands, repository/config/workspace paths, URLs, provider
+output, environment values and credentials are never returned. The shared UI
+loads the queue only when Attention is opened, polls it only while visible,
+retains a last-good snapshot as visibly stale after retryable failure, exposes an
+accessible visible count, filters and sorts loaded rows, and restores focus after
+task detail. It remains a read-only notification surface.
 
 ## Execution detail snapshot
 
