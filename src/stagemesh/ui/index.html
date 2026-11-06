@@ -16,6 +16,12 @@
     <select id="project-switch" aria-describedby="project-switch-note"></select>
   </label>
   <span id="project-switch-note" class="muted"></span>
+  <span class="header-actions">
+    <button type="button" id="open-palette" aria-haspopup="dialog">Commands (p)</button>
+    <button type="button" id="open-shortcuts" aria-haspopup="dialog" aria-label="Keyboard shortcuts">Shortcuts (?)</button>
+    <button type="button" id="enable-notifications" aria-describedby="notification-status">Enable notifications</button>
+  </span>
+  <span id="notification-status" class="muted" role="status" aria-live="polite">Notifications are off.</span>
 </header>
 <nav aria-label="Operator views">
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
@@ -29,6 +35,26 @@
   <button type="button" id="show-task" aria-pressed="false" hidden>Task detail</button>
   <button type="button" id="show-execution" aria-pressed="false" hidden>Execution detail</button>
 </nav>
+<dialog id="command-palette" aria-labelledby="command-palette-heading">
+  <form id="command-palette-form" method="dialog">
+    <h2 id="command-palette-heading">Operator commands</h2>
+    <label>Find a command <input id="command-search" type="search" maxlength="80" autocomplete="off"></label>
+    <p id="command-empty" class="muted" role="status" hidden>No available command matches.</p>
+    <div id="command-list" role="list"></div>
+    <button type="button" id="close-palette">Close</button>
+  </form>
+</dialog>
+<dialog id="shortcut-help" aria-labelledby="shortcut-help-heading">
+  <h2 id="shortcut-help-heading">Keyboard shortcuts</h2>
+  <dl class="shortcut-list">
+    <div><dt><kbd>p</kbd></dt><dd>Open operator commands</dd></div>
+    <div><dt><kbd>?</kbd></dt><dd>Show this keyboard map</dd></div>
+    <div><dt><kbd>/</kbd></dt><dd>Focus the activity task filter</dd></div>
+    <div><dt><kbd>r</kbd></dt><dd>Refresh the visible view</dd></div>
+    <div><dt><kbd>Esc</kbd></dt><dd>Close a dialog, detail, objective, or history drill-down</dd></div>
+  </dl>
+  <button type="button" id="close-shortcuts">Close</button>
+</dialog>
 <main id="activity-view">
 <form id="filters" aria-label="Activity filters">
   <label>Period

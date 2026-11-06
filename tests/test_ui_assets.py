@@ -73,6 +73,8 @@ def test_ui_source_is_csp_safe_and_never_injects_html():
     assert "/api/v1/providers" in js
     assert "/api/v1/attention" in js
     assert "/api/v1/diagnostics" in js
+    assert "Notification.requestPermission" in js and "new window.Notification" in js
+    assert "showModal" in js and "VIEW_COMMANDS" in js
     assert "/api/v1/task?task_id=" in js and "/api/v1/execution?execution_id=" in js
     assert "include_task_history" in js and "include_retry_history" in js and "retry_state" in js
     assert "include_evidence_history" in js and "evidence_status" in js
@@ -96,6 +98,7 @@ def test_ui_covers_contract_states_and_filters():
         "Provider status and recorded use", "Executable discovery does not invoke a provider",
         "Human action required", "Operational failures and unknown approval coverage",
         "Execution diagnostics", "Raw logs, free-form results, commands, paths, provider output",
+        'id="command-palette"', 'id="shortcut-help"', 'id="enable-notifications"', "Keyboard shortcuts",
         "Recorded lifecycle timeline", "Validation, review and integration evidence",
         "Claim ownership and cleanup", "Exact-candidate evidence",
     ):

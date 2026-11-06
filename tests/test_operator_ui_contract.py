@@ -121,7 +121,20 @@ def test_documents_bounded_human_action_queue_and_non_inference_boundary():
         "`BLOCKED_HUMAN_DECISION`", "`approval_coverage=UNKNOWN`",
         "`queue_total_kind=LOWER_BOUND`", "at most 500", "at most 100 rows",
         "Recoverable operational blocks", "missing records never establish permission",
-        "polls it only while visible", "read-only notification surface",
+        "explicitly enables", "never requests notification permission on load",
+        "generic count", "deduplicates subsequent rows", "in memory",
+    ):
+        assert phrase in DOC, phrase
+
+
+def test_documents_cross_platform_desktop_palette_and_launcher_privacy():
+    for phrase in (
+        "Windows, macOS and Linux",
+        "without a shell",
+        "never an executable or filesystem path",
+        "command palette",
+        "does not evaluate text",
+        "Browser-reserved shortcuts are not required",
     ):
         assert phrase in DOC, phrase
 
@@ -146,7 +159,8 @@ def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
         "test_operator_providers_api.py",
         "test_operator_attention_api.py",
         "test_operator_diagnostics_api.py",
-        "test_activity.py", "test_api_server.py",
+        "test_activity.py", "test_api_server.py", "test_ui_launcher.py",
+        "test_ui_assets.py", "test_ui_browser_behavior.py",
     ):
         assert module in windows, f"windows job omits {module}"
         assert module in linux, f"linux job omits {module}"

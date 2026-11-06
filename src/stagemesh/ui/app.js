@@ -30,11 +30,113 @@
   let diagnosticsSnapshot = null, diagnosticsGeneration = 0, diagnosticsLastGood = null, diagnosticsInflight = false;
   let controlCapabilities = null, controlIntent = null, controlBusy = false;
   let projectTargets = new Map();
+  let paletteOpener = null, shortcutsOpener = null;
+  let notificationsEnabled = false, attentionBaselineReady = false;
+  let knownAttentionKeys = new Set();
+
+  const VIEW_COMMANDS = [
+    ["Activity", "show-activity"], ["Status", "show-status"], ["Attention", "show-attention"],
+    ["Diagnostics", "show-diagnostics"], ["Objectives", "show-objectives"], ["Doctor", "show-doctor"],
+    ["Providers", "show-providers"], ["Control", "show-control"], ["Task detail", "show-task"],
+    ["Execution detail", "show-execution"],
+  ];
 
   function setMessage(text, level) {
     const el = $("message");
     el.textContent = text;
     el.className = level || "";
+  }
+
+  function attentionKey(item) {
+    return [item.task_id, item.kind, item.reason_code, item.recorded_at].join("|");
+  }
+
+  function observeAttentionForNotifications(projection) {
+    const next = new Set(projection.items.map(attentionKey));
+    if (!attentionBaselineReady) {
+      knownAttentionKeys = next;
+      attentionBaselineReady = true;
+      return;
+    }
+    const fresh = [...next].filter((key) => !knownAttentionKeys.has(key)).length;
+    knownAttentionKeys = next;
+    if (!notificationsEnabled || fresh === 0 || !("Notification" in window)) return;
+    new window.Notification("StageMesh needs attention", {
+      body: fresh + " new recorded human-action condition" + (fresh === 1 ? "." : "s."),
+      tag: "stagemesh-attention",
+    });
+  }
+
+  async function enableNotifications() {
+    const status = $("notification-status");
+    if (!("Notification" in window)) {
+      status.textContent = "Notifications are unavailable in this browser.";
+      $("enable-notifications").disabled = true;
+      return;
+    }
+    let permission = window.Notification.permission;
+    try {
+      if (permission === "default") permission = await window.Notification.requestPermission();
+    } catch (_error) {
+      notificationsEnabled = false;
+      status.textContent = "Notifications could not be enabled.";
+      return;
+    }
+    if (permission !== "granted") {
+      notificationsEnabled = false;
+      status.textContent = permission === "denied" ? "Notifications were denied." : "Notifications remain off.";
+      return;
+    }
+    notificationsEnabled = true;
+    status.textContent = "Notifications are enabled for new typed human-action conditions.";
+    $("enable-notifications").textContent = "Notifications enabled";
+    loadAttention(false);
+  }
+
+  function renderCommands() {
+    const query = $("command-search").value.trim().toLocaleLowerCase();
+    const list = $("command-list");
+    list.replaceChildren();
+    let shown = 0;
+    for (const [label, targetId] of VIEW_COMMANDS) {
+      const target = $(targetId);
+      if (target.hidden || (query && !label.toLocaleLowerCase().includes(query))) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Open " + label;
+      button.addEventListener("click", () => {
+        paletteOpener = null;
+        $("command-palette").close();
+        target.click();
+        target.focus();
+      });
+      const item = document.createElement("div");
+      item.setAttribute("role", "listitem");
+      item.append(button);
+      list.append(item);
+      shown += 1;
+    }
+    $("command-empty").hidden = shown !== 0;
+  }
+
+  function openPalette(opener) {
+    if ($("command-palette").open) return;
+    paletteOpener = opener || document.activeElement;
+    $("command-search").value = "";
+    renderCommands();
+    $("command-palette").showModal();
+    $("command-search").focus();
+  }
+
+  function closePalette() {
+    if ($("command-palette").open) $("command-palette").close();
+  }
+
+  function openShortcuts(opener) {
+    if ($("shortcut-help").open) return;
+    shortcutsOpener = opener || document.activeElement;
+    $("shortcut-help").showModal();
+    $("close-shortcuts").focus();
   }
 
   function periodRange() {
@@ -273,6 +375,7 @@
       if (mine !== attentionGeneration) return;
       attentionSnapshot = projection;
       attentionLastGood = new Date();
+      observeAttentionForNotifications(projection);
       renderAttention();
     } catch (error) {
       if (mine !== attentionGeneration) return;
@@ -1460,7 +1563,7 @@
       if (!objectiveInflight && !$("objectives-view").hidden) loadObjectives(true);
       if (!doctorInflight && !$("doctor-view").hidden) loadDoctor(true);
       if (!providersInflight && !$("providers-view").hidden) loadProviders(true);
-      if (!attentionInflight && !$("attention-view").hidden) loadAttention(true);
+      if (!attentionInflight && (!$("attention-view").hidden || notificationsEnabled)) loadAttention(true);
       if (!diagnosticsInflight && !$("diagnostics-view").hidden) loadDiagnostics(true);
     }, POLL_MS);
   }
@@ -1547,11 +1650,28 @@
     $("control-plan").focus();
   });
   $("project-switch").addEventListener("change", switchProject);
+  $("open-palette").addEventListener("click", (event) => openPalette(event.currentTarget));
+  $("close-palette").addEventListener("click", closePalette);
+  $("command-search").addEventListener("input", renderCommands);
+  $("command-palette-form").addEventListener("submit", (event) => event.preventDefault());
+  $("command-palette").addEventListener("close", () => {
+    if (paletteOpener && paletteOpener.isConnected) paletteOpener.focus();
+  });
+  $("open-shortcuts").addEventListener("click", (event) => openShortcuts(event.currentTarget));
+  $("close-shortcuts").addEventListener("click", () => $("shortcut-help").close());
+  $("shortcut-help").addEventListener("close", () => {
+    if (shortcutsOpener && shortcutsOpener.isConnected) shortcutsOpener.focus();
+  });
+  $("enable-notifications").addEventListener("click", enableNotifications);
   document.addEventListener("keydown", (event) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     if (event.ctrlKey || event.metaKey || event.altKey || typing) return;
-    if (event.key === "/") { event.preventDefault(); $("task").focus(); }
+    if (event.key === "p") { event.preventDefault(); openPalette(document.activeElement); }
+    else if (event.key === "?") { event.preventDefault(); openShortcuts(document.activeElement); }
+    else if (event.key === "/") { event.preventDefault(); $("task").focus(); }
     else if (event.key === "r") refresh();
+    else if (event.key === "Escape" && $("command-palette").open) closePalette();
+    else if (event.key === "Escape" && $("shortcut-help").open) $("shortcut-help").close();
     else if (event.key === "Escape" && !$("execution-view").hidden) closeExecution();
     else if (event.key === "Escape" && !$("task-view").hidden) closeTask();
     else if (event.key === "Escape" && !$("objective-detail").hidden) closeObjective();
@@ -1561,6 +1681,10 @@
   updateControlTarget();
   loadControlCapabilities();
   loadProjectProjection();
+  if (!("Notification" in window)) {
+    $("notification-status").textContent = "Notifications are unavailable in this browser.";
+    $("enable-notifications").disabled = true;
+  }
   loadRange(false);
   loadObjectives(false);
   schedule();
