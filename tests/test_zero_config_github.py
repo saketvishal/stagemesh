@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 import stagemesh.cli as cli_module
+import stagemesh.github as github_module
+from stagemesh.github import detect_github_repository
 from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource
 
 
@@ -34,6 +36,37 @@ def _prepared_contract(project: Path, task: str) -> None:
     directory = project / ".stagemesh/contracts"
     directory.mkdir(exist_ok=True)
     (directory / f"{task}.json").write_text(json.dumps(FAKE_CONTRACT), encoding="utf-8")
+
+
+def test_repository_detection_reuses_unchanged_local_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _github_project(tmp_path)
+    github_module._detect_github_repository_cached.cache_clear()
+    real_run = github_module.subprocess.run
+    calls: list[list[str]] = []
+
+    def counted(*args, **kwargs):
+        calls.append(args[0])
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(github_module.subprocess, "run", counted)
+    found = detect_github_repository(project)
+    assert found is not None and (found.owner, found.repo) == ("acme", "widgets")
+    found = detect_github_repository(project)
+    assert found is not None and (found.owner, found.repo) == ("acme", "widgets")
+    assert len(calls) == 1
+
+
+def test_repository_detection_invalidates_when_remote_changes(tmp_path: Path) -> None:
+    project = _github_project(tmp_path)
+    github_module._detect_github_repository_cached.cache_clear()
+    found = detect_github_repository(project)
+    assert found is not None and (found.owner, found.repo) == ("acme", "widgets")
+    _git(project, "remote", "set-url", "origin", "https://github.com/acme/changed.git")
+    found = detect_github_repository(project)
+    assert found is not None and (found.owner, found.repo) == ("acme", "changed")
 
 
 def test_init_persists_detected_github_origin_as_the_ready_issue_source(

@@ -17,6 +17,9 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import platform
+import signal
 import subprocess
 import sys
 import time
@@ -31,6 +34,7 @@ from stagemesh.regression_orchestrator import (
     PytestDuration,
     RegressionOrchestrator,
     RunIdentity,
+    _popen_session_kwargs,
     build_default_lanes,
     parse_collected_nodeids,
     parse_pytest_counts,
@@ -62,6 +66,59 @@ def test_unknown_tier_classification_fails_closed() -> None:
     # In collection validation, it must also fail closed
     with pytest.raises(ValueError, match="lack tier classification"):
         validate_catalog([fake_test], allow_uncollected_catalog_entries=True)
+
+
+def test_lane_subprocesses_use_interrupt_isolated_process_groups() -> None:
+    kwargs = _popen_session_kwargs()
+    if platform.system() == "Windows":
+        assert kwargs == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        assert kwargs == {"start_new_session": True}
+
+
+def test_real_parent_interrupt_writes_partial_report_and_stops_lane(tmp_path: Path) -> None:
+    slow_test = tmp_path / "test_slow.py"
+    marker = tmp_path / "lane-started"
+    slow_test.write_text(
+        "import time\nfrom pathlib import Path\n"
+        f"def test_slow():\n    Path({str(marker)!r}).write_text('started')\n    time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    journal = tmp_path / "journal.jsonl"
+    report = tmp_path / "report.json"
+    code = (
+        "from pathlib import Path\n"
+        "from stagemesh.regression_orchestrator import Lane, RegressionOrchestrator\n"
+        "from stagemesh.test_taxonomy import TestTier\n"
+        f"root=Path({str(tmp_path)!r})\n"
+        f"target={str(slow_test)!r}+'::test_slow'\n"
+        f"lane=Lane('slow',TestTier.INTEGRATION_PROCESS,True,(target,),60.0)\n"
+        f"o=RegressionOrchestrator(lanes=(lane,),jobs=1,repo_root=root,journal_path=Path({str(journal)!r}),report_path=Path({str(report)!r}))\n"
+        "o._audit_collection=lambda:{'canonical_count':1,'canonical_sha256':'abc','file_counts':{target.split('::',1)[0]:1}}\n"
+        "o._build_execution_lanes=lambda:(lane,)\n"
+        "raise SystemExit(o.run())\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    kwargs = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        if platform.system() == "Windows"
+        else {"start_new_session": True}
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code], env=env, **kwargs)
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "orchestrator did not start its lane"
+        proc.send_signal(
+            signal.CTRL_BREAK_EVENT if platform.system() == "Windows" else signal.SIGINT
+        )
+        assert proc.wait(timeout=30) == 130
+        assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "INTERRUPTED"
+    finally:
+        if proc.poll() is None:
+            kill_process_tree(proc.pid)
 
 
 def test_duplicate_classification_fails_closed() -> None:
@@ -215,13 +272,23 @@ def test_lane_timeout_terminates_process_and_marks_failure(tmp_path: Path) -> No
         timeout_seconds=0.8,
     )
 
-    orchestrator = RegressionOrchestrator(lanes=(lane,), jobs=1, repo_root=tmp_path)
+    journal = tmp_path / "timeout.jsonl"
+    orchestrator = RegressionOrchestrator(
+        lanes=(lane,),
+        jobs=1,
+        repo_root=tmp_path,
+        journal_path=journal,
+    )
     res = orchestrator._execute_lane(lane, worker_id=0)
 
     assert res.passed is False
     assert res.timed_out is True
     assert res.returncode == 124
     assert "timeout" in res.error_message.lower()
+    record = json.loads(journal.read_text(encoding="utf-8"))
+    assert record["timed_out"] is True
+    assert "timeout" in record["error_message"].lower()
+    assert set(record) >= {"stdout", "stderr"}
 
 
 def test_stale_resume_refused_on_mismatched_identity(tmp_path: Path) -> None:

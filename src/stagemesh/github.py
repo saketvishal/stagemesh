@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -88,11 +90,11 @@ class UrlLibGitHubTransport:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
-def _bounded_response(response, max_bytes: int) -> tuple[int, dict[str, str], bytes]:  # noqa: ANN001
+def _bounded_response(response, max_bytes: int) -> tuple[int, dict[str, str], bytes]:
     raw = response.read(max_bytes + 1)
     headers = dict(response.headers)
     if len(raw) > max_bytes:
@@ -169,10 +171,57 @@ def parse_retry_after(value: str | None, default: float = 60) -> float:
     return parsed if parsed >= 0 else default
 
 
-def detect_github_repository(project: Path, remote: str = "origin") -> GitHubRepository | None:
+def _repository_config_digest(project: Path) -> str | None:
+    """Digest repository-local config so cached remote detection invalidates on change."""
+    dotgit = project.resolve() / ".git"
+    try:
+        if dotgit.is_dir():
+            gitdir = dotgit
+        elif dotgit.is_file():
+            prefix, raw_target = dotgit.read_text(encoding="utf-8").strip().split(":", 1)
+            if prefix != "gitdir":
+                return None
+            target = Path(raw_target.strip())
+            gitdir = (target if target.is_absolute() else dotgit.parent / target).resolve()
+        else:
+            return None
+        commondir_file = gitdir / "commondir"
+        if commondir_file.is_file():
+            raw_common = Path(commondir_file.read_text(encoding="utf-8").strip())
+            common = (raw_common if raw_common.is_absolute() else gitdir / raw_common).resolve()
+        else:
+            common = gitdir
+        return hashlib.sha256((common / "config").read_bytes()).hexdigest()
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+@lru_cache(maxsize=256)
+def _detect_github_repository_cached(
+    project: str,
+    remote: str,
+    _config_digest: str,
+) -> GitHubRepository | None:
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={project.resolve().as_posix()}", "remote", "get-url", remote],
+        ["git", "-c", f"safe.directory={Path(project).as_posix()}", "remote", "get-url", remote],
         cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return parse_github_remote(result.stdout.strip(), remote)
+
+
+def detect_github_repository(project: Path, remote: str = "origin") -> GitHubRepository | None:
+    resolved = Path(project).resolve()
+    digest = _repository_config_digest(resolved)
+    if digest is not None:
+        return _detect_github_repository_cached(str(resolved), remote, digest)
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={resolved.as_posix()}", "remote", "get-url", remote],
+        cwd=resolved,
         text=True,
         capture_output=True,
         check=False,

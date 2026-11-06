@@ -596,9 +596,10 @@ def candidate_hygiene_findings(project: Path, candidate_sha: str, changed: list[
 
 def changed_files(project: Path, candidate_sha: str, baseline_sha: str | None = None) -> list[str]:
     workspace = GitWorkspace(project)
-    workspace.run("cat-file", "-e", f"{candidate_sha}^{{commit}}")
     if baseline_sha:
-        workspace.run("cat-file", "-e", f"{baseline_sha}^{{commit}}")
+        # `git diff` resolves and validates both commits itself. Separate
+        # `cat-file` probes doubled Windows process creation without adding a
+        # stronger fail-closed condition.
         output = workspace.run("diff", "--name-status", "-M", baseline_sha, candidate_sha).stdout
     else:
         parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
@@ -613,7 +614,6 @@ def changed_files(project: Path, candidate_sha: str, baseline_sha: str | None = 
 def changed_line_count(project: Path, candidate_sha: str, baseline_sha: str | None = None) -> int:
     workspace = GitWorkspace(project)
     if baseline_sha:
-        workspace.run("cat-file", "-e", f"{baseline_sha}^{{commit}}")
         output = workspace.run("diff", "--numstat", baseline_sha, candidate_sha).stdout
     else:
         parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
@@ -634,7 +634,6 @@ def changed_line_count(project: Path, candidate_sha: str, baseline_sha: str | No
 @contextmanager
 def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
     workspace = GitWorkspace(project)
-    workspace.run("cat-file", "-e", f"{candidate_sha}^{{commit}}")
     temp_root = Path(tempfile.mkdtemp(prefix="stagemesh-candidate-"))
     target = temp_root / "checkout"
     retain = False

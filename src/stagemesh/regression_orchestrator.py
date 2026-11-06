@@ -13,13 +13,14 @@ import math
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import threading
 import time
 from collections import Counter
 from collections.abc import Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -37,9 +38,16 @@ from .test_taxonomy import (
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT_SLOWEST_TEST_LIMIT = 50
-MAX_LOCAL_WORKERS = 24
+MAX_LOCAL_WORKERS = 16
 TARGET_BATCH_SECONDS = 600.0
 BATCHES_PER_WORKER_AND_TIER = 2
+
+
+def _popen_session_kwargs() -> dict[str, object]:
+    """Separate lane process groups so parent interruption can preserve evidence."""
+    if platform.system() == "Windows":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 @dataclass(frozen=True)
@@ -367,7 +375,7 @@ class RegressionOrchestrator:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=platform.system() != "Windows",
+            **_popen_session_kwargs(),
         )
         self._register_process(process)
         try:
@@ -690,7 +698,7 @@ class RegressionOrchestrator:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                start_new_session=platform.system() != "Windows",
+                **_popen_session_kwargs(),
             )
             self._register_process(proc)
             stdout, stderr = proc.communicate(timeout=lane.timeout_seconds)
@@ -740,7 +748,7 @@ class RegressionOrchestrator:
             test_durations=test_durations,
         )
 
-        self._append_journal({
+        journal_record: dict[str, object] = {
             "event": "lane_completed",
             "lane_id": lane.lane_id,
             "tier": str(lane.tier),
@@ -753,22 +761,42 @@ class RegressionOrchestrator:
             "subtests_passed": subtests_passed,
             "timed_out": timed_out,
             "test_durations": [asdict(item) for item in test_durations],
-        })
+        }
+        if not passed:
+            journal_record["stdout"] = stdout[-20_000:]
+            journal_record["stderr"] = stderr[-20_000:]
+            journal_record["error_message"] = error_msg
+        self._append_journal(journal_record)
 
         return result
 
     def run(self) -> int:
         """Execute the regression orchestrator."""
+        previous_break_handler: object | None = None
+        if (
+            platform.system() == "Windows"
+            and threading.current_thread() is threading.main_thread()
+        ):
+            previous_break_handler = signal.getsignal(signal.SIGBREAK)
+
+            def interrupt_parent(_signum: int, _frame: object) -> None:
+                raise KeyboardInterrupt
+
+            signal.signal(signal.SIGBREAK, interrupt_parent)
         try:
             self._run_lock.acquire()
         except RuntimeError as exc:
             print(f"Orchestrator configuration error: {exc}", file=sys.stderr)
             self._pool_isolation.cleanup()
+            if previous_break_handler is not None:
+                signal.signal(signal.SIGBREAK, previous_break_handler)
             return 2
         try:
             return self._run_locked()
         finally:
             self._run_lock.release()
+            if previous_break_handler is not None:
+                signal.signal(signal.SIGBREAK, previous_break_handler)
 
     def _run_locked(self) -> int:
         """Execute one identity-bound run while holding the repository run lock."""
@@ -914,13 +942,20 @@ class RegressionOrchestrator:
                     pool.submit(run_worker_task, lane): lane for lane in parallel_lanes
                 }
                 try:
-                    for future in as_completed(future_map):
-                        lane = future_map[future]
-                        try:
-                            result = future.result()
-                        except Exception as exc:  # noqa: BLE001 - worker boundary becomes evidence
-                            result = unexpected_result(lane, exc)
-                        record_result(lane, result)
+                    pending = set(future_map)
+                    while pending:
+                        completed, pending = wait(
+                            pending,
+                            timeout=0.2,
+                            return_when=FIRST_COMPLETED,
+                        )
+                        for future in completed:
+                            lane = future_map[future]
+                            try:
+                                result = future.result()
+                            except Exception as exc:  # noqa: BLE001 - worker boundary becomes evidence
+                                result = unexpected_result(lane, exc)
+                            record_result(lane, result)
                 except KeyboardInterrupt:
                     interrupted = True
                     self._terminate_active_processes()

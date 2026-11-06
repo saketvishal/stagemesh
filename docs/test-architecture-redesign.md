@@ -14,7 +14,7 @@ Before executing tests, the runner performs canonical pytest collection and inde
 
 `src/stagemesh/test_taxonomy.py` is the reviewed file manifest. New or renamed test files fail closed until classified. The tier names describe execution and isolation contracts; they do not claim that every file is a pure unit test. After the file-level audit, tests are packed into deterministic runtime-balanced batches, with at most two batches per worker and parallel tier. Only measured files above the ten-minute batch target are split, into stable contiguous node-ID ranges; this replaces the former blanket twelve-test sharding while retaining enough work stealing for slow files. The exact node-ID union is checked and native-platform tests remain in one explicitly serial batch.
 
-When `--jobs` is omitted locally, the runner uses up to 24 workers subject to the host CPU count. Hosted jobs pass an explicit reviewed worker count for their runner size. Historical Windows phase durations are scheduling hints only: they are provenance-labelled in the taxonomy, are included in the catalog digest, and never substitute for current collection or result evidence. Unknown files fall back to live node counts.
+When `--jobs` is omitted locally, the runner uses up to 16 workers subject to the host CPU count. A measured 24-worker run saturated Windows process creation and produced widespread 900-second lane timeouts, so using every logical CPU is explicitly rejected. Hosted jobs pass an explicit reviewed worker count for their runner size. Historical Windows phase durations are scheduling hints only: they are provenance-labelled in the taxonomy, are included in the catalog digest, and never substitute for current collection or result evidence. Unknown files fall back to live node counts.
 
 ## Isolation and safety
 
@@ -42,10 +42,14 @@ Hosted full mode runs this entry point once on Windows and once on Linux and upl
 
 The last accepted pre-redesign complete local Windows baseline is bound to commit `123aa659`: 4,276 collected outcomes (`4247 passed, 3 skipped, 26 subtests passed`) in 6,451.68 seconds on Windows. That record did not retain trustworthy per-file durations, so no baseline slow-file ranking is claimed.
 
+An exact clean run of candidate `3e4ec444` rejected the initial 24-worker policy. It collected 4,334 node IDs, then produced one contention-sensitive soak failure and thirteen 900-second integration/component timeouts in its first 36 of 164 lanes. The run was deliberately interrupted rather than spending another hour after the verdict was already irrecoverably failed. Its append-only journal was preserved; Windows console interruption exposed and led to a separate process-group and responsive-parent fix. This is negative evidence, not an accepted performance result.
+
+On the same machine, the isolated Git/process hotspot `test_provider_timeout_falls_through_and_is_scoped_to_the_task` took 49.82 seconds on clean `3e4ec444`. Combining workspace status/HEAD observation, resolving worktree Git directories without a subprocess, collecting identity config once, caching repository detection against the local-config digest, and removing redundant object probes reduced the same test to 31.96 seconds (35.9%). The optimized candidate also passed 117 focused identity/ownership tests, 35 contract tests, the exact failed soak file's 57 tests, and a real Windows Ctrl-Break partial-report test. These focused results justify the implementation direction but do not replace a complete exact-head run.
+
 The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
 
 - canonical collection equals the duplicate-free audited union;
-- all 4,334 currently collected outcomes are accounted for, including the existing skips;
+- every currently collected outcome is accounted for, including the existing skips;
 - no lane fails or times out;
 - wall time is at most 1,800 seconds;
 - no competing StageMesh regression process ran during the measurement.
