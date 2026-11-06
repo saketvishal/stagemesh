@@ -60,6 +60,8 @@ The complete run on `a023201` then rejected the remaining mixed-concurrency and 
 
 The eight-worker run on `33f5a12` passed every first-wave integration lane that had previously timed out, but rejected one final taxonomy assumption: two sub-15-second assertions in `test_provider_outage_recovery.py` took 32–38 seconds while sharing the host, then the complete file passed alone (13 tests in 33.37 seconds). That file is now in an explicit serial-timing tier; its real clock and timing bounds are unchanged.
 
+The corrected exact serial-timing tier on `751c460` passed all 13 outcomes in one lane, with complete accounting, in 61.37 seconds. This is accepted evidence for that tier only; complete acceptance still requires the full exact-head report.
+
 The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
 
 - canonical collection equals the duplicate-free audited union;
