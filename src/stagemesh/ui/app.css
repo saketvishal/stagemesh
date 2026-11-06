@@ -1,8 +1,9 @@
 :root { color-scheme: light dark; --fg: #1b1f24; --bg: #fff; --muted: #57606a; --line: #d0d7de; --accent: #0550ae; --warn: #7d4e00; --bad: #a40e26; --good: #116329; }
 @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --bg: #0d1117; --muted: #9da7b3; --line: #30363d; --accent: #79c0ff; --warn: #e3b341; --bad: #ff7b72; --good: #56d364; } }
 body { margin: 0; padding: 0 1rem 2rem; font: 14px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
-header { display: flex; gap: 1rem; align-items: baseline; }
-nav { display: flex; gap: .5rem; padding-bottom: .5rem; border-bottom: 1px solid var(--line); }
+header { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; }
+.header-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-left: auto; }
+nav { position: sticky; top: 0; z-index: 5; display: flex; gap: .5rem; padding: .5rem 0; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--bg); }
 nav button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 h1 { font-size: 1.2rem; }
 h2 { font-size: 1.1rem; margin-top: 1.5rem; }
@@ -20,6 +21,7 @@ label.inline { flex-direction: row; align-items: center; gap: .3rem; }
 input, select, button { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: .25rem .4rem; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
 table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
+main { max-width: 100%; overflow-x: auto; }
 th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 28rem; }
 th button { all: unset; cursor: pointer; font-weight: 600; }
 th button:focus-visible { outline: 3px solid var(--accent); }
@@ -29,6 +31,15 @@ td button:focus-visible { outline: 3px solid var(--accent); }
 #control-form { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin: 1rem 0; }
 #control-plan-view { border: 2px solid var(--line); border-radius: 6px; padding: 1rem; max-width: 60rem; }
 #objective-detail { margin-top: 1rem; border: 1px solid var(--line); border-radius: 6px; padding: 0 1rem 1rem; }
+dialog { width: min(38rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow: auto; color: var(--fg); background: var(--bg); border: 2px solid var(--line); border-radius: 8px; }
+dialog::backdrop { background: rgb(0 0 0 / .45); }
+#command-palette-form { display: block; border: 0; padding: 0; }
+#command-palette-form label { margin-bottom: .75rem; }
+#command-list { display: grid; gap: .35rem; margin: .5rem 0 1rem; }
+#command-list button { width: 100%; text-align: left; padding: .5rem; }
+.shortcut-list div { display: grid; grid-template-columns: 4rem 1fr; gap: .5rem; padding: .35rem 0; }
+.shortcut-list dd { margin: 0; }
+kbd { border: 1px solid var(--line); border-radius: 3px; padding: .1rem .3rem; }
 #control-result.error { color: var(--bad); }
 #control-result.ok { color: var(--good); }
 .state-open::before { content: "\25CB  "; }
@@ -37,3 +48,10 @@ td button:focus-visible { outline: 3px solid var(--accent); }
 #message.error, #objectives-message.error, #doctor-summary.error, #providers-message.error, #attention-summary.error, #diagnostics-summary.error { color: var(--bad); font-weight: 600; }
 .sr, .skip:not(:focus) { position: absolute; left: -9999px; }
 [hidden] { display: none !important; }
+@media (max-width: 48rem) {
+  body { padding-inline: .5rem; }
+  header { align-items: stretch; }
+  .header-actions { width: 100%; margin-left: 0; }
+  nav button { flex: 0 0 auto; }
+  th, td { max-width: 14rem; }
+}

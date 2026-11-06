@@ -45,7 +45,24 @@ DRIVER = r"""
   }
   const realFetch = window.fetch.bind(window);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const control = { held: [], hold: null, fail: false, attentionFail: false, diagnosticsFail: false, executionAuth: false, dropKey: null, log: [] };
+  const notificationLog = [];
+  let notificationRequests = 0;
+  if (scenario === "desktopUnavailable") {
+    delete window.Notification;
+  } else if (scenario === "desktopShell" || scenario === "desktopDenied" || scenario === "desktopPermissionError") {
+    class FakeNotification {
+      static permission = "default";
+      static async requestPermission() {
+        notificationRequests += 1;
+        if (scenario === "desktopPermissionError") throw new Error("test-only permission failure");
+        FakeNotification.permission = scenario === "desktopDenied" ? "denied" : "granted";
+        return FakeNotification.permission;
+      }
+      constructor(title, options) { notificationLog.push({title, body: options.body, tag: options.tag}); }
+    }
+    Object.defineProperty(window, "Notification", {value: FakeNotification, configurable: true});
+  }
+  const control = { held: [], hold: null, fail: false, attentionFail: false, attentionExtra: false, diagnosticsFail: false, executionAuth: false, dropKey: null, log: [] };
   const release = () => { control.hold = null; control.held.splice(0).forEach((r) => r()); };
   // Test-only wrapper around the page's real fetch: it can withhold, fail or alter ACTUAL server responses.
   window.fetch = async (url, opts) => {
@@ -68,6 +85,11 @@ DRIVER = r"""
     }
     const res = await realFetch(url, opts);
     if (control.hold && control.hold(u)) { control.log.push("held " + u); await new Promise((r) => control.held.push(r)); }
+    if (attention && control.attentionExtra) {
+      const body = await res.json();
+      if (body.items.length) body.items.push({...body.items[0], task_id: "new-recorded-action", recorded_at: "2099-01-01T00:00:00Z"});
+      return new Response(JSON.stringify(body), {status: res.status, headers: {"Content-Type": "application/json"}});
+    }
     if (!activity) return res;
     if (control.dropKey) {
       const body = await res.json();
@@ -86,6 +108,66 @@ DRIVER = r"""
   };
 
   const scenarios = {
+    async desktopShell() {
+      await until(() => rows() > 0, "initial activity");
+      out.defaultNotificationRequests = notificationRequests;
+      out.defaultNotificationStatus = $("notification-status").textContent;
+      document.body.focus();
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "p", bubbles: true}));
+      out.paletteOpen = $("command-palette").open;
+      out.paletteFocus = document.activeElement === $("command-search");
+      $("command-search").value = "diagnostics";
+      $("command-search").dispatchEvent(new Event("input", {bubbles: true}));
+      out.paletteMatches = $("command-list").querySelectorAll("button").length;
+      $("command-list").querySelector("button").click();
+      out.diagnosticsVisible = !$("diagnostics-view").hidden;
+      out.commandFocus = document.activeElement === $("show-diagnostics");
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "?", bubbles: true}));
+      out.helpOpen = $("shortcut-help").open;
+      out.helpFocus = document.activeElement === $("close-shortcuts");
+      $("close-shortcuts").click();
+      await sleep(0);
+      out.helpReturnFocus = document.activeElement === $("show-diagnostics");
+      $("diagnostics-search").focus();
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "p", bubbles: true}));
+      out.typingGuard = !$("command-palette").open;
+      $("enable-notifications").click();
+      await until(() => notificationRequests === 1 && control.log.some((entry) => entry.startsWith("attention ")), "notification opt-in baseline");
+      out.notificationRequests = notificationRequests;
+      out.notificationStatus = $("notification-status").textContent;
+      out.notificationsAfterBaseline = notificationLog.length;
+      control.attentionExtra = true;
+      $("attention-refresh").click();
+      await until(() => notificationLog.length === 1, "new attention notification");
+      $("attention-refresh").click();
+      await sleep(200);
+      out.notificationsAfterRepeat = notificationLog.length;
+      out.notification = notificationLog[0];
+    },
+
+    async desktopDenied() {
+      out.requestsBeforeClick = notificationRequests;
+      $("enable-notifications").click();
+      await until(() => notificationRequests === 1, "denied notification request");
+      out.requestsAfterClick = notificationRequests;
+      out.status = $("notification-status").textContent;
+      out.notifications = notificationLog.length;
+    },
+
+    async desktopUnavailable() {
+      out.disabled = $("enable-notifications").disabled;
+      out.status = $("notification-status").textContent;
+      out.requests = notificationRequests;
+    },
+
+    async desktopPermissionError() {
+      $("enable-notifications").click();
+      await until(() => notificationRequests === 1, "notification permission failure");
+      await sleep(0);
+      out.status = $("notification-status").textContent;
+      out.notifications = notificationLog.length;
+    },
+
     async main() {
       await until(() => rows() === 100, "first page");
       out.first = rows();
@@ -887,6 +969,40 @@ def test_provider_view_distinguishes_recorded_invocation_and_never_probes_provid
     assert result["invokedRows"] == 2
     assert result["emptyRows"] == 0 and "No loaded providers match" in result["emptyMessage"]
     assert result["refreshed"] is True
+
+
+def test_desktop_palette_keyboard_map_and_explicit_notifications_are_bounded(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "desktopShell", tmp_path)
+    assert result["paletteOpen"] is True and result["paletteFocus"] is True
+    assert result["paletteMatches"] == 1 and result["diagnosticsVisible"] is True and result["commandFocus"] is True
+    assert result["helpOpen"] is True and result["helpFocus"] is True and result["helpReturnFocus"] is True
+    assert result["typingGuard"] is True
+    assert result["defaultNotificationRequests"] == 0 and "off" in result["defaultNotificationStatus"]
+    assert result["notificationRequests"] == 1 and "enabled" in result["notificationStatus"]
+    assert result["notificationsAfterBaseline"] == 0 and result["notificationsAfterRepeat"] == 1
+    assert result["notification"] == {
+        "title": "StageMesh needs attention",
+        "body": "1 new recorded human-action condition.",
+        "tag": "stagemesh-attention",
+    }
+    assert "Status task" not in str(result["notification"])
+
+
+def test_notification_denial_is_explicit_and_never_emits(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "desktopDenied", tmp_path)
+    assert result["requestsBeforeClick"] == 0 and result["requestsAfterClick"] == 1
+    assert result["status"] == "Notifications were denied." and result["notifications"] == 0
+
+
+def test_notification_unavailable_state_never_prompts(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "desktopUnavailable", tmp_path)
+    assert result["disabled"] is True and "unavailable" in result["status"] and result["requests"] == 0
+
+
+def test_notification_permission_failure_is_bounded(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "desktopPermissionError", tmp_path)
+    assert result["status"] == "Notifications could not be enabled."
+    assert result["notifications"] == 0
 
 
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):

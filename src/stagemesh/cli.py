@@ -3332,8 +3332,8 @@ def command_serve(args: argparse.Namespace) -> int:
 def command_ui(args: argparse.Namespace) -> int:
     from .api_server import make_server
     from .operator_doctor import ProjectDoctor
-    from .operator_providers import ProviderStatusProjection
     from .operator_projects import ProjectProjection, ProjectTarget
+    from .operator_providers import ProviderStatusProjection
     from .ui_launcher import UiLaunchError, launch_ui
 
     project = Path(args.project).resolve()
@@ -3415,7 +3415,7 @@ def command_ui(args: argparse.Namespace) -> int:
     if args.json:
         print(
             json.dumps(
-                {"url": base_url, "port": port, "launch_method": launched.method, "executable": launched.executable},
+                {"url": base_url, "port": port, "launch_method": launched.method, "application": launched.application},
                 indent=2,
                 sort_keys=True,
             ),

@@ -631,10 +631,16 @@ redacted bounded title and detail, fixed kind/reason code, current stage/status,
 validated candidate SHA, recorded timestamp, and `TASK_DETAIL` navigation hint.
 Raw audit payloads, commands, repository/config/workspace paths, URLs, provider
 output, environment values and credentials are never returned. The shared UI
-loads the queue only when Attention is opened, polls it only while visible,
-retains a last-good snapshot as visibly stale after retryable failure, exposes an
+loads the queue when Attention is opened or after the operator explicitly enables
+browser notifications. It polls while the view is visible or that in-memory opt-in
+is active, retains a last-good snapshot as visibly stale after retryable failure, exposes an
 accessible visible count, filters and sorts loaded rows, and restores focus after
-task detail. It remains a read-only notification surface.
+task detail. It never requests notification permission on load. The user-gesture
+opt-in uses only a generic count of newly observed typed rows, establishes the
+first loaded snapshot as a no-notify baseline, deduplicates subsequent rows in
+memory, and never places task text, paths, URLs, provider output or credentials in
+a system notification. Denied and unsupported states are explicit and do not
+change coordinator state.
 
 ## Execution diagnostics snapshot
 
@@ -696,6 +702,24 @@ The dashboard execution pane consumes only this contract. Execution links in the
 activity table, active-execution status and recent failures share the same model;
 Back/Escape restore the originating view and control.
 
+## Desktop control-center shell
+
+`stagemesh ui` uses the same packaged HTML/CSS/JavaScript as `stagemesh serve`.
+It searches a fixed bounded list of Chromium-family executables and opens a
+chromeless `--app` window on Windows, macOS and Linux before falling back to the
+platform system browser. Arguments are passed as a fixed vector without a shell.
+The launch token remains only in the fragment consumed by the UI; errors never
+echo it. JSON launch posture returns only the allowlisted method and application
+family, never an executable or filesystem path.
+
+The shared shell keeps navigation visible on wide screens, horizontally bounded
+on narrow screens, and keeps dense tables inside their view. An operator-invoked
+command palette provides local navigation only: it does not evaluate text, add an
+API, or create a second control mechanism. The discoverable shortcut map uses
+unmodified keys only outside input/select/textarea controls. Palette, help,
+details and objective drill-down all have deterministic Escape and focus-return
+behavior. Browser-reserved shortcuts are not required.
+
 ## Known gaps against #134
 
 V4 adds durable task block/reopen/DONE and candidate-bound rework occurrences from
@@ -722,10 +746,11 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
 1. **Server home: a separate `stagemesh serve` process.** It opens the database read-only per request, so it never
    contends with or mutates the coordinator; WAL lets readers run beside the runner. Embedding it in the runner would couple
    UI availability to run-window lifetime. Implemented (#446).
-2. **Desktop shell: the same web UI in a chromeless browser app window** (Edge or Chrome `--app` on Windows, system browser
-   fallback), launched by `stagemesh ui` (#449). Tauri or another native shell would add a Rust toolchain and signing for no
+2. **Desktop shell: the same web UI in a chromeless browser app window** (a discovered Chromium-family `--app` on Windows,
+   macOS or Linux, with system-browser fallback), launched by `stagemesh ui` (#449, #716-#722). Tauri or another native shell would add a Rust toolchain and signing for no
    functional gain over a loopback page; the contract is shell-agnostic, so one can be added later. The launcher passes the
-   token in the URL fragment, never prints it, and the client immediately removes the fragment after reading it into memory.
+   token in the URL fragment, never prints it, never reports the executable path, and the client immediately removes the
+   fragment after reading it into memory.
 3. **Remote hosting: OPEN, needs a human decision.** Authentication scheme, TLS and per-project authorization are security
    decisions with no precedent in the repository. Until made, the server binds loopback only and has no option to bind elsewhere.
 4. **Live updates: polling in v1.** It needs no long-lived connections in a single-threaded server. Server-sent events can be

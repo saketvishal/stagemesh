@@ -17,7 +17,7 @@ class UiLaunchError(RuntimeError):
 @dataclass(frozen=True)
 class UiLaunch:
     method: str
-    executable: str | None = None
+    application: str | None = None
 
 
 def _windows_app_candidates(
@@ -37,6 +37,34 @@ def _windows_app_candidates(
     return tuple(dict.fromkeys(paths))
 
 
+def _desktop_app_candidates(
+    platform_name: str,
+    environ: Mapping[str, str],
+    which: Callable[[str], str | None],
+) -> tuple[Path, ...]:
+    if platform_name.startswith("win"):
+        return _windows_app_candidates(environ, which)
+    names = (
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    )
+    paths: list[Path] = [Path(found) for name in names if (found := which(name))]
+    if platform_name == "darwin":
+        paths.extend(
+            Path(path)
+            for path in (
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            )
+        )
+    return tuple(dict.fromkeys(paths))
+
+
 def launch_ui(
     url: str,
     *,
@@ -51,26 +79,25 @@ def launch_ui(
     platform_name = platform_name or sys.platform
     environ = os.environ if environ is None else environ
     exists = (lambda path: path.is_file()) if exists is None else exists
-    if platform_name.startswith("win"):
-        for executable in _windows_app_candidates(environ, which):
-            if not exists(executable):
-                continue
-            try:
-                popen(
-                    [
-                        str(executable),
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        f"--app={url}",
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                )
-            except OSError:
-                continue
-            return UiLaunch("browser-app", str(executable))
+    for executable in _desktop_app_candidates(platform_name, environ, which):
+        if not exists(executable):
+            continue
+        try:
+            popen(
+                [
+                    str(executable),
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    f"--app={url}",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        except OSError:
+            continue
+        return UiLaunch("browser-app", "chromium-family")
     if platform_name.startswith("win"):
         opener = startfile or getattr(os, "startfile", None)
         if opener is not None:
@@ -98,5 +125,5 @@ def launch_ui(
             except OSError:
                 pass
             else:
-                return UiLaunch("system-browser", executable)
+                return UiLaunch("system-browser")
     raise UiLaunchError("no usable browser could be opened")

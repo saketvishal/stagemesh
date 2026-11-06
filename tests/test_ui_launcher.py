@@ -43,7 +43,7 @@ def test_windows_prefers_a_chromeless_edge_app_without_shell_or_output_handles()
         popen=popen,
     )
 
-    assert launch.method == "browser-app" and launch.executable is not None
+    assert launch == ui_launcher.UiLaunch("browser-app", "chromium-family")
     command, kwargs = calls[0]
     assert command[0].endswith("msedge.exe")
     assert command[-1] == f"--app=http://127.0.0.1:43123/#token={TOKEN}"
@@ -97,7 +97,7 @@ def test_linux_system_browser_has_no_inherited_output_and_ignores_browser_enviro
         popen=popen,
     )
 
-    assert launch == ui_launcher.UiLaunch("system-browser", "/usr/bin/xdg-open")
+    assert launch == ui_launcher.UiLaunch("system-browser")
     command, kwargs = calls[0]
     assert command == ["/usr/bin/xdg-open", f"http://127.0.0.1:43123/#token={TOKEN}"]
     assert kwargs == {
@@ -143,7 +143,7 @@ def test_ui_command_opens_then_serves_without_printing_or_returning_the_token(
     monkeypatch.setattr(
         ui_launcher,
         "launch_ui",
-        lambda url: observed.append(url) or ui_launcher.UiLaunch("browser-app", "edge.exe"),
+        lambda url: observed.append(url) or ui_launcher.UiLaunch("browser-app", "chromium-family"),
     )
 
     assert cli_module.main(["--project", str(tmp_path), "ui", "--json"]) == 0
@@ -151,7 +151,7 @@ def test_ui_command_opens_then_serves_without_printing_or_returning_the_token(
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload == {
-        "executable": "edge.exe",
+        "application": "chromium-family",
         "launch_method": "browser-app",
         "port": 43123,
         "url": "http://127.0.0.1:43123/",
@@ -159,6 +159,46 @@ def test_ui_command_opens_then_serves_without_printing_or_returning_the_token(
     assert observed == [f"http://127.0.0.1:43123/#token={TOKEN}"]
     assert TOKEN not in captured.out + captured.err
     assert server.served and server.closed
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "browser_name", "browser_path"),
+    [
+        ("linux", "chromium", "/usr/bin/chromium"),
+        ("darwin", "google-chrome", "/opt/bin/google-chrome"),
+    ],
+)
+def test_unix_desktop_prefers_a_chromium_app_window_without_disclosing_the_executable(
+    platform_name: str,
+    browser_name: str,
+    browser_path: str,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    expected_path = str(Path(browser_path))
+
+    launch = ui_launcher.launch_ui(
+        f"http://127.0.0.1:43123/#token={TOKEN}",
+        platform_name=platform_name,
+        environ={},
+        which=lambda name: browser_path if name == browser_name else None,
+        exists=lambda path: str(path) == expected_path,
+        popen=lambda command, **kwargs: calls.append((command, kwargs)) or object(),
+    )
+
+    assert launch == ui_launcher.UiLaunch("browser-app", "chromium-family")
+    command, kwargs = calls[0]
+    assert command == [
+        expected_path,
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--app=http://127.0.0.1:43123/#token={TOKEN}",
+    ]
+    assert kwargs == {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
 
 
 def test_ui_command_closes_the_server_when_no_browser_can_open(
