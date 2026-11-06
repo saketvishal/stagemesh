@@ -325,10 +325,11 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_zero_config_github.py": TestTier.INTEGRATION_PROCESS,
 
     # -------------------------------------------------------------------------
-    # 4. Native Platform (10 files - explicit bounded serial)
+    # 4. Native Platform (11 files - explicit bounded serial)
     # -------------------------------------------------------------------------
     "tests/test_active_gate_stop.py": TestTier.NATIVE_PLATFORM,
     "tests/test_bounded_execution.py": TestTier.NATIVE_PLATFORM,
+    "tests/test_continuous_driver.py": TestTier.NATIVE_PLATFORM,
     "tests/test_gate_cleanup_confirmation.py": TestTier.NATIVE_PLATFORM,
     "tests/test_installed_runtime.py": TestTier.NATIVE_PLATFORM,
     "tests/test_operator_stop.py": TestTier.NATIVE_PLATFORM,
@@ -339,13 +340,12 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_workspace_environment_repair.py": TestTier.NATIVE_PLATFORM,
 
     # -------------------------------------------------------------------------
-    # 5. Soak and Failure Injection (14 files)
+    # 5. Soak and Failure Injection (13 files)
     # -------------------------------------------------------------------------
     "tests/test_stabilization_matrix.py": TestTier.SOAK_FAILURE_INJECTION,
     "tests/test_driver_acceptance.py": TestTier.SOAK_FAILURE_INJECTION,
     "tests/test_driver_cleanup_fence.py": TestTier.SOAK_FAILURE_INJECTION,
     "tests/test_driver_control_races.py": TestTier.SOAK_FAILURE_INJECTION,
-    "tests/test_continuous_driver.py": TestTier.SOAK_FAILURE_INJECTION,
     "tests/test_continuous_capacity.py": TestTier.SOAK_FAILURE_INJECTION,
     "tests/test_reliable_delivery_end_to_end.py": TestTier.SOAK_FAILURE_INJECTION,
     "tests/test_blocked_recovery.py": TestTier.SOAK_FAILURE_INJECTION,

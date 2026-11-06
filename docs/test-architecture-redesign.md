@@ -46,6 +46,8 @@ An exact clean run of candidate `3e4ec444` rejected the initial 24-worker policy
 
 On the same machine, the isolated Git/process hotspot `test_provider_timeout_falls_through_and_is_scoped_to_the_task` took 49.82 seconds on clean `3e4ec444`. Combining workspace status/HEAD observation, resolving worktree Git directories without a subprocess, collecting identity config once, caching repository detection against the local-config digest, and removing redundant object probes reduced the same test to 31.96 seconds (35.9%). The optimized candidate also passed 117 focused identity/ownership tests, 35 contract tests, the exact failed soak file's 57 tests, and a real Windows Ctrl-Break partial-report test. These focused results justify the implementation direction but do not replace a complete exact-head run.
 
+The first clean 16-worker run of `909c8f4` collected 4,338 node IDs and rejected one remaining taxonomy assumption: a real Windows process-identity recovery test in `test_continuous_driver.py` failed only while its 57-test file ran concurrently with other process-heavy lanes, then passed alone in 0.82 seconds. The file is therefore classified with the bounded serial native-platform tests; its process-liveness and child-reaping contract is not weakened or mocked. The failed journal also showed that retaining only the tail of pytest output can discard the traceback when full duration reporting follows it, so failed records now preserve bounded prefix and suffix evidence.
+
 The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
 
 - canonical collection equals the duplicate-free audited union;

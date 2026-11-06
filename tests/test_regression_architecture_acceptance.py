@@ -34,6 +34,7 @@ from stagemesh.regression_orchestrator import (
     PytestDuration,
     RegressionOrchestrator,
     RunIdentity,
+    _bounded_failure_output,
     _popen_session_kwargs,
     build_default_lanes,
     parse_collected_nodeids,
@@ -74,6 +75,15 @@ def test_lane_subprocesses_use_interrupt_isolated_process_groups() -> None:
         assert kwargs == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     else:
         assert kwargs == {"start_new_session": True}
+
+
+def test_failure_output_keeps_traceback_prefix_and_summary_suffix() -> None:
+    output = "TRACEBACK\n" + ("x" * 30_000) + "\nFAILED SUMMARY"
+    bounded = _bounded_failure_output(output, limit=2_000)
+    assert len(bounded) == 2_000
+    assert bounded.startswith("TRACEBACK\n")
+    assert bounded.endswith("\nFAILED SUMMARY")
+    assert "characters omitted" in bounded
 
 
 def test_real_parent_interrupt_writes_partial_report_and_stops_lane(tmp_path: Path) -> None:
@@ -165,6 +175,7 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     assert TIER_ISOLATION_CONTRACTS[TestTier.DETERMINISTIC_UNIT].parallel_safe is True
     assert TIER_ISOLATION_CONTRACTS[TestTier.COMPONENT_CONTRACT].parallel_safe is True
     assert TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].parallel_safe is True
+    assert tier_for_test("tests/test_continuous_driver.py::test_process_recovery") is TestTier.NATIVE_PLATFORM
 
 
 def test_worker_filesystem_and_env_isolation(tmp_path: Path) -> None:

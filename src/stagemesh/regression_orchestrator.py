@@ -43,6 +43,17 @@ TARGET_BATCH_SECONDS = 600.0
 BATCHES_PER_WORKER_AND_TIER = 2
 
 
+def _bounded_failure_output(value: str, limit: int = 20_000) -> str:
+    """Retain both the failure traceback and summary within a journal bound."""
+    if len(value) <= limit:
+        return value
+    marker = f"\n... [{len(value) - limit} characters omitted] ...\n"
+    available = limit - len(marker)
+    prefix = available // 2
+    suffix = available - prefix
+    return value[:prefix] + marker + value[-suffix:]
+
+
 def _popen_session_kwargs() -> dict[str, object]:
     """Separate lane process groups so parent interruption can preserve evidence."""
     if platform.system() == "Windows":
@@ -763,8 +774,8 @@ class RegressionOrchestrator:
             "test_durations": [asdict(item) for item in test_durations],
         }
         if not passed:
-            journal_record["stdout"] = stdout[-20_000:]
-            journal_record["stderr"] = stderr[-20_000:]
+            journal_record["stdout"] = _bounded_failure_output(stdout)
+            journal_record["stderr"] = _bounded_failure_output(stderr)
             journal_record["error_message"] = error_msg
         self._append_journal(journal_record)
 
