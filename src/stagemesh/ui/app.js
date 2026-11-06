@@ -22,6 +22,8 @@
   let detailReturnView = "activity", detailOpener = null;
   let executionSnapshot = null, executionId = null, executionGeneration = 0;
   let executionReturnView = "activity", executionOpener = null;
+  let objectivesSnapshot = null, objectiveGeneration = 0, objectiveLastGood = null;
+  let objectiveInflight = false, selectedObjectiveId = null, objectiveOpener = null;
   let controlCapabilities = null, controlIntent = null, controlBusy = false;
   let projectTargets = new Map();
 
@@ -129,6 +131,50 @@
     return body;
   }
 
+  function setObjectivesMessage(text, level = "") {
+    const el = $("objectives-message");
+    el.textContent = text;
+    el.className = level;
+  }
+
+  async function loadObjectives(quiet) {
+    if (!token) {
+      setObjectivesMessage("No access token. Open the URL printed by `stagemesh serve`.", "error");
+      renderObjectives();
+      return;
+    }
+    if (objectiveInflight) return;
+    const mine = ++objectiveGeneration;
+    objectiveInflight = true;
+    if (!quiet) setObjectivesMessage("Loading objective plans...");
+    try {
+      const projection = await api("/api/v1/objectives");
+      if (mine !== objectiveGeneration) return;
+      objectivesSnapshot = projection;
+      objectiveLastGood = new Date();
+      renderObjectives();
+      setObjectivesMessage(
+        projection.truncated
+          ? "Only the newest bounded objective records are shown; older records are excluded."
+          : projection.objectives.length ? "" : "No objective records are available."
+        , projection.truncated ? "warn" : ""
+      );
+    } catch (error) {
+      if (mine !== objectiveGeneration) return;
+      const authorizationFailed = error.status === 401 || error.status === 403;
+      if (authorizationFailed) {
+        objectivesSnapshot = null;
+        selectedObjectiveId = null;
+        renderObjectives();
+      }
+      const stale = objectiveLastGood && !authorizationFailed
+        ? " Showing the last objective snapshot from " + objectiveLastGood.toLocaleTimeString() + " (stale)." : "";
+      setObjectivesMessage("Could not load objectives: " + error.message + "." + stale, error.status === 400 ? "error" : "warn");
+    } finally {
+      if (mine === objectiveGeneration) objectiveInflight = false;
+    }
+  }
+
   async function fetchActivity(target, mine) {
     const fresh = new Map();
     let offset = 0, page, fetched = 0;
@@ -197,7 +243,10 @@
     }
   }
 
-  const refresh = () => loadRange(false);
+  const refresh = () => {
+    if (!$("objectives-view").hidden) loadObjectives(false);
+    else loadRange(false);
+  };
   const reload = () => { wantedPages = 1; periodWantedPages = 1; loadRange(false); };
   const loadMore = () => {
     if (nextOffset === null) return;
@@ -245,7 +294,7 @@
 
   async function openTask(taskId, opener) {
     const mine = ++detailGeneration;
-    detailReturnView = $("status-view").hidden ? "activity" : "status";
+    if ($("task-view").hidden) detailReturnView = visibleView();
     detailOpener = opener || document.activeElement;
     detailTaskId = taskId;
     $("show-task").hidden = false;
@@ -278,7 +327,9 @@
 
   function visibleView() {
     if (!$("task-view").hidden) return "task";
+    if (!$("objectives-view").hidden) return "objectives";
     if (!$("status-view").hidden) return "status";
+    if (!$("control-view").hidden) return "control";
     return "activity";
   }
 
@@ -506,6 +557,137 @@
       const row = $("selection-rows").insertRow(); taskCell(row, item.task_id);
       cell(row, item.stage); cell(row, item.policy); cell(row, item.order.join(" -> "));
       cell(row, item.verdicts.map((v) => v.provider + ": " + (v.eligible === true ? "eligible" : v.eligible === false ? "ineligible" : "unknown")).join(", "));
+    }
+  }
+
+  function objectiveRows() {
+    if (!objectivesSnapshot) return [];
+    const search = $("objective-search").value.trim().toLocaleLowerCase();
+    const state = $("objective-state").value;
+    const mode = $("objective-sort").value;
+    const result = objectivesSnapshot.objectives.filter((objective) => {
+      const matchesText = !search || [objective.id, objective.title].some(
+        (value) => String(value || "").toLocaleLowerCase().includes(search)
+      );
+      return matchesText && (!state || objective.plan_state === state);
+    });
+    result.sort((left, right) => {
+      if (mode === "title") return String(left.title || left.id).localeCompare(String(right.title || right.id));
+      if (mode === "state") return left.plan_state.localeCompare(right.plan_state) || String(left.id).localeCompare(String(right.id));
+      if (mode === "progress") return (right.counts.DONE - left.counts.DONE) || (right.counts.total - left.counts.total);
+      return (right.updated_at || 0) - (left.updated_at || 0) || String(left.id).localeCompare(String(right.id));
+    });
+    return result;
+  }
+
+  function selectObjective(objectiveId, opener) {
+    selectedObjectiveId = objectiveId;
+    objectiveOpener = opener || document.activeElement;
+    renderObjectiveDetail();
+    $("objective-detail-heading").focus();
+  }
+
+  function closeObjective() {
+    const closingId = selectedObjectiveId;
+    selectedObjectiveId = null;
+    $("objective-detail").hidden = true;
+    const opener = objectiveOpener;
+    objectiveOpener = null;
+    if (opener && opener.isConnected) opener.focus();
+    else {
+      const replacement = [...$("objective-rows").querySelectorAll("button")].find(
+        (button) => button.dataset.objectiveKey === closingId
+      );
+      if (replacement) replacement.focus();
+      else $("objectives-table").focus();
+    }
+  }
+
+  function renderObjectives() {
+    const body = $("objective-rows");
+    const focused = document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.objectiveKey : null;
+    body.replaceChildren();
+    if (!objectivesSnapshot) {
+      $("objectives-summary").textContent = "Objective data has not been loaded.";
+      $("objective-detail").hidden = true;
+      return;
+    }
+    const items = objectiveRows();
+    $("objectives-summary").textContent = "Observed " + new Date(objectivesSnapshot.observed_at).toLocaleString() +
+      ". Bounded to " + objectivesSnapshot.detail_limit + " objectives and " + objectivesSnapshot.child_limit +
+      " children per objective. " + objectivesSnapshot.total + " objective records; " + items.length + " match this view.";
+    for (const objective of items) {
+      const row = body.insertRow();
+      const name = cell(row, "");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = objective.title || objective.id || "Untitled objective";
+      button.title = "Open bounded objective plan";
+      button.dataset.objectiveKey = objective.id;
+      button.addEventListener("click", () => selectObjective(objective.id, button));
+      name.replaceChildren(button);
+      cell(row, objective.plan_state);
+      cell(row, objective.counts.recorded + " / " + objective.counts.total);
+      cell(row, objective.counts.DONE);
+      cell(row, objective.counts.BLOCKED);
+      cell(row, objective.counts.not_recorded);
+      const updated = cell(row, objective.updated_at ? new Date(objective.updated_at * 1000).toLocaleString() : "UNKNOWN");
+      if (objective.updated_at) updated.title = String(objective.updated_at);
+    }
+    if (!items.length) setObjectivesMessage("No loaded objectives match these filters.");
+    else if (!objectivesSnapshot.truncated) setObjectivesMessage("");
+    if (selectedObjectiveId) renderObjectiveDetail();
+    if (focused) {
+      const again = [...body.querySelectorAll("button")].find((button) => button.dataset.objectiveKey === focused);
+      if (again) again.focus();
+      else $("objectives-table").focus();
+    }
+  }
+
+  function renderObjectiveDetail() {
+    const detail = $("objective-detail");
+    const objective = objectivesSnapshot && objectivesSnapshot.objectives.find(
+      (item) => item.id === selectedObjectiveId
+    );
+    if (!objective) {
+      detail.hidden = true;
+      return;
+    }
+    detail.hidden = false;
+    $("objective-detail-heading").textContent = "Objective " + objective.id + ": " + (objective.title || "Untitled");
+    const counts = objective.counts;
+    $("objective-detail-note").textContent = "Plan state " + objective.plan_state + ". " + counts.DONE +
+      " of " + counts.total + " planned children are done; " + counts.BLOCKED + " blocked; " +
+      counts.not_recorded + " not yet recorded." + (objective.children_truncated ? " Child rows are truncated by the safety limit." : "");
+    const body = $("objective-children");
+    const focused = document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.objectiveChildKey : null;
+    body.replaceChildren();
+    for (const child of objective.children) {
+      const row = body.insertRow();
+      const task = cell(row, "");
+      if (child.recorded && child.task_id) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = child.task_id;
+        button.title = "Open recorded task detail";
+        button.dataset.objectiveChildKey = child.task_id;
+        button.addEventListener("click", () => openTask(child.task_id, button));
+        task.replaceChildren(button);
+      } else task.textContent = child.task_id || "UNKNOWN";
+      cell(row, child.title);
+      cell(row, child.stage || "NOT_RECORDED");
+      cell(row, child.status || "NOT_RECORDED");
+      cell(row, child.recorded ? "Yes" : "No");
+      cell(row, (child.dependencies || []).filter(Boolean).join(", ") || "-");
+    }
+    if (focused) {
+      const again = [...body.querySelectorAll("button")].find(
+        (button) => button.dataset.objectiveChildKey === focused
+      );
+      if (again) again.focus();
+      else $("objective-children-table").focus();
     }
   }
 
@@ -785,11 +967,13 @@
   function setView(name) {
     $("activity-view").hidden = name !== "activity";
     $("status-view").hidden = name !== "status";
+    $("objectives-view").hidden = name !== "objectives";
     $("control-view").hidden = name !== "control";
     $("task-view").hidden = name !== "task";
     $("execution-view").hidden = name !== "execution";
     $("show-activity").setAttribute("aria-pressed", String(name === "activity"));
     $("show-status").setAttribute("aria-pressed", String(name === "status"));
+    $("show-objectives").setAttribute("aria-pressed", String(name === "objectives"));
     $("show-control").setAttribute("aria-pressed", String(name === "control"));
     $("show-task").setAttribute("aria-pressed", String(name === "task"));
     $("show-execution").setAttribute("aria-pressed", String(name === "execution"));
@@ -832,7 +1016,11 @@
 
   function schedule() {
     clearInterval(timer);
-    if ($("auto").checked) timer = setInterval(() => { if (!document.hidden && !inflight) loadRange(true); }, POLL_MS);
+    if ($("auto").checked) timer = setInterval(() => {
+      if (document.hidden) return;
+      if (!inflight) loadRange(true);
+      if (!objectiveInflight && !$("objectives-view").hidden) loadObjectives(true);
+    }, POLL_MS);
   }
 
   buildHead();
@@ -857,12 +1045,22 @@
   $("period-more").addEventListener("click", loadMorePeriods);
   $("show-activity").addEventListener("click", () => setView("activity"));
   $("show-status").addEventListener("click", () => setView("status"));
+  $("show-objectives").addEventListener("click", () => {
+    setView("objectives");
+    loadObjectives(Boolean(objectivesSnapshot));
+  });
   $("show-control").addEventListener("click", () => setView("control"));
   $("show-task").addEventListener("click", () => setView("task"));
   $("show-execution").addEventListener("click", () => setView("execution"));
   $("close-detail").addEventListener("click", closeTask);
   $("close-execution").addEventListener("click", closeExecution);
   $("detail-history").addEventListener("click", () => { if (detailTaskId) enterDrill(detailTaskId); });
+  $("objective-filters").addEventListener("submit", (event) => event.preventDefault());
+  $("objective-search").addEventListener("input", renderObjectives);
+  $("objective-state").addEventListener("change", renderObjectives);
+  $("objective-sort").addEventListener("change", renderObjectives);
+  $("objective-refresh").addEventListener("click", () => loadObjectives(false));
+  $("close-objective").addEventListener("click", closeObjective);
   $("auto").addEventListener("change", schedule);
   $("control-action").addEventListener("change", () => { clearControlPlan(); updateControlTarget(); });
   $("control-form").addEventListener("submit", planControl);
@@ -880,6 +1078,7 @@
     else if (event.key === "r") refresh();
     else if (event.key === "Escape" && !$("execution-view").hidden) closeExecution();
     else if (event.key === "Escape" && !$("task-view").hidden) closeTask();
+    else if (event.key === "Escape" && !$("objective-detail").hidden) closeObjective();
     else if (event.key === "Escape" && drillState) exitDrill();
   });
   api("/api/v5/health").then((health) => { $("version").textContent = "v" + health.version; }, () => {});
@@ -887,5 +1086,6 @@
   loadControlCapabilities();
   loadProjectProjection();
   loadRange(false);
+  loadObjectives(false);
   schedule();
 })();

@@ -38,7 +38,7 @@ from .activity_periods import (
     ActivityPeriodReport,
     query_activity_periods,
 )
-from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
+from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .operator import OperatorReport, execution_runtime_row, operator_report, pending_decision_rows
 from .operator_control import (
     CONTROL_CONTRACT,
@@ -63,6 +63,11 @@ CONTRACT_V4 = "stagemesh.activity/4"
 CONTRACT_V5 = "stagemesh.activity/5"
 OPERATOR_CONTRACT = "stagemesh.operator/1"
 OPERATOR_DETAIL_LIMIT = 100
+OBJECTIVES_CONTRACT = "stagemesh.objectives/1"
+OBJECTIVE_DETAIL_LIMIT = 100
+OBJECTIVE_CHILD_LIMIT = 100
+OBJECTIVE_CHILD_SCAN_LIMIT = 1000
+OBJECTIVE_PAYLOAD_LIMIT = 512_000
 TASK_DETAIL_CONTRACT = "stagemesh.task-detail/1"
 TASK_DETAIL_LIMIT = 200
 EXECUTION_DETAIL_CONTRACT = "stagemesh.execution-detail/1"
@@ -426,6 +431,158 @@ def _safe_number(value: object) -> int | float | None:
     if isinstance(value, float) and math.isfinite(value):
         return value
     return None
+
+
+def _objective_task_items(payload_text: object) -> tuple[str, list[dict[str, Any]]]:
+    """Parse only the bounded, public planning shape; never return the stored payload."""
+    if not isinstance(payload_text, str) or len(payload_text.encode("utf-8")) > OBJECTIVE_PAYLOAD_LIMIT:
+        return "UNAVAILABLE", []
+    try:
+        payload = json.loads(payload_text)
+    except (TypeError, ValueError):
+        return "UNAVAILABLE", []
+    if not isinstance(payload, dict):
+        return "UNAVAILABLE", []
+    if "tasks" not in payload:
+        source = payload.get("source")
+        return (
+            ("UNPLANNED", [])
+            if isinstance(source, str) and source.strip() and len(source.strip()) <= 200
+            else ("UNAVAILABLE", [])
+        )
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or not tasks or len(tasks) > OBJECTIVE_CHILD_SCAN_LIMIT:
+        return "UNAVAILABLE", []
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in tasks:
+        if not isinstance(item, dict):
+            return "UNAVAILABLE", []
+        raw_id = item.get("id")
+        raw_title = item.get("title")
+        dependencies = item.get("dependencies", [])
+        if (
+            not isinstance(raw_id, str)
+            or not raw_id.strip()
+            or len(raw_id.strip()) > 200
+            or raw_id.strip() in seen
+            or not isinstance(raw_title, str)
+            or not raw_title.strip()
+            or len(raw_title.strip()) > 200
+            or not isinstance(dependencies, list)
+            or any(not isinstance(dep, str) or not dep.strip() or len(dep.strip()) > 200 for dep in dependencies)
+        ):
+            return "UNAVAILABLE", []
+        task_id = raw_id.strip()
+        seen.add(task_id)
+        result.append(
+            {
+                "lookup_id": task_id,
+                "id": _safe_text(task_id),
+                "title": _safe_text(raw_title.strip(), 300),
+                "dependencies": tuple(dep.strip() for dep in dependencies),
+            }
+        )
+    if any(dependency not in seen for item in result for dependency in item["dependencies"]):
+        return "UNAVAILABLE", []
+    return "PLANNED", result
+
+
+def serialize_objectives(store: Store) -> dict[str, Any]:
+    """Bounded objective/child status without issue bodies, prompts, or raw planning payloads."""
+    total = int(store.conn.execute("SELECT COUNT(*) FROM objectives").fetchone()[0])
+    rows = store.conn.execute(
+        "SELECT id,title,payload,created_at,updated_at FROM objectives "
+        "ORDER BY updated_at DESC,id LIMIT ?",
+        (OBJECTIVE_DETAIL_LIMIT,),
+    ).fetchall()
+    objectives: list[dict[str, Any]] = []
+    allowed_stages = {item.value for item in Stage}
+    allowed_statuses = {item.value for item in TaskStatus}
+    for row in rows:
+        payload_state, planned = _objective_task_items(row["payload"])
+        child_total = len(planned) if payload_state == "PLANNED" else 0
+        task_rows: dict[str, Any] = {}
+        for start in range(0, len(planned), 200):
+            identifiers = [item["lookup_id"] for item in planned[start : start + 200]]
+            placeholders = ",".join("?" for _ in identifiers)
+            for task in store.conn.execute(
+                f"SELECT id,title,stage,status FROM tasks WHERE id IN ({placeholders})",
+                identifiers,
+            ):
+                task_rows[str(task["id"])] = task
+        children: list[dict[str, Any]] = []
+        counts = {
+            "total": child_total,
+            "recorded": 0,
+            "not_recorded": 0,
+            "OPEN": 0,
+            "CLAIMED": 0,
+            "BLOCKED": 0,
+            "DONE": 0,
+            "UNKNOWN": 0,
+        }
+        advanced = False
+        all_complete = bool(planned)
+        for index, item in enumerate(planned):
+            task = task_rows.get(item["lookup_id"])
+            recorded = task is not None
+            stage = task["stage"] if recorded and task["stage"] in allowed_stages else None
+            status = task["status"] if recorded and task["status"] in allowed_statuses else None
+            if recorded:
+                counts["recorded"] += 1
+                counts["UNKNOWN" if stage is None or status is None else status] += 1
+            else:
+                counts["not_recorded"] += 1
+            advanced = advanced or (stage not in {None, Stage.PLAN.value})
+            all_complete = all_complete and stage == Stage.DONE.value and status == TaskStatus.DONE.value
+            if index < OBJECTIVE_CHILD_LIMIT:
+                children.append(
+                    {
+                        "task_id": item["id"],
+                        "title": _safe_text(task["title"], 300) if recorded else item["title"],
+                        "stage": stage,
+                        "status": status,
+                        "recorded": recorded,
+                        "dependencies": [_safe_text(dep) for dep in item["dependencies"]],
+                    }
+                )
+        if payload_state != "PLANNED":
+            plan_state = payload_state
+        elif counts["UNKNOWN"]:
+            plan_state = "UNAVAILABLE"
+        elif counts["BLOCKED"]:
+            plan_state = "BLOCKED"
+        elif counts["not_recorded"]:
+            plan_state = "PARTIAL"
+        elif all_complete:
+            plan_state = "COMPLETE"
+        elif counts["CLAIMED"] or counts["DONE"] or advanced:
+            plan_state = "IN_PROGRESS"
+        else:
+            plan_state = "READY"
+        objectives.append(
+            {
+                "id": _safe_text(row["id"]),
+                "title": _safe_text(row["title"], 300),
+                "created_at": _safe_number(row["created_at"]),
+                "updated_at": _safe_number(row["updated_at"]),
+                "plan_state": plan_state,
+                "attention_required": plan_state in {"UNPLANNED", "PARTIAL", "BLOCKED", "UNAVAILABLE"},
+                "counts": counts,
+                "children": children,
+                "children_truncated": child_total > OBJECTIVE_CHILD_LIMIT,
+            }
+        )
+    return {
+        "observed_at": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "objectives": objectives,
+        "total": total,
+        "bounded": True,
+        "detail_limit": OBJECTIVE_DETAIL_LIMIT,
+        "child_limit": OBJECTIVE_CHILD_LIMIT,
+        "truncated": total > OBJECTIVE_DETAIL_LIMIT,
+    }
 
 
 def _operator_sections(report: OperatorReport) -> dict[str, tuple[Mapping[str, object], ...]]:
@@ -862,6 +1019,8 @@ class ActivityApi:
                 contract = TASK_DETAIL_CONTRACT
             elif urlsplit(target).path == "/api/v1/operator":
                 contract = OPERATOR_CONTRACT
+            elif urlsplit(target).path == "/api/v1/objectives":
+                contract = OBJECTIVES_CONTRACT
             elif urlsplit(target).path.startswith("/api/v5/"):
                 contract = CONTRACT_V5
             elif urlsplit(target).path.startswith("/api/v4/"):
@@ -952,6 +1111,15 @@ class ActivityApi:
             finally:
                 store.conn.close()
             return _json(200, serialize_operator_report(report), OPERATOR_CONTRACT)
+        if path == "/api/v1/objectives":
+            if parts.query:
+                raise ApiError(400, "invalid_query", "objectives takes no parameters")
+            store = self._open()
+            try:
+                projection = serialize_objectives(store)
+            finally:
+                store.conn.close()
+            return _json(200, projection, OBJECTIVES_CONTRACT)
         if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health", "/api/v4/health", "/api/v5/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")
