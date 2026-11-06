@@ -138,7 +138,7 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
 # Filenames are stored with forward slashes, relative to repo root.
 FILE_TIER_MAP: dict[str, TestTier] = {
     # -------------------------------------------------------------------------
-    # 1. Deterministic Unit (55 files)
+    # 1. Deterministic Unit (54 files)
     # -------------------------------------------------------------------------
     "tests/test_attribution_guards.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_attribution_tool.py": TestTier.DETERMINISTIC_UNIT,
@@ -154,7 +154,6 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_profile.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_project_smoke.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_readiness.py": TestTier.DETERMINISTIC_UNIT,
-    "tests/test_regression_architecture_acceptance.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_runtime_info.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_stagemesh_validation_profile.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_validation_plan.py": TestTier.DETERMINISTIC_UNIT,
@@ -337,7 +336,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_zero_config_github.py": TestTier.INTEGRATION_PROCESS,
 
     # -------------------------------------------------------------------------
-    # 4. Native Platform (11 files - explicit bounded serial)
+    # 4. Native Platform (12 files - explicit bounded serial)
     # -------------------------------------------------------------------------
     "tests/test_active_gate_stop.py": TestTier.NATIVE_PLATFORM,
     "tests/test_bounded_execution.py": TestTier.NATIVE_PLATFORM,
@@ -345,6 +344,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_gate_cleanup_confirmation.py": TestTier.NATIVE_PLATFORM,
     "tests/test_installed_runtime.py": TestTier.NATIVE_PLATFORM,
     "tests/test_operator_stop.py": TestTier.NATIVE_PLATFORM,
+    "tests/test_regression_architecture_acceptance.py": TestTier.NATIVE_PLATFORM,
     "tests/test_research_crash_ownership.py": TestTier.NATIVE_PLATFORM,
     "tests/test_validation_crash_fence.py": TestTier.NATIVE_PLATFORM,
     "tests/test_windows_longpaths_and_block_reason.py": TestTier.NATIVE_PLATFORM,

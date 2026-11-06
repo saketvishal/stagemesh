@@ -50,6 +50,8 @@ The first clean 16-worker run of `909c8f4` collected 4,338 node IDs and rejected
 
 The next clean 16-worker run of `4d0ba67` proved that the problem was broader than that file: three integration timing assertions inflated from a required sub-15-second bound to 25–65 seconds, while five other integration lanes timed out together at 900 seconds. Those assertions pass outside the saturated run. This rejects a single global 16-worker budget and motivates the shared eight-worker external-process resource group; deadlines and functional assertions remain unchanged.
 
+The first resource-group run then exposed a catalog error rather than a scheduler failure: `test_regression_architecture_acceptance.py` was labelled deterministic even though it exercises real process groups, timeouts, repository locks, collection subprocesses, and cleanup. It is now native serial, and its nested real-runner test explicitly inherits the installed pytest import root while retaining the worker's isolated environment.
+
 The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
 
 - canonical collection equals the duplicate-free audited union;

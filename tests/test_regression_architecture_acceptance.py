@@ -110,7 +110,13 @@ def test_real_parent_interrupt_writes_partial_report_and_stops_lane(tmp_path: Pa
         "raise SystemExit(o.run())\n"
     )
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    import_roots = [
+        str(Path(__file__).resolve().parents[1] / "src"),
+        str(Path(pytest.__file__).resolve().parent.parent),
+    ]
+    if env.get("PYTHONPATH"):
+        import_roots.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(import_roots)
     kwargs = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         if platform.system() == "Windows"
@@ -188,6 +194,7 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
         == TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].concurrency_group
     )
     assert tier_for_test("tests/test_continuous_driver.py::test_process_recovery") is TestTier.NATIVE_PLATFORM
+    assert tier_for_test("tests/test_regression_architecture_acceptance.py") is TestTier.NATIVE_PLATFORM
 
 
 def test_worker_filesystem_and_env_isolation(tmp_path: Path) -> None:
