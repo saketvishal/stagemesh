@@ -829,7 +829,17 @@ FILE_RUNTIME_SECONDS: dict[str, float] = {
 }
 
 
-TEST_NODEID_OVERRIDES: dict[str, TestTier] = {}
+TEST_NODEID_OVERRIDES: dict[str, TestTier] = {
+    # These contracts create, kill, and then classify a real owner process. High
+    # Windows process churn can reuse the PID before identity observation, so
+    # they belong with the explicit serial native process-liveness evidence.
+    "tests/test_workspace_ownership.py::test_dead_owner_with_a_workspace_exactly_as_sealed_is_recovered_and_audited": TestTier.NATIVE_PLATFORM,
+    "tests/test_workspace_ownership.py::test_dead_owner_then_outside_commit_is_not_recovered": TestTier.NATIVE_PLATFORM,
+    "tests/test_workspace_ownership.py::test_dead_owner_then_tracked_edit_is_not_recovered": TestTier.NATIVE_PLATFORM,
+    "tests/test_workspace_ownership.py::test_dead_owner_then_untracked_leftover_is_not_recovered": TestTier.NATIVE_PLATFORM,
+    "tests/test_workspace_ownership.py::test_task_blocks_when_a_dead_owners_workspace_changed": TestTier.NATIVE_PLATFORM,
+    "tests/test_workspace_ownership.py::test_two_simultaneous_takeovers_of_a_dead_owner_have_exactly_one_winner": TestTier.NATIVE_PLATFORM,
+}
 
 
 def normalize_test_path(path: str) -> str:

@@ -20,7 +20,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -28,6 +28,7 @@ from .test_isolation import RegressionRunLock, WorkerPoolIsolation, kill_process
 from .test_taxonomy import (
     FILE_RUNTIME_SECONDS,
     FILE_TIER_MAP,
+    TEST_NODEID_OVERRIDES,
     TIER_ISOLATION_CONTRACTS,
     TestTier,
     catalog_digest,
@@ -216,6 +217,10 @@ def build_default_lanes() -> tuple[Lane, ...]:
     tier_files: dict[TestTier, list[str]] = {tier: [] for tier in TestTier}
     for file_path, tier in FILE_TIER_MAP.items():
         tier_files[tier].append(file_path)
+    for nodeid, tier in TEST_NODEID_OVERRIDES.items():
+        file_path = nodeid.split("::", 1)[0]
+        if file_path not in tier_files[tier]:
+            tier_files[tier].append(file_path)
 
     lanes: list[Lane] = []
 
@@ -367,6 +372,7 @@ class RegressionOrchestrator:
         self._run_lock = RegressionRunLock(repo_root)
         self.collection_evidence: dict[str, object] | None = None
         self._canonical_nodeids: tuple[str, ...] = ()
+        self._classified_nodeids: dict[str, TestTier] = {}
 
     def _register_process(self, process: subprocess.Popen[str]) -> None:
         with self._process_lock:
@@ -423,46 +429,54 @@ class RegressionOrchestrator:
         return nodeids
 
     def _audit_collection(self) -> dict[str, object]:
-        """Prove canonical collection equals the duplicate-free union of tier collections."""
+        """Prove canonical collection has one complete, duplicate-free tier partition."""
         all_files = tuple(sorted({file_path for lane in self.lanes for file_path in lane.files}))
         if not all_files:
             raise ValueError("no regression files selected")
         worker_base = self.jobs + 10
-        canonical = self._collect_nodeids(all_files, worker_base)
-        self._canonical_nodeids = canonical
+        collected = self._collect_nodeids(all_files, worker_base)
+        duplicate_nodeids = sorted(
+            nodeid for nodeid, count in Counter(collected).items() if count != 1
+        )
+        if duplicate_nodeids:
+            raise ValueError(f"canonical collection contains duplicate nodeids: {duplicate_nodeids[:5]}")
         classified = validate_catalog(
-            canonical,
+            collected,
             allow_uncollected_catalog_entries=self.selected_tier is not None,
         )
+        if set(classified) != set(collected) or len(classified) != len(collected):
+            missing = sorted(set(collected) - set(classified))
+            extra = sorted(set(classified) - set(collected))
+            raise ValueError(
+                "tier classification differs from canonical collection: "
+                f"missing={missing[:5]} extra={extra[:5]}"
+            )
+        selected_tiers = {lane.tier for lane in self.lanes}
+        canonical = tuple(
+            nodeid
+            for nodeid in collected
+            if self.selected_tier is None or classified[nodeid] in selected_tiers
+        )
+        classified = {nodeid: classified[nodeid] for nodeid in canonical}
+        self._canonical_nodeids = canonical
+        self._classified_nodeids = classified
 
-        files_by_tier: dict[TestTier, list[str]] = {}
-        for lane in self.lanes:
-            files_by_tier.setdefault(lane.tier, []).extend(lane.files)
-
-        tier_collections: dict[TestTier, tuple[str, ...]] = {}
-        with ThreadPoolExecutor(max_workers=min(5, len(files_by_tier))) as pool:
-            futures = {
-                pool.submit(self._collect_nodeids, tuple(sorted(set(files))), worker_base + index + 1): tier
-                for index, (tier, files) in enumerate(sorted(files_by_tier.items(), key=lambda item: item[0].value))
-            }
-            for future in as_completed(futures):
-                tier_collections[futures[future]] = future.result()
-
-        combined = tuple(nodeid for tier in sorted(tier_collections, key=lambda item: item.value) for nodeid in tier_collections[tier])
-        duplicate_nodeids = sorted(nodeid for nodeid, count in Counter(combined).items() if count != 1)
-        if duplicate_nodeids:
-            raise ValueError(f"lane collection contains duplicate nodeids: {duplicate_nodeids[:5]}")
+        tier_collections = {
+            tier: tuple(nodeid for nodeid in canonical if classified[nodeid] is tier)
+            for tier in sorted(set(classified.values()), key=lambda item: item.value)
+        }
+        combined = tuple(
+            nodeid
+            for tier in sorted(tier_collections, key=lambda item: item.value)
+            for nodeid in tier_collections[tier]
+        )
         if Counter(combined) != Counter(canonical):
             missing = sorted((Counter(canonical) - Counter(combined)).elements())
             extra = sorted((Counter(combined) - Counter(canonical)).elements())
             raise ValueError(
-                "lane collection differs from canonical collection: "
+                "tier partition differs from canonical collection: "
                 f"missing={missing[:5]} extra={extra[:5]}"
             )
-        for tier, nodeids in tier_collections.items():
-            wrong = [nodeid for nodeid in nodeids if classified[nodeid] != tier]
-            if wrong:
-                raise ValueError(f"tier collection contains misclassified nodeids for {tier.value}: {wrong[:5]}")
 
         canonical_payload = "\n".join(canonical).encode("utf-8")
         file_counts = Counter(nodeid.split("::", 1)[0] for nodeid in canonical)
@@ -520,10 +534,15 @@ class RegressionOrchestrator:
             planning_units: list[tuple[str, int, tuple[str, ...], float]] = []
             for manifest in manifests:
                 for file_path in manifest.files:
-                    targets = tuple(by_file.get(file_path, ()))
+                    file_targets = tuple(by_file.get(file_path, ()))
+                    targets = tuple(
+                        nodeid
+                        for nodeid in file_targets
+                        if self._classified_nodeids.get(nodeid, tier) is tier
+                    )
                     if not targets:
                         raise ValueError(
-                            f"manifest file {file_path} has no canonically collected nodeids"
+                            f"manifest file {file_path} has no canonically collected nodeids for {tier.value}"
                         )
                     measured_seconds = FILE_RUNTIME_SECONDS.get(file_path)
                     shard_count = (
@@ -538,7 +557,7 @@ class RegressionOrchestrator:
                     ):
                         shard = targets[offset : offset + shard_size]
                         weight = (
-                            measured_seconds * len(shard) / len(targets)
+                            measured_seconds * len(shard) / len(file_targets)
                             if measured_seconds is not None
                             else float(len(shard))
                         )
@@ -866,7 +885,7 @@ class RegressionOrchestrator:
             f"Total lanes: {total_lanes} "
             f"(running: {len(lanes_to_run)}, resumed: {resumed_count})\n"
             f"Collection: {collection['canonical_count']} nodeids | "
-            f"sha256: {str(collection['canonical_sha256'])[:12]} | exact tier union\n"
+            f"sha256: {str(collection['canonical_sha256'])[:12]} | exact tier partition\n"
             f"{'='*78}", flush=True
         )
 

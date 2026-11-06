@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,7 @@ from stagemesh.test_isolation import (
 )
 from stagemesh.test_taxonomy import (
     FILE_TIER_MAP,
+    TEST_NODEID_OVERRIDES,
     TIER_ISOLATION_CONTRACTS,
     TestTier,
     catalog_digest,
@@ -205,10 +207,18 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     assert tier_for_test("tests/test_continuous_driver.py::test_process_recovery") is TestTier.NATIVE_PLATFORM
     assert tier_for_test("tests/test_regression_architecture_acceptance.py") is TestTier.NATIVE_PLATFORM
     assert tier_for_test("tests/test_provider_outage_recovery.py") is TestTier.SERIAL_TIMING
+    assert (
+        tier_for_test("tests/test_workspace_ownership.py::test_dead_owner_then_outside_commit_is_not_recovered")
+        is TestTier.NATIVE_PLATFORM
+    )
+    assert tier_for_test("tests/test_workspace_ownership.py::test_authorized_agent_edit_is_committed_and_sealed_as_the_candidate") is TestTier.INTEGRATION_PROCESS
     timing_lanes = [lane for lane in build_default_lanes() if lane.tier is TestTier.SERIAL_TIMING]
     assert len(timing_lanes) == 1
     assert timing_lanes[0].parallel_safe is False
     assert timing_lanes[0].files == ("tests/test_provider_outage_recovery.py",)
+    native_lanes = [lane for lane in build_default_lanes() if lane.tier is TestTier.NATIVE_PLATFORM]
+    assert len(native_lanes) == 1
+    assert "tests/test_workspace_ownership.py" in native_lanes[0].files
 
 
 def test_worker_filesystem_and_env_isolation(tmp_path: Path) -> None:
@@ -586,7 +596,7 @@ def test_catalog_completeness_and_canonical_bijection() -> None:
     """Every test file in the repository must be classified in exactly one tier."""
     assert len(FILE_TIER_MAP) == 211
 
-    # All 5 tiers must have represented tests
+    # All tiers must have represented tests
     tiers_represented = set(FILE_TIER_MAP.values())
     assert tiers_represented == set(TestTier)
 
@@ -596,12 +606,16 @@ def test_catalog_completeness_and_canonical_bijection() -> None:
     assert isinstance(digest, str) and len(digest) == 64
     assert isinstance(fingerprint, str) and len(fingerprint) == 64
 
-    # Build default lanes and verify no file is lost or duplicated
+    # Build default lanes and verify no catalog file is lost. A file with an
+    # explicit node-level override is intentionally present in both tier
+    # manifests; execution planning partitions its node IDs exactly once.
     default_lanes = build_default_lanes()
     lane_files = [f for lane in default_lanes for f in lane.files]
-    assert len(lane_files) == 211
     assert set(lane_files) == set(FILE_TIER_MAP.keys())
-    assert len(lane_files) == len(set(lane_files)), "Duplicate files found across lanes!"
+    duplicated_files = {
+        file_path for file_path, count in Counter(lane_files).items() if count > 1
+    }
+    assert duplicated_files == {"tests/test_workspace_ownership.py"}
 
 
 def test_catalog_rejects_unreviewed_or_invalid_runtime_weights(
@@ -636,6 +650,24 @@ def test_live_canonical_collection_equals_tier_union() -> None:
     execution_nodeids = tuple(target for lane in execution_lanes for target in lane.files)
     assert len(execution_nodeids) == len(orchestrator._canonical_nodeids)
     assert set(execution_nodeids) == set(orchestrator._canonical_nodeids)
+    lane_tier_by_nodeid = {
+        nodeid: lane.tier for lane in execution_lanes for nodeid in lane.files
+    }
+    workspace_nodeids = {
+        nodeid
+        for nodeid in orchestrator._canonical_nodeids
+        if nodeid.startswith("tests/test_workspace_ownership.py::")
+    }
+    assert workspace_nodeids & set(TEST_NODEID_OVERRIDES) == set(TEST_NODEID_OVERRIDES)
+    assert {
+        nodeid
+        for nodeid in workspace_nodeids
+        if lane_tier_by_nodeid[nodeid] is TestTier.NATIVE_PLATFORM
+    } == set(TEST_NODEID_OVERRIDES)
+    assert all(
+        lane_tier_by_nodeid[nodeid] is TestTier.INTEGRATION_PROCESS
+        for nodeid in workspace_nodeids - set(TEST_NODEID_OVERRIDES)
+    )
     parallel_tiers = {
         lane.tier for lane in execution_lanes if lane.parallel_safe
     }
@@ -769,10 +801,8 @@ def test_collection_audit_rejects_duplicate_tier_union(monkeypatch: pytest.Monke
     )
     orchestrator = RegressionOrchestrator(lanes=lanes, jobs=2)
 
-    def collect(files: tuple[str, ...], _worker_id: int) -> tuple[str, ...]:
-        if len(files) == 2:
-            return (nodeid, f"{integration_file}::test_two")
-        return (nodeid,)
+    def collect(_files: tuple[str, ...], _worker_id: int) -> tuple[str, ...]:
+        return (nodeid, nodeid)
 
     monkeypatch.setattr(orchestrator, "_collect_nodeids", collect)
     monkeypatch.setattr(
@@ -783,7 +813,7 @@ def test_collection_audit_rejects_duplicate_tier_union(monkeypatch: pytest.Monke
         },
     )
     try:
-        with pytest.raises(ValueError, match="duplicate nodeids"):
+        with pytest.raises(ValueError, match="canonical collection contains duplicate nodeids"):
             orchestrator._audit_collection()
     finally:
         orchestrator._pool_isolation.cleanup()
@@ -801,21 +831,19 @@ def test_collection_audit_rejects_missing_and_extra_nodeids(monkeypatch: pytest.
     )
     orchestrator = RegressionOrchestrator(lanes=lanes, jobs=2)
 
-    def collect(files: tuple[str, ...], _worker_id: int) -> tuple[str, ...]:
-        if len(files) == 2:
-            return (unit_nodeid, integration_nodeid)
-        return (unit_nodeid,) if files == (unit_file,) else (extra_nodeid,)
+    def collect(_files: tuple[str, ...], _worker_id: int) -> tuple[str, ...]:
+        return (unit_nodeid, integration_nodeid)
 
     monkeypatch.setattr(orchestrator, "_collect_nodeids", collect)
     monkeypatch.setattr(
         "stagemesh.regression_orchestrator.validate_catalog",
         lambda _nodeids, **_kwargs: {
             unit_nodeid: TestTier.DETERMINISTIC_UNIT,
-            integration_nodeid: TestTier.INTEGRATION_PROCESS,
+            extra_nodeid: TestTier.INTEGRATION_PROCESS,
         },
     )
     try:
-        with pytest.raises(ValueError, match="differs from canonical collection"):
+        with pytest.raises(ValueError, match="tier classification differs from canonical collection"):
             orchestrator._audit_collection()
     finally:
         orchestrator._pool_isolation.cleanup()

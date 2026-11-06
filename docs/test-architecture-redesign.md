@@ -10,7 +10,7 @@ This command is distinct from component validation and the synthetic stabilizati
 
 ## Coverage contract
 
-Before executing tests, the runner performs canonical pytest collection and independently collects every audited tier. It refuses to run when the tier union has a missing, extra, duplicate, malformed, or misclassified node ID. A successful verdict additionally requires the aggregate passed, failed, skipped, and subtest counts to equal the canonical collected count.
+Before executing tests, the runner performs one canonical pytest collection, validates every node ID against the reviewed taxonomy, and constructs a duplicate-free tier partition from that live collection. It refuses to run when collection or classification has a missing, extra, duplicate, malformed, orphaned, or unclassified node ID. This permits a small reviewed node-level override to move host-sensitive evidence without collecting or executing the rest of its file twice. A successful verdict additionally requires the aggregate passed, failed, skipped, and subtest counts to equal the canonical collected count.
 
 `src/stagemesh/test_taxonomy.py` is the reviewed file manifest. New or renamed test files fail closed until classified. The tier names describe execution and isolation contracts; they do not claim that every file is a pure unit test. After the file-level audit, tests are packed into deterministic runtime-balanced batches, with four batches per worker for unit, component, and soak tiers and six for process-heavy integration. Only measured files above the ten-minute batch target are split, into stable contiguous node-ID ranges; this replaces the former blanket twelve-test sharding while retaining enough work stealing for slow files. The exact node-ID union is checked and native-platform tests remain in one explicitly serial batch.
 
@@ -70,9 +70,11 @@ A repository-wide audit found the same shared-standard-library mutation in persi
 
 The next exact run on `fd683bf` passed 19 lanes before `integration-batch-27` reached its unchanged 900-second timeout after printing progress for roughly 106 of 107 tests. The final test passed alone in 11.86 seconds, proving the failure was aggregate lane size rather than a functional hang. Integration packing therefore uses six batches per worker while lighter parallel tiers remain at four. The rebuilt real plan has 48 integration lanes; the formerly last test is now in a 23-node lane estimated at 345.025 seconds. Timeouts and assertions remain unchanged. This packing evidence is structural only until another complete exact-head run passes.
 
+The six-batch run on `3f6b116` passed 50 lanes before one workspace-ownership test observed a killed owner as still active/unknown under high Windows process churn. The exact test passed alone in 5.70 seconds. All six tests that create, kill, and classify the same real owner process are now node-level native-platform overrides; the other 70 workspace-ownership tests remain parallel integration coverage. This isolates the PID-reuse/process-death contract without serializing the whole file or weakening its fail-closed identity assertion.
+
 The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
 
-- canonical collection equals the duplicate-free audited union;
+- canonical collection equals the duplicate-free audited tier partition;
 - every currently collected outcome is accounted for, including the existing skips;
 - no lane fails or times out;
 - wall time is at most 1,800 seconds;
