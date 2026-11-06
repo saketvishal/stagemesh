@@ -61,9 +61,10 @@ def rig(tmp_path, monkeypatch, independent=True, intermediate=False):
 
 def test_supervised_ff_preserves_sha_lands_and_syncs_without_merge_commit(tmp_path, monkeypatch):
     repo, remote, base, sha, store, _ci, _adapter, _pr = rig(tmp_path, monkeypatch)
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    clock = lambda: 100.0
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    result = merger(record, time.time() + 20)
+    result = merger(record, clock() + 20)
     assert result["merged"], result
     assert git(remote, "rev-parse", "main") == sha == git(repo, "rev-parse", "main")
     assert git(repo, "rev-list", "--count", f"{base}..main") == "1"
@@ -74,7 +75,8 @@ def test_supervised_ff_preserves_sha_lands_and_syncs_without_merge_commit(tmp_pa
 def test_supervisor_refuses_non_independent_review_before_push(tmp_path, monkeypatch):
     repo, remote, base, sha, store, _ci, _adapter, _pr = rig(tmp_path, monkeypatch, independent=False)
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(record, time.time()+20)
+    clock = lambda: 100.0
+    result = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)(record, clock() + 20)
     assert not result["merged"] and git(remote, "rev-parse", "main") == base
 
 
@@ -88,8 +90,11 @@ def test_landing_waits_for_mergeability_recalculation(tmp_path, monkeypatch):
         return replace(pr, mergeable=None) if len(calls) == 1 else pr
     monkeypatch.setattr(adapter, "get", get)
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    result = ff.make_merger(store, repo, "refs/heads/main", ("web",), sleeper=lambda _seconds: None)(
-        record, time.time() + 20
+    clock = lambda: 100.0
+    result = ff.make_merger(
+        store, repo, "refs/heads/main", ("web",), clock=clock, sleeper=lambda _seconds: None
+    )(
+        record, clock() + 20
     )
     assert result["merged"] and len(calls) > 1
     assert git(remote, "rev-parse", "main") == sha == git(repo, "rev-parse", "main")
@@ -106,10 +111,11 @@ def test_conflicted_published_candidate_requests_refresh_before_missing_ci(tmp_p
     monkeypatch.setattr(adapter, "get", lambda number: replace(pr, mergeable=False))
     monkeypatch.setattr(ci, "run_for", lambda sha: pytest.fail("obsolete candidate waited for CI"))
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    clock = lambda: 100.0
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)
     lines = []
     merger.progress = lines.append
-    result = merger(record, time.time() + 20)
+    result = merger(record, clock() + 20)
     assert result["refresh_required"] and result["remote_landed"] is False
     assert result["base_sha"] == advanced
     assert any("refresh required" in line and "conflicts" in line for line in lines)
@@ -124,8 +130,9 @@ def test_conflict_with_ancestral_base_is_reported_not_blindly_refreshed(tmp_path
     repo, remote, base, sha, store, ci, adapter, pr = rig(tmp_path, monkeypatch)
     monkeypatch.setattr(adapter, "get", lambda number: replace(pr, mergeable=False))
     monkeypatch.setattr(ci, "run_for", lambda sha: pytest.fail("known conflict waited for CI"))
-    result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(
-        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), time.time() + 20,
+    clock = lambda: 100.0
+    result = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)(
+        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), clock() + 20,
     )
     assert not result.get("refresh_required") and "ancestral" in result["reason"]
     assert git(remote, "rev-parse", "main") == base
@@ -231,8 +238,9 @@ def test_entire_stack_validation_rejects_invalid_later_member(tmp_path, monkeypa
     else:
         kind = EvidenceKind.REVIEW if failure == "review" else EvidenceKind.INTEGRATION
         store.add_evidence("SECOND", second, kind, EvidenceStatus.FAILED)
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
-    assert merger.validate_records(records, time.time() + 30)
+    clock = lambda: 100.0
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)
+    assert merger.validate_records(records, clock() + 30)
     assert git(remote, "rev-parse", "main") == base == git(repo, "rev-parse", "main")
 
 
@@ -429,8 +437,20 @@ def test_already_merged_pr_cannot_bypass_current_policy(tmp_path, monkeypatch, p
         adapter.hosted_requirements = {("contracts", None)}
         monkeypatch.setattr(adapter, "_request", lambda method, path: (200,
             {"check_runs": []} if "/check-runs?" in path else []))
-    result = ff.make_merger(store, repo, "refs/heads/main", adapter.required_checks)(
-        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), time.time() + 0.2)
+    now = [100.0]
+    clock = lambda: now[0]
+    sleeper = lambda seconds: now.__setitem__(0, now[0] + seconds)
+    result = ff.make_merger(
+        store,
+        repo,
+        "refs/heads/main",
+        adapter.required_checks,
+        clock=clock,
+        sleeper=sleeper,
+    )(
+        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha),
+        clock() + 0.2,
+    )
     assert not result["merged"] and result["remote_landed"] is True
     assert git(repo, "rev-parse", "main") == base
 

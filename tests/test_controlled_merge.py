@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import replace
 
 import pytest
@@ -166,8 +165,10 @@ def test_controlled_merge_preserves_local_evidence_and_blocking_finding_gates(tm
         store.add_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, {} if problem == "unbound" else payload)
     else:
         store.add_evidence(TASK, sha, EvidenceKind.VALIDATION if problem == "validation" else EvidenceKind.REVIEW, EvidenceStatus.FAILED)
-    result = ff.make_merger(store, repo, "refs/heads/main", ("web",), policy="stagemesh", check_app_id=15368)(
-        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), time.time()+20)
+    clock = lambda: 100.0
+    result = ff.make_merger(
+        store, repo, "refs/heads/main", ("web",), policy="stagemesh", check_app_id=15368, clock=clock
+    )(TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), clock() + 20)
     assert not result["merged"] and git(remote, "rev-parse", "main") == base
 
 
@@ -182,8 +183,10 @@ def test_controlled_landing_records_partial_success_when_pr_head_changes_during_
             monkeypatch.setattr(adapter, "get", lambda number: replace(pr, head_sha=base))
         return result
     monkeypatch.setattr(adapter, "bounded_git", race)
-    result = ff.make_merger(store, repo, "refs/heads/main", ("web",), policy="stagemesh", check_app_id=15368)(
-        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), time.time()+20)
+    clock = lambda: 100.0
+    result = ff.make_merger(
+        store, repo, "refs/heads/main", ("web",), policy="stagemesh", check_app_id=15368, clock=clock
+    )(TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), clock() + 20)
     assert not result["merged"] and result["remote_landed"] is True
     assert git(remote, "rev-parse", "main") == sha
     assert git(repo, "rev-parse", "main") == base  # no automatic continuation or repeat push
