@@ -79,6 +79,16 @@ def test_documents_strict_timestamp_and_query_decoding_rules():
         assert phrase in DOC, phrase
 
 
+def test_documents_bounded_objective_projection_and_privacy_boundary():
+    for phrase in (
+        "`GET /api/v1/objectives`", "`stagemesh.objectives/1`", "`UNPLANNED`",
+        "`PARTIAL`", "`IN_PROGRESS`", "`BLOCKED`", "`COMPLETE`", "`UNAVAILABLE`",
+        "raw objective payload", "source issue body", "100 newest objective records",
+        "No objective mutation",
+    ):
+        assert phrase in DOC, phrase
+
+
 def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
     workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     windows, _, linux = workflow.partition("\n  linux:")

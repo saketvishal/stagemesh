@@ -26,6 +26,7 @@ talks to a loopback server it starts or attaches to; the browser talks to the sa
 | --- | --- |
 | `GET /api/v1/activity` | One page of activity entries, newest first |
 | `GET /api/v1/health` | Authenticated liveness and `version`, so a shell can detect an incompatible server |
+| `GET /api/v1/objectives` | Bounded objective plans correlated with current recorded child task state |
 
 Task drill-down is `GET /api/v1/activity?task_id=<id>`, which the projection already supports. `health` takes no
 parameters and returns `{"status": "ok", "version": ...}` so a shell can detect an incompatible server.
@@ -477,6 +478,44 @@ provider output or arbitrary URL is selected. Pending approval coverage retains
 an `UNKNOWN` row. The dashboard task pane consumes only this contract; task links
 from activity, intervals, failures and pending decisions share the same view,
 with an explicit action to enter the separately labelled retained-history filter.
+
+## Objective and planning snapshot
+
+`GET /api/v1/objectives` uses `stagemesh.objectives/1`. It accepts no query
+parameters and shares the loopback, Bearer, `GET`-only, no-store and SQLite
+read-only/query-only boundary. It does not create plans or tasks, approve work,
+invoke a provider, or expose controls.
+
+The response is bounded to 100 newest objective records and 100 displayed child
+tasks per objective. `total`, `truncated`, `detail_limit`, `child_limit` and each
+`children_truncated` value make those limits explicit. Each objective exposes only
+its safe identifier and title, recorded timestamps, `plan_state`,
+`attention_required`, fixed status counts and bounded child rows. Child rows contain
+only task identifier, title, stage, status, recorded/not-recorded state and planned
+dependency identifiers. A live state is correlated only by the exact stored child
+task id; StageMesh does not infer completion from issue text, commits or elapsed
+time.
+
+The fixed plan states are:
+
+- `UNPLANNED`: a recorded source objective has no structured child plan yet;
+- `READY`: all planned children are recorded and remain open at `PLAN`;
+- `PARTIAL`: one or more planned children are not recorded yet;
+- `IN_PROGRESS`: recorded work has advanced or completed, but the objective is not complete;
+- `BLOCKED`: at least one recorded child is blocked;
+- `COMPLETE`: every planned child is recorded as done;
+- `UNAVAILABLE`: the stored planning shape is malformed, oversized or contains an unknown durable state.
+
+The projection never returns the raw objective payload, source issue body, labels,
+prompts, provider output, commands, filesystem paths or arbitrary URLs. A malformed
+or oversized payload fails closed as `UNAVAILABLE` without an error detail derived
+from the payload. Source objectives without a structured plan remain `UNPLANNED`,
+which is distinct from malformed data and from a plan with no live child row.
+
+The shared browser/desktop UI provides objective text/state filters, deterministic
+sorting, an explicit bounded-plan detail, and links only recorded children to the
+existing task-detail projection. Back/Escape restores the Objective view and focus.
+No objective mutation is available in the UI.
 
 ## Execution detail snapshot
 

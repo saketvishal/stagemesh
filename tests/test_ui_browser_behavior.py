@@ -284,6 +284,41 @@ DRIVER = r"""
       out.staleFactsPreserved = $("execution-facts").textContent === facts;
     },
 
+    async objectives() {
+      await until(() => document.querySelectorAll("#objective-rows tr").length === 1, "objective snapshot");
+      $("show-objectives").click();
+      out.viewVisible = !$("objectives-view").hidden && $("activity-view").hidden;
+      out.summary = $("objectives-summary").textContent;
+      out.planState = document.querySelector("#objective-rows tr").textContent;
+      $("objective-search").value = "does-not-exist";
+      $("objective-search").dispatchEvent(new Event("input"));
+      out.filteredRows = document.querySelectorAll("#objective-rows tr").length;
+      out.emptyMessage = $("objectives-message").textContent;
+      $("objective-search").value = "operator objective";
+      $("objective-search").dispatchEvent(new Event("input"));
+      const objective = document.querySelector("#objective-rows button");
+      objective.focus(); objective.click();
+      await until(() => !$("objective-detail").hidden, "objective detail");
+      out.childRows = document.querySelectorAll("#objective-children tr").length;
+      out.detailNote = $("objective-detail-note").textContent;
+      let child = document.querySelector("#objective-children button");
+      child.focus();
+      $("objective-refresh").click();
+      await until(() => !child.isConnected, "objective refresh");
+      out.childRefreshFocus = !!document.activeElement &&
+        document.activeElement.dataset.objectiveChildKey === child.dataset.objectiveChildKey;
+      child = document.activeElement;
+      child.click();
+      await until(() => !$("task-view").hidden, "objective child task detail");
+      out.taskVisible = !$("task-view").hidden;
+      document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+      await until(() => !$("objectives-view").hidden, "objective return from task detail");
+      out.childFocusRestored = document.activeElement === child;
+      $("close-objective").click();
+      out.objectiveFocusRestored = !!document.activeElement &&
+        document.activeElement.dataset.objectiveKey === objective.dataset.objectiveKey;
+    },
+
     // Load more is accepted but its second-page response is still in flight when a refresh happens.
     async pending() {
       await until(() => rows() === 100, "first page");
@@ -543,6 +578,19 @@ def status_base(tmp_path: Path):
             ],
         },
     )
+    store.save_objective(
+        "operator-objective",
+        "Operator objective",
+        {
+            "id": "operator-objective",
+            "title": "Operator objective",
+            "tasks": [
+                {"id": task, "title": "Status task"},
+                {"id": dependency, "title": "Dependency", "dependencies": [task]},
+                {"id": "future-child", "title": "Future child"},
+            ],
+        },
+    )
     store.close()
     assert running
     site = tmp_path / "status-site"
@@ -650,6 +698,17 @@ def test_execution_detail_preserves_last_good_snapshot_on_auth_failure(status_ba
     result = run_scenario(status_base, "executionAuth", tmp_path)
     assert result["staleVisible"] is True and result["staleFactsPreserved"] is True
     assert "Could not load execution detail" in result["staleMessage"] and "stale" in result["staleMessage"]
+
+
+def test_objective_view_filters_drills_into_children_and_restores_focus(status_base, tmp_path: Path):
+    result = run_scenario(status_base, "objectives", tmp_path)
+    assert result["viewVisible"] is True and "Bounded to 100 objectives" in result["summary"]
+    assert "BLOCKED" in result["planState"]
+    assert result["filteredRows"] == 0 and "No loaded objectives match" in result["emptyMessage"]
+    assert result["childRows"] == 3 and "1 blocked" in result["detailNote"]
+    assert result["taskVisible"] is True
+    assert result["childRefreshFocus"] is True
+    assert result["childFocusRestored"] is True and result["objectiveFocusRestored"] is True
 
 
 def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fixture_base, tmp_path: Path):

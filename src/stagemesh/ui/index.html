@@ -20,6 +20,7 @@
 <nav aria-label="Operator views">
   <button type="button" id="show-activity" aria-pressed="true">Activity</button>
   <button type="button" id="show-status" aria-pressed="false">Status</button>
+  <button type="button" id="show-objectives" aria-pressed="false">Objectives</button>
   <button type="button" id="show-control" aria-pressed="false" hidden>Control</button>
   <button type="button" id="show-task" aria-pressed="false" hidden>Task detail</button>
   <button type="button" id="show-execution" aria-pressed="false" hidden>Execution detail</button>
@@ -152,6 +153,36 @@
   <section aria-labelledby="selection-heading">
     <h3 id="selection-heading">Provider selections</h3>
     <table><thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Policy</th><th scope="col">Recorded order</th><th scope="col">Eligibility</th></tr></thead><tbody id="selection-rows"></tbody></table>
+  </section>
+</main>
+<main id="objectives-view" hidden>
+  <h2>Objectives and planned work</h2>
+  <p id="objectives-summary" class="muted" role="status" aria-live="polite"></p>
+  <form id="objective-filters" aria-label="Objective filters">
+    <label>Search <input id="objective-search" type="search" maxlength="200" placeholder="objective id or title"></label>
+    <label>Plan state
+      <select id="objective-state"><option value="">All</option><option>UNPLANNED</option><option>READY</option><option>PARTIAL</option><option>IN_PROGRESS</option><option>BLOCKED</option><option>COMPLETE</option><option>UNAVAILABLE</option></select>
+    </label>
+    <label>Sort
+      <select id="objective-sort"><option value="updated">Recently updated</option><option value="title">Title</option><option value="state">Plan state</option><option value="progress">Completed work</option></select>
+    </label>
+    <button type="button" id="objective-refresh">Refresh objectives</button>
+  </form>
+  <p id="objectives-message" role="status" aria-live="polite"></p>
+  <table id="objectives-table" tabindex="-1">
+    <caption class="sr">Bounded objective plans correlated with current recorded child task state.</caption>
+    <thead><tr><th scope="col">Objective</th><th scope="col">Plan state</th><th scope="col">Recorded</th><th scope="col">Done</th><th scope="col">Blocked</th><th scope="col">Not recorded</th><th scope="col">Updated</th></tr></thead>
+    <tbody id="objective-rows"></tbody>
+  </table>
+  <section id="objective-detail" aria-labelledby="objective-detail-heading" hidden>
+    <p><button type="button" id="close-objective">Close objective plan</button></p>
+    <h3 id="objective-detail-heading" tabindex="-1">Objective plan</h3>
+    <p id="objective-detail-note" class="muted"></p>
+    <table id="objective-children-table" tabindex="-1">
+      <caption class="sr">Planned child tasks and their current recorded state.</caption>
+      <thead><tr><th scope="col">Task</th><th scope="col">Title</th><th scope="col">Stage</th><th scope="col">Status</th><th scope="col">Recorded</th><th scope="col">Dependencies</th></tr></thead>
+      <tbody id="objective-children"></tbody>
+    </table>
   </section>
 </main>
 <main id="control-view" hidden>
