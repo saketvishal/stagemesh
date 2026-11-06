@@ -25,6 +25,7 @@
   let objectivesSnapshot = null, objectiveGeneration = 0, objectiveLastGood = null;
   let objectiveInflight = false, selectedObjectiveId = null, objectiveOpener = null;
   let doctorSnapshot = null, doctorGeneration = 0, doctorLastGood = null, doctorInflight = false;
+  let providersSnapshot = null, providersGeneration = 0, providersLastGood = null, providersInflight = false;
   let controlCapabilities = null, controlIntent = null, controlBusy = false;
   let projectTargets = new Map();
 
@@ -138,6 +139,12 @@
     el.className = level;
   }
 
+  function setProvidersMessage(text, level = "") {
+    const el = $("providers-message");
+    el.textContent = text;
+    el.className = level;
+  }
+
   async function loadObjectives(quiet) {
     if (!token) {
       setObjectivesMessage("No access token. Open the URL printed by `stagemesh serve`.", "error");
@@ -206,6 +213,43 @@
       $("doctor-summary").className = authorizationFailed ? "error" : "warn";
     } finally {
       if (mine === doctorGeneration) doctorInflight = false;
+    }
+  }
+
+  async function loadProviders(quiet) {
+    if (!token) {
+      setProvidersMessage("No access token. Open the URL printed by `stagemesh serve`.", "error");
+      return;
+    }
+    if (providersInflight) return;
+    const mine = ++providersGeneration;
+    providersInflight = true;
+    if (!quiet) setProvidersMessage("Loading bounded provider status...");
+    try {
+      const projection = await api("/api/v1/providers");
+      if (mine !== providersGeneration) return;
+      providersSnapshot = projection;
+      providersLastGood = new Date();
+      renderProviders();
+      setProvidersMessage(
+        projection.status === "UNAVAILABLE"
+          ? "Provider configuration is unavailable; no provider details were projected."
+          : projection.truncated || projection.acceptance_history_truncated
+            ? "Provider or acceptance history is truncated; unavailable evidence is not treated as missing proof."
+            : "",
+        projection.status === "UNAVAILABLE" ? "error" :
+          projection.truncated || projection.acceptance_history_truncated ? "warn" : "",
+      );
+    } catch (error) {
+      if (mine !== providersGeneration) return;
+      const authorizationFailed = error.status === 401 || error.status === 403;
+      if (authorizationFailed) providersSnapshot = null;
+      renderProviders();
+      const stale = providersLastGood && !authorizationFailed
+        ? " Showing the last provider snapshot from " + providersLastGood.toLocaleTimeString() + " (stale)." : "";
+      setProvidersMessage("Could not load provider status: " + error.message + "." + stale, authorizationFailed ? "error" : "warn");
+    } finally {
+      if (mine === providersGeneration) providersInflight = false;
     }
   }
 
@@ -278,7 +322,8 @@
   }
 
   const refresh = () => {
-    if (!$("doctor-view").hidden) loadDoctor(false);
+    if (!$("providers-view").hidden) loadProviders(false);
+    else if (!$("doctor-view").hidden) loadDoctor(false);
     else if (!$("objectives-view").hidden) loadObjectives(false);
     else loadRange(false);
   };
@@ -364,6 +409,7 @@
     if (!$("task-view").hidden) return "task";
     if (!$("objectives-view").hidden) return "objectives";
     if (!$("doctor-view").hidden) return "doctor";
+    if (!$("providers-view").hidden) return "providers";
     if (!$("status-view").hidden) return "status";
     if (!$("control-view").hidden) return "control";
     return "activity";
@@ -673,6 +719,85 @@
       ["Spec governance enabled", policies.spec_governance.enabled],
       ["Automatic task selection", policies.task_selection.automatic],
     ]);
+  }
+
+  function liveProviderState(provider, stage) {
+    const value = provider.live_acceptance[stage];
+    return typeof value === "string" ? value : value.state;
+  }
+
+  function providerRows() {
+    if (!providersSnapshot) return [];
+    const search = $("provider-search").value.trim().toLocaleLowerCase();
+    const capability = $("provider-capability").value;
+    const posture = $("provider-posture").value;
+    const result = providersSnapshot.providers.filter((provider) => {
+      if (search && !provider.name.toLocaleLowerCase().includes(search)) return false;
+      if (capability && !provider.capabilities.includes(capability)) return false;
+      if (posture === "authorized" && !provider.authorized_for_unattended) return false;
+      if (posture === "not-authorized" && provider.authorized_for_unattended) return false;
+      if (posture === "discovered" && provider.executable_discovery !== "DISCOVERED") return false;
+      if (posture === "not-discovered" && provider.executable_discovery !== "NOT_DISCOVERED") return false;
+      if (posture === "cooling" && !provider.cooldown.active) return false;
+      if (posture === "invoked" && !provider.invocation.recorded) return false;
+      if (posture === "never-invoked" && provider.invocation.recorded) return false;
+      return true;
+    });
+    const mode = $("provider-sort").value;
+    result.sort((left, right) => {
+      if (mode === "invocations") return right.invocation.total - left.invocation.total || left.name.localeCompare(right.name);
+      if (mode === "recent") return (right.invocation.last_started_at || 0) - (left.invocation.last_started_at || 0) || left.name.localeCompare(right.name);
+      return left.name.localeCompare(right.name);
+    });
+    return result;
+  }
+
+  function renderProviders() {
+    const body = $("provider-rows");
+    body.replaceChildren();
+    const snapshot = providersSnapshot;
+    if (!snapshot) {
+      $("providers-summary").textContent = "Provider status is unavailable.";
+      return;
+    }
+    const items = providerRows();
+    const totalLabel = snapshot.provider_total_kind === "LOWER_BOUND"
+      ? "at least " + snapshot.provider_total
+      : snapshot.provider_total;
+    $("providers-summary").textContent = [
+      "Observed " + new Date(snapshot.observed_at).toLocaleString() + ".",
+      items.length + " shown of " + totalLabel + " provider records; limit " + snapshot.provider_limit + ".",
+      snapshot.withheld_provider_count + " unsafe provider identifiers withheld.",
+      "Provider calls " + snapshot.provider_calls + ", network calls " + snapshot.network_calls +
+        ", database writes " + snapshot.database_writes + ".",
+      "Billing usage " + snapshot.billing_usage + ".",
+      "Acceptance scan limit " + snapshot.acceptance_scan_limit +
+        (snapshot.acceptance_history_truncated ? " (truncated)." : "."),
+    ].join(" ");
+    for (const provider of items) {
+      const row = body.insertRow();
+      cell(row, provider.name); cell(row, provider.command_source);
+      cell(row, provider.capabilities.join(", ") || "recorded only");
+      cell(row, provider.authorization_configured
+        ? provider.authorized_for_unattended ? "authorized" : "not authorized"
+        : "allowlist absent");
+      cell(row, provider.executable_discovery.replaceAll("_", " ").toLocaleLowerCase());
+      cell(row, "implement " + liveProviderState(provider, "IMPLEMENT").toLocaleLowerCase() +
+        " / review " + liveProviderState(provider, "REVIEW").toLocaleLowerCase());
+      cell(row, provider.cooldown.active
+        ? provider.cooldown.failure_class + " (" + provider.cooldown.seconds_remaining + " seconds)"
+        : "not cooling");
+      cell(row, provider.invocation.recorded
+        ? provider.invocation.total + " total; " + provider.invocation.running + " running; " +
+          provider.invocation.succeeded + " succeeded; " + provider.invocation.failed + " failed; " +
+          provider.invocation.unknown + " unknown"
+        : "none recorded");
+      cell(row, provider.invocation.last_started_at == null
+        ? "never recorded" : new Date(provider.invocation.last_started_at * 1000).toLocaleString());
+    }
+    if (!items.length && snapshot.status === "AVAILABLE") {
+      setProvidersMessage("No loaded providers match these filters.");
+    }
   }
 
   function objectiveRows() {
@@ -1084,6 +1209,7 @@
     $("status-view").hidden = name !== "status";
     $("objectives-view").hidden = name !== "objectives";
     $("doctor-view").hidden = name !== "doctor";
+    $("providers-view").hidden = name !== "providers";
     $("control-view").hidden = name !== "control";
     $("task-view").hidden = name !== "task";
     $("execution-view").hidden = name !== "execution";
@@ -1091,6 +1217,7 @@
     $("show-status").setAttribute("aria-pressed", String(name === "status"));
     $("show-objectives").setAttribute("aria-pressed", String(name === "objectives"));
     $("show-doctor").setAttribute("aria-pressed", String(name === "doctor"));
+    $("show-providers").setAttribute("aria-pressed", String(name === "providers"));
     $("show-control").setAttribute("aria-pressed", String(name === "control"));
     $("show-task").setAttribute("aria-pressed", String(name === "task"));
     $("show-execution").setAttribute("aria-pressed", String(name === "execution"));
@@ -1138,6 +1265,7 @@
       if (!inflight) loadRange(true);
       if (!objectiveInflight && !$("objectives-view").hidden) loadObjectives(true);
       if (!doctorInflight && !$("doctor-view").hidden) loadDoctor(true);
+      if (!providersInflight && !$("providers-view").hidden) loadProviders(true);
     }, POLL_MS);
   }
 
@@ -1171,6 +1299,10 @@
     setView("doctor");
     loadDoctor(Boolean(doctorSnapshot));
   });
+  $("show-providers").addEventListener("click", () => {
+    setView("providers");
+    loadProviders(Boolean(providersSnapshot));
+  });
   $("show-control").addEventListener("click", () => setView("control"));
   $("show-task").addEventListener("click", () => setView("task"));
   $("show-execution").addEventListener("click", () => setView("execution"));
@@ -1183,6 +1315,12 @@
   $("objective-sort").addEventListener("change", renderObjectives);
   $("objective-refresh").addEventListener("click", () => loadObjectives(false));
   $("doctor-refresh").addEventListener("click", () => loadDoctor(false));
+  $("provider-filters").addEventListener("submit", (event) => event.preventDefault());
+  $("provider-search").addEventListener("input", renderProviders);
+  $("provider-capability").addEventListener("change", renderProviders);
+  $("provider-posture").addEventListener("change", renderProviders);
+  $("provider-sort").addEventListener("change", renderProviders);
+  $("providers-refresh").addEventListener("click", () => loadProviders(false));
   $("close-objective").addEventListener("click", closeObjective);
   $("auto").addEventListener("change", schedule);
   $("control-action").addEventListener("change", () => { clearControlPlan(); updateControlTarget(); });

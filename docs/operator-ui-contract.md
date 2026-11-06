@@ -28,6 +28,7 @@ talks to a loopback server it starts or attaches to; the browser talks to the sa
 | `GET /api/v1/health` | Authenticated liveness and `version`, so a shell can detect an incompatible server |
 | `GET /api/v1/objectives` | Bounded objective plans correlated with current recorded child task state |
 | `GET /api/v1/doctor` | Local-only project configuration, isolation and policy posture |
+| `GET /api/v1/providers` | Bounded provider configuration, readiness evidence, cooldown and recorded use |
 
 Task drill-down is `GET /api/v1/activity?task_id=<id>`, which the projection already supports. `health` takes no
 parameters and returns `{"status": "ok", "version": ...}` so a shell can detect an incompatible server.
@@ -547,6 +548,60 @@ mismatched store still uses the ordinary generic `store_unavailable` behavior.
 The dashboard loads this route only when the Doctor view is opened, retains a
 last-good snapshot as visibly stale after retryable failures, and describes the
 configured/authorized/available/invoked distinction next to provider posture.
+
+## Provider status snapshot
+
+`GET /api/v1/providers` uses `stagemesh.provider-status/1`. It accepts no query
+parameters and shares the loopback, Bearer, `GET`-only, no-store and SQLite
+read-only/query-only boundary. It reloads configuration and inspects executable
+discovery, but never starts a provider, runs a capacity command, performs a live
+acceptance check, contacts a remote service, migrates the store, or writes state.
+
+The response is bounded to 100 provider rows and reports `provider_total`,
+`provider_total_kind`, `provider_limit` and `truncated`. `provider_total_kind`
+is `LOWER_BOUND` when the 500-actor execution scan is truncated, so the UI never
+presents an incomplete observed-provider count as exact. Live-acceptance history is read once, newest
+first, with an explicit 5,000-row `acceptance_scan_limit` and
+`acceptance_history_truncated`; missing evidence beyond a truncated scan is
+`UNAVAILABLE`, never silently relabelled `MISSING`. It includes safe provider name, command source
+classification, declared capabilities, whether an unattended allowlist exists,
+whether that provider is explicitly authorized, bare-executable discovery state,
+durable live-acceptance state per capability, active cooldown class/stages/time
+remaining, and aggregate recorded execution counts with the latest kind, status
+and start time. Historic execution actors that are no longer configured remain
+visible as `RECORDED_ONLY`; this does not silently claim they are installed or
+available.
+
+Provider identifiers must satisfy the existing safe activity-code boundary.
+Anything unsafe or secret-shaped is omitted, counted in
+`withheld_provider_count`, and still contributes to `provider_total`; the UI
+never makes a hidden row look like a complete list.
+
+These are deliberately separate observations:
+
+- `configured` means a built-in or project/environment command definition exists;
+- `authorized_for_unattended` means the explicit project allowlist includes it;
+- `executable_discovery=DISCOVERED` means only that a bare executable was found;
+- live acceptance is durable prior evidence and can be missing, failed, stale,
+  retry-due or passing independently for implementation and review;
+- `invocation.recorded` and its counts come only from durable execution rows.
+
+None of these facts alone proves a provider is currently healthy, has quota, or
+will complete work. `provider_calls=0`, `network_calls=0` and
+`database_writes=0` make this request's operational boundary explicit.
+Billing usage remains `UNKNOWN` because StageMesh must not invent token or cost telemetry.
+
+The projection never returns command text or arguments, executable paths,
+configuration text, environment values, credentials, provider output, cooldown
+output, clear commands, repository identity, task prompts, URLs or parser errors.
+Configured commands containing a path are `NOT_PROBED_PATH`; the path is neither
+returned nor treated as proof of availability. Invalid configuration returns the
+fixed `PROVIDER_CONFIGURATION_UNAVAILABLE` condition with no derived detail.
+
+The shared browser/desktop UI loads this route only when the Providers view is
+opened. It provides local search, capability/posture filters and deterministic
+sorting while preserving the same bounded snapshot and visibly stale last-good
+behavior. It exposes no provider invocation or cooldown-clear control.
 
 ## Execution detail snapshot
 

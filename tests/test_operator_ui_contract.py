@@ -100,12 +100,28 @@ def test_documents_local_only_doctor_and_provider_observation_boundaries():
         assert phrase in DOC, phrase
 
 
+def test_documents_bounded_provider_status_and_evidence_distinctions():
+    for phrase in (
+        "`GET /api/v1/providers`", "`stagemesh.provider-status/1`",
+        "`provider_total`", "`RECORDED_ONLY`", "`configured` means",
+        "`authorized_for_unattended` means", "`executable_discovery=DISCOVERED`",
+        "durable prior evidence", "`invocation.recorded`",
+        "`provider_calls=0`", "Billing usage remains `UNKNOWN`",
+        "`NOT_PROBED_PATH`", "`PROVIDER_CONFIGURATION_UNAVAILABLE`",
+        "never starts a provider", "`acceptance_scan_limit`",
+        "`acceptance_history_truncated`", "never silently relabelled `MISSING`",
+        "`withheld_provider_count`", "secret-shaped",
+    ):
+        assert phrase in DOC, phrase
+
+
 def test_ci_runs_the_activity_contract_and_api_modules_on_both_platforms():
     workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     windows, _, linux = workflow.partition("\n  linux:")
     for module in (
         "test_operator_ui_contract.py", "test_operator_api.py", "test_task_detail_api.py",
         "test_execution_detail_api.py", "test_operator_doctor_api.py",
+        "test_operator_providers_api.py",
         "test_activity.py", "test_api_server.py",
     ):
         assert module in windows, f"windows job omits {module}"

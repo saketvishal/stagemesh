@@ -53,6 +53,7 @@ from .operator_projects import (
     ProjectLaunchTickets,
     ProjectProjection,
 )
+from .operator_providers import PROVIDERS_CONTRACT, ProviderStatusProjection
 from .persistence import Store
 from .redaction import redact_output
 from .validation_services import e2e_policy_projection
@@ -987,6 +988,7 @@ class ActivityApi:
         projects: ProjectProjection | None = None,
         launch_tickets: ProjectLaunchTickets | None = None,
         doctor: ProjectDoctor | None = None,
+        provider_status: ProviderStatusProjection | None = None,
     ):
         if not token:
             raise ValueError("an access token is required")
@@ -997,6 +999,7 @@ class ActivityApi:
         self.projects = projects
         self.launch_tickets = launch_tickets or ProjectLaunchTickets(token)
         self.doctor = doctor
+        self.provider_status = provider_status
         self.allowed_hosts: frozenset[str] = frozenset()
 
     def bind(self, port: int) -> None:
@@ -1026,6 +1029,8 @@ class ActivityApi:
                 contract = OBJECTIVES_CONTRACT
             elif urlsplit(target).path == "/api/v1/doctor":
                 contract = DOCTOR_CONTRACT
+            elif urlsplit(target).path == "/api/v1/providers":
+                contract = PROVIDERS_CONTRACT
             elif urlsplit(target).path.startswith("/api/v5/"):
                 contract = CONTRACT_V5
             elif urlsplit(target).path.startswith("/api/v4/"):
@@ -1136,6 +1141,17 @@ class ActivityApi:
             finally:
                 store.conn.close()
             return _json(200, projection, DOCTOR_CONTRACT)
+        if path == "/api/v1/providers":
+            if parts.query:
+                raise ApiError(400, "invalid_query", "providers takes no parameters")
+            if self.provider_status is None:
+                raise ApiError(404, "not_found", "unknown route")
+            store = self._open()
+            try:
+                projection = self.provider_status.serialize(store)
+            finally:
+                store.conn.close()
+            return _json(200, projection, PROVIDERS_CONTRACT)
         if path in {"/api/v1/health", "/api/v2/health", "/api/v3/health", "/api/v4/health", "/api/v5/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")
@@ -1277,6 +1293,7 @@ def make_server(
     control: OperatorControl | None = None,
     projects: ProjectProjection | None = None,
     doctor: ProjectDoctor | None = None,
+    provider_status: ProviderStatusProjection | None = None,
 ) -> tuple[HTTPServer, ActivityApi]:
     access_token = token or secrets.token_urlsafe(32)
     # Preserve the original api_class constructor contract for test/embedding subclasses.
@@ -1284,6 +1301,7 @@ def make_server(
     api.control = control
     api.projects = projects
     api.doctor = doctor
+    api.provider_status = provider_status
     api.launch_tickets = ProjectLaunchTickets(access_token)
     handler = _handler(api)
     server = HTTPServer((LOOPBACK, port), handler)
