@@ -211,7 +211,7 @@ class RunIdentity:
 
 
 def build_default_lanes() -> tuple[Lane, ...]:
-    """Build file-granular parallel lanes and one explicit native serial lane."""
+    """Build file-granular parallel lanes and explicit bounded serial lanes."""
     tier_files: dict[TestTier, list[str]] = {tier: [] for tier in TestTier}
     for file_path, tier in FILE_TIER_MAP.items():
         tier_files[tier].append(file_path)
@@ -247,6 +247,19 @@ def build_default_lanes() -> tuple[Lane, ...]:
                 parallel_safe=False,
                 files=tuple(native_files),
                 timeout_seconds=TIER_ISOLATION_CONTRACTS[TestTier.NATIVE_PLATFORM].timeout_seconds * len(native_files),
+            )
+        )
+
+    timing_files = sorted(tier_files[TestTier.SERIAL_TIMING])
+    if timing_files:
+        contract = TIER_ISOLATION_CONTRACTS[TestTier.SERIAL_TIMING]
+        lanes.append(
+            Lane(
+                lane_id="serial-timing",
+                tier=TestTier.SERIAL_TIMING,
+                parallel_safe=False,
+                files=tuple(timing_files),
+                timeout_seconds=contract.timeout_seconds,
             )
         )
 
@@ -497,6 +510,7 @@ class RegressionOrchestrator:
             TestTier.INTEGRATION_PROCESS: "integration",
             TestTier.SOAK_FAILURE_INJECTION: "soak",
             TestTier.NATIVE_PLATFORM: "native",
+            TestTier.SERIAL_TIMING: "timing",
         }
         canonical_order = {nodeid: index for index, nodeid in enumerate(self._canonical_nodeids)}
         for tier in sorted(manifests_by_tier, key=lambda item: item.value):

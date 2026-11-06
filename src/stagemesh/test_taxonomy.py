@@ -23,6 +23,7 @@ class TestTier(str, Enum):
     COMPONENT_CONTRACT = "component_contract"
     INTEGRATION_PROCESS = "integration_process"
     NATIVE_PLATFORM = "native_platform"
+    SERIAL_TIMING = "serial_timing"
     SOAK_FAILURE_INJECTION = "soak_failure_injection"
 
     def __str__(self) -> str:
@@ -114,6 +115,22 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
         rationale=(
             "Host-sensitive native Windows job objects, OS process handle locks, "
             "user installer registry/shim changes, and real filesystem directory sharing."
+        ),
+    ),
+    TestTier.SERIAL_TIMING: IsolationContract(
+        tier=TestTier.SERIAL_TIMING,
+        parallel_safe=False,
+        concurrency_group="serial_timing",
+        max_parallel_workers=1,
+        requires_isolated_temp=True,
+        requires_isolated_git=True,
+        requires_isolated_sqlite=True,
+        requires_isolated_ports=True,
+        requires_isolated_env=True,
+        timeout_seconds=900.0,
+        rationale=(
+            "Wall-clock bounded recovery, backoff, and control tests whose timing "
+            "assertions require exclusive host scheduling without mocked clocks."
         ),
     ),
     TestTier.SOAK_FAILURE_INJECTION: IsolationContract(
@@ -246,7 +263,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_validation_recovery_ownership.py": TestTier.COMPONENT_CONTRACT,
 
     # -------------------------------------------------------------------------
-    # 3. Integration and Process (86 files)
+    # 3. Integration and Process (85 files)
     # -------------------------------------------------------------------------
     "tests/test_auto_plan.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_autonomy_delivery.py": TestTier.INTEGRATION_PROCESS,
@@ -307,7 +324,6 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_provider_authorization_e2e.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_provider_cleanup_confirmation.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_provider_cooldown.py": TestTier.INTEGRATION_PROCESS,
-    "tests/test_provider_outage_recovery.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_provider_pool.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_quota_live_retry.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_reattribution.py": TestTier.INTEGRATION_PROCESS,
@@ -336,7 +352,12 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_zero_config_github.py": TestTier.INTEGRATION_PROCESS,
 
     # -------------------------------------------------------------------------
-    # 4. Native Platform (12 files - explicit bounded serial)
+    # 4. Serial Timing (1 file - explicit bounded serial)
+    # -------------------------------------------------------------------------
+    "tests/test_provider_outage_recovery.py": TestTier.SERIAL_TIMING,
+
+    # -------------------------------------------------------------------------
+    # 5. Native Platform (12 files - explicit bounded serial)
     # -------------------------------------------------------------------------
     "tests/test_active_gate_stop.py": TestTier.NATIVE_PLATFORM,
     "tests/test_bounded_execution.py": TestTier.NATIVE_PLATFORM,
@@ -352,7 +373,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_workspace_environment_repair.py": TestTier.NATIVE_PLATFORM,
 
     # -------------------------------------------------------------------------
-    # 5. Soak and Failure Injection (13 files)
+    # 6. Soak and Failure Injection (13 files)
     # -------------------------------------------------------------------------
     "tests/test_stabilization_matrix.py": TestTier.SOAK_FAILURE_INJECTION,
     "tests/test_driver_acceptance.py": TestTier.SOAK_FAILURE_INJECTION,

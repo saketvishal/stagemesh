@@ -192,6 +192,8 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     assert TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].max_parallel_workers == 8
     assert TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].max_parallel_workers == 8
     assert TIER_ISOLATION_CONTRACTS[TestTier.NATIVE_PLATFORM].max_parallel_workers == 1
+    assert TIER_ISOLATION_CONTRACTS[TestTier.SERIAL_TIMING].parallel_safe is False
+    assert TIER_ISOLATION_CONTRACTS[TestTier.SERIAL_TIMING].max_parallel_workers == 1
     assert MAX_LOCAL_WORKERS == 8
     assert BATCHES_PER_WORKER_AND_TIER == 4
     assert (
@@ -200,6 +202,11 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     )
     assert tier_for_test("tests/test_continuous_driver.py::test_process_recovery") is TestTier.NATIVE_PLATFORM
     assert tier_for_test("tests/test_regression_architecture_acceptance.py") is TestTier.NATIVE_PLATFORM
+    assert tier_for_test("tests/test_provider_outage_recovery.py") is TestTier.SERIAL_TIMING
+    timing_lanes = [lane for lane in build_default_lanes() if lane.tier is TestTier.SERIAL_TIMING]
+    assert len(timing_lanes) == 1
+    assert timing_lanes[0].parallel_safe is False
+    assert timing_lanes[0].files == ("tests/test_provider_outage_recovery.py",)
 
 
 def test_worker_filesystem_and_env_isolation(tmp_path: Path) -> None:
