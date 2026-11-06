@@ -72,16 +72,29 @@ def test_component_mode_uses_validated_plan_file_on_each_required_os() -> None:
 def test_full_mode_has_one_authoritative_regression_and_published_evidence() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
     full_condition = "if: ${{ steps.validation-plan.outputs.mode == 'full' }}"
-    for os_name, job in jobs.items():
-        complete = _step(job, "Authoritative complete regression")
-        assert full_condition in complete
-        assert "scripts/run_regression.py" in complete
-        assert f"--jobs {4 if os_name == 'windows' else 6}" in complete
-        assert f"{os_name}-regression-journal.jsonl" in complete
-        assert f"{os_name}-regression-report.json" in complete
-        assert "STAGEMESH_CI_HEAD_SHA:" in complete
+    windows = _step(jobs["windows"], "Authoritative Windows platform regression")
+    assert full_condition in windows
+    assert "scripts/run_regression.py" in windows
+    assert "--profile windows-essential --jobs 1" in windows
+    assert "windows-regression-journal.jsonl" in windows
+    assert "windows-regression-report.json" in windows
+    assert "STAGEMESH_CI_HEAD_SHA:" in windows
+    assert "Authoritative complete regression" not in jobs["windows"]
 
-        publish = _step(job, "Publish complete regression evidence")
+    linux = _step(jobs["linux"], "Authoritative complete regression")
+    assert full_condition in linux
+    assert "scripts/run_regression.py" in linux
+    assert "--jobs 6" in linux and "--profile" not in linux
+    assert "linux-regression-journal.jsonl" in linux
+    assert "linux-regression-report.json" in linux
+    assert "STAGEMESH_CI_HEAD_SHA:" in linux
+
+    publish_names = {
+        "windows": "Publish Windows platform evidence",
+        "linux": "Publish complete regression evidence",
+    }
+    for os_name, job in jobs.items():
+        publish = _step(job, publish_names[os_name])
         assert "always()" in publish
         assert "actions/upload-artifact@v4" in publish
         assert f"regression-{os_name}-${{{{ github.run_attempt }}}}" in publish

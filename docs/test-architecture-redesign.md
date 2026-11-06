@@ -8,6 +8,8 @@ python scripts/run_regression.py --report .stagemesh/regression-report.json
 
 This command is distinct from component validation and the synthetic stabilization gate. A component run cannot claim complete-regression coverage.
 
+The cross-platform hosted gate deliberately has two non-overlapping claims: Linux runs the complete catalog, while Windows runs `python scripts/run_regression.py --profile windows-essential` for the native-platform and real wall-clock tiers. The Windows report is machine-labelled `tier_subset` with `complete_catalog: false`; it can never be presented as a complete regression. Pull-request component plans still run on every operating system required by their audited component.
+
 ## Coverage contract
 
 Before executing tests, the runner performs one canonical pytest collection, validates every node ID against the reviewed taxonomy, and constructs a duplicate-free tier partition from that live collection. It refuses to run when collection or classification has a missing, extra, duplicate, malformed, orphaned, or unclassified node ID. This permits a small reviewed node-level override to move host-sensitive evidence without collecting or executing the rest of its file twice. A successful verdict additionally requires the aggregate passed, failed, skipped, and subtest counts to equal the canonical collected count.
@@ -76,15 +78,17 @@ The exact run on `6801ac4` passed 20 lanes before `integration-batch-37` reached
 
 The next exact run on `4c7d0f0` passed 26 lanes before a controlled-landing contract failed after 30.98 seconds of real Git work against its incidental 20-second functional deadline. The failed exact contract had already passed in the complete delivery-file validation, so this is host-contention evidence rather than permission to relax the product deadline. An audit found the remaining functional delivery tests that still passed real wall time into the injected merger seam; they now use a fixed logical clock. The explicit missing-check, unknown-mergeability, and deadline contracts retain advancing logical clocks and their exact bounds, while production continues to default to the real clock. The complete controlled-merge and fast-forward files then passed all 92 tests in 426.41 seconds.
 
-The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
+The clean exact-head Windows run on `5d705cb` was stopped at the 1,800-second performance limit with no failures: 54 of 150 lanes, 3,011 passed tests, and 2 skipped outcomes had completed, consuming 13,010.2 aggregate worker-seconds, while 1,327 tests remained. Only 1,389.8 worker-seconds of theoretical eight-worker capacity remained under the target. This proves that repacking cannot make the duplicated complete Windows catalog meet the target. The gate therefore uses the taxonomy for its intended purpose: complete portable coverage once on Linux, plus the exact native and real-time Windows evidence that Linux cannot provide.
 
-- canonical collection equals the duplicate-free audited tier partition;
-- every currently collected outcome is accounted for, including the existing skips;
-- no lane fails or times out;
-- wall time is at most 1,800 seconds;
-- no competing StageMesh regression process ran during the measurement.
+The redesigned candidate must not be described as meeting the performance target until exact committed-head reports show all of the following:
 
-Until that report exists, the performance result is **OPEN**, not passed. Protected exact-head Windows and Linux CI are additional acceptance evidence and cannot be replaced by a local run.
+- the Linux report covers the complete canonical catalog with every outcome accounted for;
+- the Windows report covers exactly the native-platform and serial-timing partition, is labelled incomplete-catalog platform evidence, and accounts for every selected outcome;
+- neither report has a failed or timed-out lane;
+- the Windows essential run completes in at most 1,800 seconds;
+- no competing StageMesh regression process ran during either measurement.
+
+Until both reports exist, the performance result is **OPEN**, not passed. A Windows tier-subset report cannot replace Linux complete-catalog evidence, and a Linux report cannot replace native Windows evidence.
 
 ## Independent acceptance
 

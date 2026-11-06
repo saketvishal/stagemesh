@@ -43,6 +43,9 @@ MAX_LOCAL_WORKERS = 8
 TARGET_BATCH_SECONDS = 600.0
 BATCHES_PER_WORKER_AND_TIER = 4
 INTEGRATION_BATCHES_PER_WORKER = 8
+WINDOWS_ESSENTIAL_TIERS = frozenset(
+    {TestTier.NATIVE_PLATFORM, TestTier.SERIAL_TIMING}
+)
 
 
 def _bounded_failure_output(value: str, limit: int = 20_000) -> str:
@@ -348,12 +351,26 @@ class RegressionOrchestrator:
         resume: bool = False,
         report_path: Path | None = None,
         selected_tier: str | None = None,
+        selected_tiers: Sequence[TestTier] | None = None,
     ) -> None:
         self.repo_root = repo_root
         all_lanes = lanes if lanes is not None else build_default_lanes()
-        self.selected_tier = selected_tier
-        if selected_tier:
-            all_lanes = tuple(l for l in all_lanes if str(l.tier) == selected_tier or l.tier.name.lower() == selected_tier.lower())
+        if selected_tier is not None and selected_tiers is not None:
+            raise ValueError("selected_tier and selected_tiers are mutually exclusive")
+        requested_tiers = (
+            frozenset(
+                tier
+                for tier in TestTier
+                if str(tier) == selected_tier or tier.name.lower() == selected_tier.lower()
+            )
+            if selected_tier is not None
+            else frozenset(selected_tiers) if selected_tiers is not None else None
+        )
+        if requested_tiers is not None and not requested_tiers:
+            raise ValueError("regression tier selection must not be empty")
+        self.selected_tiers = requested_tiers
+        if requested_tiers is not None:
+            all_lanes = tuple(lane for lane in all_lanes if lane.tier in requested_tiers)
         self.lanes = tuple(all_lanes)
 
         max_jobs = min(MAX_LOCAL_WORKERS, max(1, os.cpu_count() or 2))
@@ -442,7 +459,7 @@ class RegressionOrchestrator:
             raise ValueError(f"canonical collection contains duplicate nodeids: {duplicate_nodeids[:5]}")
         classified = validate_catalog(
             collected,
-            allow_uncollected_catalog_entries=self.selected_tier is not None,
+            allow_uncollected_catalog_entries=self.selected_tiers is not None,
         )
         if set(classified) != set(collected) or len(classified) != len(collected):
             missing = sorted(set(collected) - set(classified))
@@ -455,7 +472,7 @@ class RegressionOrchestrator:
         canonical = tuple(
             nodeid
             for nodeid in collected
-            if self.selected_tier is None or classified[nodeid] in selected_tiers
+            if self.selected_tiers is None or classified[nodeid] in selected_tiers
         )
         classified = {nodeid: classified[nodeid] for nodeid in canonical}
         self._canonical_nodeids = canonical
@@ -481,6 +498,13 @@ class RegressionOrchestrator:
         canonical_payload = "\n".join(canonical).encode("utf-8")
         file_counts = Counter(nodeid.split("::", 1)[0] for nodeid in canonical)
         evidence: dict[str, object] = {
+            "scope": "full" if self.selected_tiers is None else "tier_subset",
+            "complete_catalog": self.selected_tiers is None,
+            "selected_tiers": (
+                [tier.value for tier in sorted(self.selected_tiers, key=lambda item: item.value)]
+                if self.selected_tiers is not None
+                else [tier.value for tier in TestTier]
+            ),
             "canonical_count": len(canonical),
             "canonical_sha256": hashlib.sha256(canonical_payload).hexdigest(),
             "canonical_nodeids": list(canonical),
@@ -1163,18 +1187,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs", "-j", type=int, help="Number of concurrent worker subprocesses")
     parser.add_argument("--tier", choices=[t.value for t in TestTier] + ["full"], default="full", help="Filter by tier")
+    parser.add_argument(
+        "--profile",
+        choices=("full", "windows-essential"),
+        default="full",
+        help="Run complete coverage or the explicit Windows native/timing platform subset",
+    )
     parser.add_argument("--journal", type=Path, help="Path to append-only incremental journal")
     parser.add_argument("--resume", action="store_true", help="Resume passed lanes from matching journal")
     parser.add_argument("--report", type=Path, help="Path for machine-readable JSON outcome evidence")
     args = parser.parse_args(argv)
 
+    if args.tier != "full" and args.profile != "full":
+        parser.error("--tier and a non-full --profile are mutually exclusive")
     tier_filter = None if args.tier == "full" else args.tier
+    profile_tiers = WINDOWS_ESSENTIAL_TIERS if args.profile == "windows-essential" else None
     orchestrator = RegressionOrchestrator(
         jobs=args.jobs,
         journal_path=args.journal,
         resume=args.resume,
         report_path=args.report,
         selected_tier=tier_filter,
+        selected_tiers=profile_tiers,
     )
     return orchestrator.run()
 

@@ -35,6 +35,7 @@ from stagemesh.regression_orchestrator import (
     BATCHES_PER_WORKER_AND_TIER,
     INTEGRATION_BATCHES_PER_WORKER,
     MAX_LOCAL_WORKERS,
+    WINDOWS_ESSENTIAL_TIERS,
     Lane,
     LaneResult,
     PytestDuration,
@@ -692,6 +693,31 @@ def test_live_canonical_collection_equals_tier_union() -> None:
         for lane in execution_lanes
         if lane.tier is TestTier.NATIVE_PLATFORM
     )
+
+
+def test_windows_essential_profile_is_exact_and_never_claims_complete_catalog() -> None:
+    orchestrator = RegressionOrchestrator(
+        jobs=1,
+        selected_tiers=WINDOWS_ESSENTIAL_TIERS,
+    )
+    try:
+        evidence = orchestrator._audit_collection()
+        execution_lanes = orchestrator._build_execution_lanes()
+    finally:
+        orchestrator._pool_isolation.cleanup()
+
+    assert evidence["scope"] == "tier_subset"
+    assert evidence["complete_catalog"] is False
+    assert evidence["selected_tiers"] == ["native_platform", "serial_timing"]
+    assert evidence["tier_counts"] == {
+        "native_platform": 226,
+        "serial_timing": 13,
+    }
+    assert evidence["canonical_count"] == 239
+    assert {lane.tier for lane in execution_lanes} == WINDOWS_ESSENTIAL_TIERS
+    assert all(not lane.parallel_safe for lane in execution_lanes)
+    execution_nodeids = [nodeid for lane in execution_lanes for nodeid in lane.files]
+    assert len(execution_nodeids) == len(set(execution_nodeids)) == 239
 
 
 def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> None:
