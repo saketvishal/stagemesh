@@ -14,10 +14,10 @@ from autonomy_support import (
 )
 
 import stagemesh.fast_forward as ff
-from stagemesh.contracts import bound_contract_from_record
-from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
 from stagemesh.autonomy.ci_diagnosis import Conclusion, FakeHostedCI, GateOutcome, HostedCIRun
 from stagemesh.autonomy.dependencies import PullRequest
+from stagemesh.contracts import bound_contract_from_record
+from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
 from stagemesh.fast_forward import FastForwardPullRequests, checks_ready
 from stagemesh.survivor_wave import TaskRecord
 
@@ -87,9 +87,10 @@ def test_landing_waits_for_mergeability_recalculation(tmp_path, monkeypatch):
         calls.append(number)
         return replace(pr, mergeable=None) if len(calls) == 1 else pr
     monkeypatch.setattr(adapter, "get", get)
-    monkeypatch.setattr(ff.time, "sleep", lambda seconds: None)
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
-    result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(record, time.time() + 20)
+    result = ff.make_merger(store, repo, "refs/heads/main", ("web",), sleeper=lambda _seconds: None)(
+        record, time.time() + 20
+    )
     assert result["merged"] and len(calls) > 1
     assert git(remote, "rev-parse", "main") == sha == git(repo, "rev-parse", "main")
 
@@ -139,9 +140,9 @@ def test_missing_checks_and_unknown_mergeability_have_bounded_visible_waits(tmp_
         monkeypatch.setattr(adapter, "get", lambda number: replace(pr, mergeable=None))
     ci.runs.clear()
     now = [time.time()]
-    monkeypatch.setattr(ff.time, "time", lambda: now[0])
-    monkeypatch.setattr(ff.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    clock = lambda: now[0]
+    sleeper = lambda seconds: now.__setitem__(0, now[0] + seconds)
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock, sleeper=sleeper)
     lines = []
     merger.progress = lines.append
     result = merger(TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), now[0] + 120)
@@ -155,6 +156,7 @@ def test_missing_checks_and_unknown_mergeability_have_bounded_visible_waits(tmp_
 
 def stacked_rig(tmp_path, monkeypatch):
     from dataclasses import replace
+
     from stagemesh.autonomy.dependencies import PRState
 
     repo, remote, base, first, store, ci, adapter, first_pr = rig(tmp_path, monkeypatch)
@@ -190,11 +192,12 @@ def test_native_merger_lands_stacked_candidates_in_sequence(tmp_path, monkeypatc
     repo, remote, _base, first, second, store, ci, _adapter, _prs, records = stacked_rig(tmp_path, monkeypatch)
     if red_second:
         ci.runs[second] = HostedCIRun(second, {"web": GateOutcome("web", Conclusion.FAILURE)})
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
-    assert merger.validate_records(records, time.time() + 30) is None
-    assert merger(records[0], time.time() + 30)["merged"]
+    clock = lambda: 100.0
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), clock=clock)
+    assert merger.validate_records(records, clock() + 30) is None
+    assert merger(records[0], clock() + 30)["merged"]
     assert git(remote, "rev-parse", "main") == first == git(repo, "rev-parse", "main")
-    result = merger(records[1], time.time() + 30)
+    result = merger(records[1], clock() + 30)
     assert result["merged"] is (not red_second)
     expected = first if red_second else second
     assert git(remote, "rev-parse", "main") == expected == git(repo, "rev-parse", "main")
@@ -203,11 +206,11 @@ def test_native_merger_lands_stacked_candidates_in_sequence(tmp_path, monkeypatc
             "SELECT COUNT(*) FROM evidence WHERE kind IN ('VALIDATION','REVIEW')"
         ).fetchone()[0]
         ci.runs[second] = HostedCIRun(second, {"web": GateOutcome("web", Conclusion.SUCCESS)})
-        assert merger(records[1], time.time() + 30)["merged"]
+        assert merger(records[1], clock() + 30)["merged"]
         assert git(remote, "rev-parse", "main") == second == git(repo, "rev-parse", "main")
         assert store.conn.execute("SELECT COUNT(*) FROM evidence WHERE kind IN ('VALIDATION','REVIEW')").fetchone()[0] == evidence_before
     else:
-        replay = merger(records[0], time.time() + 30)
+        replay = merger(records[0], clock() + 30)
         assert not replay["merged"]  # an older exact landing is not a fresh successful delivery
         assert git(remote, "rev-parse", "main") == second == git(repo, "rev-parse", "main")
 
@@ -215,6 +218,7 @@ def test_native_merger_lands_stacked_candidates_in_sequence(tmp_path, monkeypatc
 @pytest.mark.parametrize("failure", ["head", "base", "closed", "review", "integration"])
 def test_entire_stack_validation_rejects_invalid_later_member(tmp_path, monkeypatch, failure):
     from dataclasses import replace
+
     from stagemesh.autonomy.dependencies import PRState
 
     repo, remote, base, _first, second, store, _ci, _adapter, prs, records = stacked_rig(tmp_path, monkeypatch)

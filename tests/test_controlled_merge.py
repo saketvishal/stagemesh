@@ -48,8 +48,20 @@ def test_controlled_policy_does_not_need_branch_protection_apis(tmp_path, monkey
 def test_controlled_merge_preserves_exact_candidate_and_independent_review(tmp_path, monkeypatch, independent):
     values, calls = controlled(tmp_path, monkeypatch, independent=independent)
     repo, remote, base, sha, store, _ci, _adapter, _pr = values
-    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",), policy="stagemesh", check_app_id=15368)
-    result = merger(TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), time.time()+20)
+    clock = lambda: 100.0
+    merger = ff.make_merger(
+        store,
+        repo,
+        "refs/heads/main",
+        ("web",),
+        policy="stagemesh",
+        check_app_id=15368,
+        clock=clock,
+    )
+    result = merger(
+        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha),
+        clock() + 20,
+    )
     assert result["merged"] is independent, result
     assert git(remote, "rev-parse", "main") == (sha if independent else base)
     assert git(repo, "rev-parse", "main") == (sha if independent else base)

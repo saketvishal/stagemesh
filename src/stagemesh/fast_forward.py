@@ -63,7 +63,18 @@ class FastForwardPullRequests(GitHubPullRequests):
     findings, CI diagnosis and post-merge verification. No squash, rebase or history rewrite.
     """
 
-    def configure_ff(self, project, store, branch, required_checks, ci, *, policy="hosted", check_app_id=None):
+    def configure_ff(
+        self,
+        project,
+        store,
+        branch,
+        required_checks,
+        ci,
+        *,
+        policy="hosted",
+        check_app_id=None,
+        clock=time.time,
+    ):
         if policy not in {"hosted", "stagemesh"}:
             raise ValueError("unknown landing policy")
         if policy == "stagemesh" and (not required_checks or type(check_app_id) is not int or check_app_id <= 0):
@@ -73,6 +84,7 @@ class FastForwardPullRequests(GitHubPullRequests):
         self.branch, self.required_checks, self.ci = branch, required_checks, ci
         self.expected_base = None
         self.deadline = float("inf")
+        self.clock = clock
         self.stop_control = QueueStopControl(store)
         self.task_id = None
         self.policy_snapshot = None
@@ -248,7 +260,7 @@ class FastForwardPullRequests(GitHubPullRequests):
         return True
 
     def bounded_git(self, *args, after_landing=False, check=True):
-        remaining = 20 if after_landing else min(20, self.deadline - time.time())
+        remaining = 20 if after_landing else min(20, self.deadline - self.clock())
         if remaining <= 0:
             raise RuntimeError("merge deadline reached")
         result = subprocess.run(["git", *args], cwd=self.project, capture_output=True,
@@ -308,7 +320,7 @@ class FastForwardPullRequests(GitHubPullRequests):
     def merge(self, number: int, expected_head_sha: str, method: str = "ff-only") -> MergeOutcome:
         if method != "ff-only":
             raise ValueError("this adapter accepts only ff-only")
-        if time.time() >= self.deadline:
+        if self.clock() >= self.deadline:
             return MergeOutcome(False, reason="merge_deadline_reached")
         with IntegrationLock(self.project / ".stagemesh/integration.lock", timeout_seconds=10).hold("ff-merge"):
             git = GitWorkspace(self.project)
@@ -344,7 +356,7 @@ class FastForwardPullRequests(GitHubPullRequests):
                 return MergeOutcome(False, reason=policy_error or "hosted_branch_policy_changed")
             # Recheck after hosted calls: the operator or another writer may have moved
             # the queue, checkout, PR head or base while CI was being observed.
-            if time.time() >= self.deadline:
+            if self.clock() >= self.deadline:
                 return MergeOutcome(False, reason="merge_deadline_reached")
             if self.stop_control.blocks_admission():
                 return MergeOutcome(False, reason="queue_paused")
@@ -398,7 +410,17 @@ class FastForwardPullRequests(GitHubPullRequests):
             return MergeOutcome(True, expected_head_sha)
 
 
-def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str, ...], *, policy="hosted", check_app_id=None):
+def make_merger(
+    store,
+    project: Path,
+    base_ref: str,
+    required_checks: tuple[str, ...],
+    *,
+    policy="hosted",
+    check_app_id=None,
+    clock=time.time,
+    sleeper=time.sleep,
+):
     from .autonomy.cli import _github_token
     from .github import UrlLibGitHubTransport, detect_github_repository
 
@@ -409,14 +431,23 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
     ci = GitHubHostedCI(repository.owner, repository.repo, transport)
     pulls = FastForwardPullRequests(repository.owner, repository.repo, transport, ci)
     branch = base_ref.removeprefix("refs/heads/")
-    pulls.configure_ff(project, store, branch, required_checks, ci, policy=policy, check_app_id=check_app_id)
+    pulls.configure_ff(
+        project,
+        store,
+        branch,
+        required_checks,
+        ci,
+        policy=policy,
+        check_app_id=check_app_id,
+        clock=clock,
+    )
     pulls.bind_remote()
     supervisor = Supervisor(store, project, integration_ref=f"refs/remotes/origin/{branch}",
                             hosted_ci=ci, pull_requests=pulls,
                             integration_policy=IntegrationPolicy(allow_baseline_ci_failures=False, verify_exact_landing=True))
 
     def progress(record, state, detail, *, heartbeat=False):
-        now = time.time()
+        now = clock()
         previous, at = notices.get(record.task_id, (None, 0.0))
         if previous == (state, detail) and (not heartbeat or now - at < 60):
             return
@@ -435,7 +466,7 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
     def validate_records(records, deadline):
         """Observe the entire stack before any member can move the integration ref."""
         for record in records:
-            if time.time() >= deadline:
+            if clock() >= deadline:
                 return "deadline reached while verifying pending PRs"
             url = urlparse(record.pr_url or "")
             prefix = f"/{repository.owner}/{repository.repo}/pull/"
@@ -481,8 +512,8 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
         observed_base = None
         unknown_since = None
         missing_since = None
-        t_start = time.time()
-        while time.time() < deadline:
+        t_start = clock()
+        while clock() < deadline:
             if pulls.stop_control.blocks_admission():
                 return {"merged": False, "reason": "queue admission " + pulls.stop_control.state_label()}
             pr = pulls.get(number)
@@ -509,11 +540,11 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                             "reason": reason}
             if pr.state is PRState.OPEN and pr.mergeable is None:
                 # GitHub recomputes mergeability when the preceding stack member lands.
-                unknown_since = time.time() if unknown_since is None else unknown_since
+                unknown_since = clock() if unknown_since is None else unknown_since
                 progress(record, "waiting", "GitHub is computing mergeability", heartbeat=True)
-                if time.time() - unknown_since >= 60:
+                if clock() - unknown_since >= 60:
                     return {"merged": False, "reason": "GitHub mergeability remained unknown for 60s; no merge attempted"}
-                time.sleep(min(2, max(0, deadline - time.time())))
+                sleeper(min(2, max(0, deadline - clock())))
                 continue
             if pr.state is PRState.OPEN and pr.mergeable is False:
                 reason = "GitHub reports a conflict although the observed base is already ancestral; refusing an unsafe refresh"
@@ -524,9 +555,9 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                 return {"merged": False, "reason": "hosted CI failed; candidate not merged"}
             missing = sorted(set(required_checks) - set(run.gates if run and run.sha == record.integrated_candidate else ()))
             if missing:
-                missing_since = time.time() if missing_since is None else missing_since
+                missing_since = clock() if missing_since is None else missing_since
                 progress(record, "waiting", "hosted checks not reported: " + ", ".join(missing), heartbeat=True)
-                if time.time() - missing_since >= 60:
+                if clock() - missing_since >= 60:
                     return {"merged": False, "reason": "hosted checks missing after 60s: " + ", ".join(missing)}
             else:
                 missing_since = None
@@ -569,10 +600,10 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                     "repository": f"{repository.owner}/{repository.repo}", "base_ref": base_ref,
                     "pr": number, "candidate_sha": record.integrated_candidate, "required_checks": list(required_checks), "merge_policy": policy})
                 return {"merged": True, "task_id": record.task_id, "remote_landed": True, "local_synced": True,
-                    "pr": number, "candidate_sha": record.integrated_candidate, "ci_wait_seconds": max(0.0, time.time() - t_start)}
+                    "pr": number, "candidate_sha": record.integrated_candidate, "ci_wait_seconds": max(0.0, clock() - t_start)}
             if not missing:
                 progress(record, "waiting", "hosted checks pending for this exact candidate", heartbeat=True)
-            time.sleep(min(10, max(0, deadline - time.time())))
+            sleeper(min(10, max(0, deadline - clock())))
         return {"merged": False, "reason": "hosted CI deadline reached; PR retained for retry"}
 
     def pending_records():

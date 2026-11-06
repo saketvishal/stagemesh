@@ -62,6 +62,10 @@ The eight-worker run on `33f5a12` passed every first-wave integration lane that 
 
 The corrected exact serial-timing tier on `751c460` passed all 13 outcomes in one lane, with complete accounting, in 61.37 seconds. This is accepted evidence for that tier only; complete acceptance still requires the full exact-head report.
 
+The first exact full run on `31d57e7` passed its first thirteen lanes, including five process-heavy integration lanes, then rejected two functional delivery tests in `integration-batch-29`. Both failures exhausted incidental 20/30-second wall-clock deadlines while their real Git operations were contending with seven other process-heavy workers; the same exact tests passed alone in 14.74 and 29.46 seconds. The runner was deliberately interrupted after the verdict, and process inspection confirmed no regression workers survived.
+
+Those tests are not performance assertions: they prove exact-candidate landing, independent review, stacked ordering, red-CI refusal, and later retry. The delivery implementation now accepts an injected clock and sleeper while defaulting to real time in production. Functional success and simulated-wait tests use a local deterministic clock instead of patching Python's shared `time` module. Explicit deadline, missing-check, pause, and partial-landing tests remain unchanged. The complete controlled-merge and fast-forward files then passed all 92 tests in 268.20 seconds, down from 545.08 seconds in the immediately preceding run (50.8%), with measured per-file testcase totals of 85.502 and 181.668 seconds. These measurements replace the prior scheduling hints, which had been contaminated by global fake-time mutation. This is focused evidence only; it does not satisfy the complete-run target.
+
 The redesigned candidate must not be described as meeting the performance target until an exact committed-head report shows all of the following on the current Windows development machine:
 
 - canonical collection equals the duplicate-free audited union;
