@@ -31,6 +31,8 @@ import pytest
 
 from stagemesh.ci_validation_plan import COMPONENT, FULL, derive_ci_validation_plan
 from stagemesh.regression_orchestrator import (
+    BATCHES_PER_WORKER_AND_TIER,
+    MAX_LOCAL_WORKERS,
     Lane,
     LaneResult,
     PytestDuration,
@@ -190,6 +192,8 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     assert TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].max_parallel_workers == 8
     assert TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].max_parallel_workers == 8
     assert TIER_ISOLATION_CONTRACTS[TestTier.NATIVE_PLATFORM].max_parallel_workers == 1
+    assert MAX_LOCAL_WORKERS == 8
+    assert BATCHES_PER_WORKER_AND_TIER == 4
     assert (
         TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].concurrency_group
         == TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].concurrency_group
@@ -629,7 +633,9 @@ def test_live_canonical_collection_equals_tier_union() -> None:
     serial_tiers = {
         lane.tier for lane in execution_lanes if not lane.parallel_safe
     }
-    assert len(execution_lanes) <= 2 * jobs * len(parallel_tiers) + len(serial_tiers)
+    assert len(execution_lanes) <= (
+        BATCHES_PER_WORKER_AND_TIER * jobs * len(parallel_tiers) + len(serial_tiers)
+    )
     assert len(execution_lanes) < len(build_default_lanes())
     assert all(
         not lane.parallel_safe
@@ -656,7 +662,7 @@ def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> N
         for file_path, count in zip(files, counts, strict=True)
         for test_index in range(count)
     )
-    orchestrator = RegressionOrchestrator(lanes=lanes, jobs=2)
+    orchestrator = RegressionOrchestrator(lanes=lanes, jobs=1)
     orchestrator._canonical_nodeids = nodeids
     try:
         first = orchestrator._build_execution_lanes()

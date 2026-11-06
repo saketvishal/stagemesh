@@ -38,9 +38,9 @@ from .test_taxonomy import (
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT_SLOWEST_TEST_LIMIT = 50
-MAX_LOCAL_WORKERS = 16
+MAX_LOCAL_WORKERS = 8
 TARGET_BATCH_SECONDS = 600.0
-BATCHES_PER_WORKER_AND_TIER = 2
+BATCHES_PER_WORKER_AND_TIER = 4
 
 
 def _bounded_failure_output(value: str, limit: int = 20_000) -> str:
