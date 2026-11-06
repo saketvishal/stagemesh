@@ -73,6 +73,7 @@ class Lane:
     estimated_seconds: float = 0.0
 
     def to_dict(self) -> dict:
+        contract = TIER_ISOLATION_CONTRACTS[self.tier]
         return {
             "lane_id": self.lane_id,
             "tier": str(self.tier),
@@ -80,6 +81,8 @@ class Lane:
             "files": list(self.files),
             "timeout_seconds": self.timeout_seconds,
             "estimated_seconds": round(self.estimated_seconds, 3),
+            "concurrency_group": contract.concurrency_group,
+            "max_parallel_workers": contract.max_parallel_workers,
         }
 
 
@@ -530,7 +533,8 @@ class RegressionOrchestrator:
                 1
                 if not contract.parallel_safe
                 else min(
-                    self.jobs * BATCHES_PER_WORKER_AND_TIER,
+                    min(self.jobs, contract.max_parallel_workers)
+                    * BATCHES_PER_WORKER_AND_TIER,
                     len(planning_units),
                 )
             )
@@ -838,7 +842,9 @@ class RegressionOrchestrator:
         print(
             f"StageMesh Regression Orchestrator\n"
             f"Commit: {self.identity.commit_sha[:10]} | OS: {self.identity.operating_system} | "
-            f"Workers: {self.jobs} | Total lanes: {total_lanes} "
+            f"Workers: {self.jobs} | External-process cap: "
+            f"{TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].max_parallel_workers} | "
+            f"Total lanes: {total_lanes} "
             f"(running: {len(lanes_to_run)}, resumed: {resumed_count})\n"
             f"Collection: {collection['canonical_count']} nodeids | "
             f"sha256: {str(collection['canonical_sha256'])[:12]} | exact tier union\n"
@@ -949,24 +955,51 @@ class RegressionOrchestrator:
                             available_workers.append(worker_id)
 
                 pool = ThreadPoolExecutor(max_workers=self.jobs)
-                future_map: dict[Future[LaneResult], Lane] = {
-                    pool.submit(run_worker_task, lane): lane for lane in parallel_lanes
-                }
+                pending_lanes = list(parallel_lanes)
+                future_map: dict[Future[LaneResult], Lane] = {}
+                active_by_group: Counter[str] = Counter()
+
+                def submit_available() -> None:
+                    while pending_lanes and len(future_map) < self.jobs:
+                        selected_index = next(
+                            (
+                                index
+                                for index, candidate in enumerate(pending_lanes)
+                                if active_by_group[
+                                    TIER_ISOLATION_CONTRACTS[candidate.tier].concurrency_group
+                                ]
+                                < min(
+                                    self.jobs,
+                                    TIER_ISOLATION_CONTRACTS[candidate.tier].max_parallel_workers,
+                                )
+                            ),
+                            None,
+                        )
+                        if selected_index is None:
+                            return
+                        lane = pending_lanes.pop(selected_index)
+                        contract = TIER_ISOLATION_CONTRACTS[lane.tier]
+                        active_by_group[contract.concurrency_group] += 1
+                        future_map[pool.submit(run_worker_task, lane)] = lane
+
+                submit_available()
                 try:
-                    pending = set(future_map)
-                    while pending:
-                        completed, pending = wait(
-                            pending,
+                    while future_map:
+                        completed, _pending = wait(
+                            set(future_map),
                             timeout=0.2,
                             return_when=FIRST_COMPLETED,
                         )
                         for future in completed:
-                            lane = future_map[future]
+                            lane = future_map.pop(future)
+                            contract = TIER_ISOLATION_CONTRACTS[lane.tier]
+                            active_by_group[contract.concurrency_group] -= 1
                             try:
                                 result = future.result()
                             except Exception as exc:  # noqa: BLE001 - worker boundary becomes evidence
                                 result = unexpected_result(lane, exc)
                             record_result(lane, result)
+                        submit_available()
                 except KeyboardInterrupt:
                     interrupted = True
                     self._terminate_active_processes()

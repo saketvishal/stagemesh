@@ -22,6 +22,7 @@ import platform
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -163,6 +164,8 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
         contract = TIER_ISOLATION_CONTRACTS[tier]
         assert contract.tier == tier
         assert isinstance(contract.parallel_safe, bool)
+        assert contract.concurrency_group
+        assert contract.max_parallel_workers > 0
         assert isinstance(contract.timeout_seconds, float)
         assert contract.timeout_seconds > 0.0
         assert len(contract.rationale) > 20
@@ -175,6 +178,15 @@ def test_isolation_contracts_declare_parallel_safety_and_serialization() -> None
     assert TIER_ISOLATION_CONTRACTS[TestTier.DETERMINISTIC_UNIT].parallel_safe is True
     assert TIER_ISOLATION_CONTRACTS[TestTier.COMPONENT_CONTRACT].parallel_safe is True
     assert TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].parallel_safe is True
+    assert TIER_ISOLATION_CONTRACTS[TestTier.DETERMINISTIC_UNIT].max_parallel_workers == 16
+    assert TIER_ISOLATION_CONTRACTS[TestTier.COMPONENT_CONTRACT].max_parallel_workers == 16
+    assert TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].max_parallel_workers == 8
+    assert TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].max_parallel_workers == 8
+    assert TIER_ISOLATION_CONTRACTS[TestTier.NATIVE_PLATFORM].max_parallel_workers == 1
+    assert (
+        TIER_ISOLATION_CONTRACTS[TestTier.INTEGRATION_PROCESS].concurrency_group
+        == TIER_ISOLATION_CONTRACTS[TestTier.SOAK_FAILURE_INJECTION].concurrency_group
+    )
     assert tier_for_test("tests/test_continuous_driver.py::test_process_recovery") is TestTier.NATIVE_PLATFORM
 
 
@@ -814,6 +826,64 @@ def test_run_fails_when_result_accounting_does_not_match_collection(
             "duration_seconds": 0.75,
         }
     ]
+
+
+def test_external_process_group_never_exceeds_eight_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lanes = tuple(
+        Lane(
+            f"integration-{index}",
+            TestTier.INTEGRATION_PROCESS,
+            True,
+            (f"tests/synthetic_{index}.py",),
+            60.0,
+        )
+        for index in range(12)
+    )
+    report = tmp_path / "group-cap.json"
+    orchestrator = RegressionOrchestrator(lanes=lanes, jobs=16, report_path=report)
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_collection",
+        lambda: {
+            "canonical_count": len(lanes),
+            "canonical_sha256": "abc",
+            "file_counts": {lane.files[0]: 1 for lane in lanes},
+        },
+    )
+    monkeypatch.setattr(orchestrator, "_validate_or_init_journal", lambda *_args: set())
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def execute(lane: Lane, worker_id: int) -> LaneResult:
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return LaneResult(
+            lane.lane_id,
+            str(lane.tier),
+            True,
+            0,
+            0.05,
+            "1 passed",
+            "",
+            worker_id,
+            passed_count=1,
+        )
+
+    monkeypatch.setattr(orchestrator, "_execute_lane", execute)
+    assert orchestrator.run() == 0
+    assert maximum == 8
+    plan = json.loads(report.read_text(encoding="utf-8"))["execution_plan"]
+    assert {item["concurrency_group"] for item in plan} == {"external_process"}
+    assert {item["max_parallel_workers"] for item in plan} == {8}
 
 
 def test_keyboard_interrupt_cancels_run_and_writes_partial_report(

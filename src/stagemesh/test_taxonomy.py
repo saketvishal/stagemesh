@@ -35,6 +35,8 @@ class IsolationContract:
 
     tier: TestTier
     parallel_safe: bool
+    concurrency_group: str
+    max_parallel_workers: int
     requires_isolated_temp: bool
     requires_isolated_git: bool
     requires_isolated_sqlite: bool
@@ -53,6 +55,8 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
     TestTier.DETERMINISTIC_UNIT: IsolationContract(
         tier=TestTier.DETERMINISTIC_UNIT,
         parallel_safe=True,
+        concurrency_group="lightweight",
+        max_parallel_workers=16,
         requires_isolated_temp=False,
         requires_isolated_git=False,
         requires_isolated_sqlite=False,
@@ -67,6 +71,8 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
     TestTier.COMPONENT_CONTRACT: IsolationContract(
         tier=TestTier.COMPONENT_CONTRACT,
         parallel_safe=True,
+        concurrency_group="lightweight",
+        max_parallel_workers=16,
         requires_isolated_temp=True,
         requires_isolated_git=False,
         requires_isolated_sqlite=True,
@@ -81,6 +87,8 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
     TestTier.INTEGRATION_PROCESS: IsolationContract(
         tier=TestTier.INTEGRATION_PROCESS,
         parallel_safe=True,
+        concurrency_group="external_process",
+        max_parallel_workers=8,
         requires_isolated_temp=True,
         requires_isolated_git=True,
         requires_isolated_sqlite=True,
@@ -95,6 +103,8 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
     TestTier.NATIVE_PLATFORM: IsolationContract(
         tier=TestTier.NATIVE_PLATFORM,
         parallel_safe=False,
+        concurrency_group="native_serial",
+        max_parallel_workers=1,
         requires_isolated_temp=True,
         requires_isolated_git=True,
         requires_isolated_sqlite=True,
@@ -109,6 +119,8 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
     TestTier.SOAK_FAILURE_INJECTION: IsolationContract(
         tier=TestTier.SOAK_FAILURE_INJECTION,
         parallel_safe=True,
+        concurrency_group="external_process",
+        max_parallel_workers=8,
         requires_isolated_temp=True,
         requires_isolated_git=True,
         requires_isolated_sqlite=True,
