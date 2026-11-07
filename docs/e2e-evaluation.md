@@ -18,6 +18,36 @@ and one PASS result for every declared requirement. Missing, duplicate, unknown,
 failed, stale, or forged results fail closed. When independence is required, the
 configured evaluator must differ from the provider that produced the candidate.
 
+## Opt-in visual-reference governance
+
+A browser service may add `visual_reference` to bind a reviewed design revision
+without adding a provider or image-comparison dependency to StageMesh core. The
+policy must declare:
+
+- immutable project-relative inputs for all five roles: `reference`, `fixture`,
+  `tolerance`, `gate`, and `package`;
+- typed `actual`, `reference`, and `diff` artifact paths for every browser
+  requirement;
+- an algorithm identifier, `max_difference_ratio`, and bounded
+  `stability_runs`; and
+- at least one functional gate already declared by the bound change contract.
+
+StageMesh hashes those inputs in the exact candidate and again after evaluation,
+binds them into the service and visual-policy fingerprints, rejects path or symlink
+escape and explicit golden/baseline update modes, and fails if any protected input
+changes. The fresh result manifest must add `difference_ratio`, `stable`, and
+`render_count` to every check. A reported PASS still fails when its ratio exceeds
+the approved threshold, rendering is unstable, or the required runs are missing.
+The project comparator owns pixel/perceptual semantics; StageMesh owns identity,
+completeness, immutability, and lifecycle gating.
+
+The operator projection exposes only bounded revision/fingerprint/count data.
+Independent review receives the exact-candidate requirement results plus
+checksum-revalidated, project-relative artifact paths, sizes, and digests. Raw
+artifact contents, secrets, absolute paths, and unrestricted filesystem access are
+not copied into the prompt. Generic browser/API services remain compatible and do
+not acquire visual requirements implicitly.
+
 Services that need a local application may also declare both `startup_command`
 and `health_command`, with a bounded `startup_timeout_seconds`. StageMesh starts
 only that declared command inside the disposable candidate checkout, requires the

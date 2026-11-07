@@ -20,6 +20,7 @@ from .contracts import (
     evaluate_contract,
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
+from .e2e_evidence import review_e2e_projection
 from .efficiency import record_provider_call, take_call_usage
 from .persistence import Store
 from .process_identity import owner_execution_fields
@@ -820,7 +821,11 @@ class Reviewer:
                     validation_context = ""
                     if validation:
                         summaries = [
-                            {"checks": item.get("validation_checks"), "gates": item.get("gates")}
+                            {
+                                "checks": item.get("validation_checks"),
+                                "gates": item.get("gates"),
+                                "e2e": review_e2e_projection(item, project),
+                            }
                             for item in validation
                         ]
                         validation_context = (

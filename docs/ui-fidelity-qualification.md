@@ -1,33 +1,30 @@
 # UI fidelity orchestration qualification
 
-Issue: #505
+Issues: #505 qualification; #561 StageMesh implementation
 
-Repository checkpoint: `da3db2274ae3452871df581ce7889249e091803d`
+Base repository checkpoint: `75a3516fd9abcda6b7bebdd6f935e005a8f61d67`
 
 Qualification date: 2026-11-06
 
 ## Decision
 
-**No-go for unattended Caventra UI fidelity ownership today. Conditional-go for a
-bounded synthetic web experiment after the gaps below are reviewed and a separate
-Caventra task is approved.**
+**No-go for unattended Caventra UI fidelity ownership today. The provider-neutral
+StageMesh governance layer is implemented under #561; a bounded synthetic Caventra
+web experiment still requires a separate approved task.**
 
 StageMesh already has most of the control loop: bounded contracts, isolated
 candidate checkouts, configured browser commands, exact-candidate validation,
 artifact checksums, remediation findings, independent review, and fail-closed
-integration. It does not currently prove the complete design-to-code loop required
-by #505. In particular:
+integration. Issue #561 adds immutable visual-policy inputs, typed visual evidence,
+comparison-result enforcement, and a safe independent-review handoff. It still does
+not prove the complete Caventra design-to-code loop required by #505. In particular:
 
 - the shipped Caventra profile does not run a browser or visual-comparison gate;
 - StageMesh has no Figma- or Code Connect-specific approved-revision binding;
-- the visual comparison algorithm, thresholds, deterministic rendering, and flaky
-  rendering classification must be supplied by the project evaluator;
-- the independent review prompt receives gate summaries, not the captured
-  actual/reference/diff artifacts; and
-- a configured evaluator runs in a disposable writable checkout. Candidate scope
-  blocks an implementation commit from changing protected references, but StageMesh
-  does not separately prove that the evaluator did not rewrite a reference at run
-  time before returning PASS.
+- the visual comparison algorithm and deterministic rendering remain project-owned;
+- no approved Caventra reference bundle or visual service is configured; and
+- no real Caventra state, responsive route, or shared-component regression has run
+  through the new governance layer.
 
 No live browser, Figma, Storybook, Maestro, native-device, or Caventra production
 UI run was performed for this qualification. No Caventra source or runtime
@@ -42,18 +39,18 @@ claim that an external toolchain is installed or operational.
 | Frontend implementation guidance | Existing | `src/stagemesh/agent_skills.py` selects the pinned frontend-design skill; `docs/agent-skills.md` distinguishes installed, selected, attached, loaded, and applied. | Guidance is not proof of visual fidelity or correct application. |
 | Project skills and provider-neutral capability opt-in | Existing | `skill_refs` and `capability_refs` are contract-bound; `docs/capabilities.md` documents disabled-by-default registration and stage/provider compatibility. | Registration or attachment is not invocation or behavioral acceptance. |
 | Figma MCP / Code Connect design handoff | Not qualified | No Figma-specific adapter, revision schema, or acceptance fixture exists in this repository. The native registry route is bounded read-only stdio MCP for Codex or Claude. | Do not assume an arbitrary remote Figma MCP, OAuth flow, or plugin is supported. Exported, reviewed files can be ordinary protected project specs, but that is not a live Figma binding. |
-| Structured design contract | Configurable | Contracts support `spec_refs`, acceptance criteria, invariants, file scope, required gates, and protected files. Provider prompts put project specs and approved UI ahead of skill procedures. | There is no first-class screen/state/token/design-revision model. A screenshot alone remains insufficient. |
+| Structured design contract | Existing, opt-in | Browser services can declare `visual_reference.revision`, immutable typed inputs, comparison policy, functional gates, and typed actual/reference/diff artifacts; ordinary contracts still bind specs, scope, and protected files. | The revision identifies a reviewed project bundle, not a live Figma API revision. A screenshot alone remains insufficient. |
 | Storybook component states | Configurable, not present | A project-owned Storybook command can be an explicit contract gate or validation service command. | StageMesh does not discover Storybook or interpret stories. The shipped Caventra profile has no Storybook gate. |
 | Playwright functional/browser gate | Existing and configurable | `src/stagemesh/validation_services.py` discovers conventional root npm E2E scripts and runs explicit `browser` services in an exact-candidate disposable checkout. | Caventra is a nested app and its shipped profile declares only install, Vitest, lint, and typecheck gates. An explicit `cwd` service is required. |
 | Declared desktop/mobile-web state coverage | Existing and configurable | Browser requirements bind an id, target, state, and `WIDTHxHEIGHT` viewport. A fresh result manifest must report every declared id exactly once and all must PASS. | StageMesh trusts the configured evaluator to render and compare the state correctly. |
-| Visual comparison and thresholds | Missing as a StageMesh primitive | StageMesh accepts evaluator PASS/FAIL and does not implement image comparison. | Pixel/perceptual algorithm, masks, fonts, animation controls, and thresholds belong to a reviewed project evaluator. |
-| Actual/reference/diff artifact capture | Existing | `src/stagemesh/e2e_evidence.py` and `src/stagemesh/validation_services.py` constrain artifact count/size/path, copy refreshed artifacts, verify SHA-256, and bind candidate, baseline, contract, and service fingerprints. | Artifact content is not interpreted by StageMesh. A PASS command plus valid files is still evaluator-owned evidence. |
-| Flaky-render distinction | Partial | Stable failure signatures correlate repeated failures and feed diagnosis. The evaluation runner deliberately performs no retries. | There is no visual-flake classifier. A project evaluator must render deterministically and explicitly report instability as failure. |
+| Visual comparison and thresholds | Existing governance; project-owned comparator | StageMesh binds an algorithm identifier and maximum difference ratio, rejects a PASS whose measured ratio exceeds the approved threshold, and never performs image comparison itself. | Pixel/perceptual implementation, masks, fonts, and animation controls belong to the reviewed project evaluator. |
+| Actual/reference/diff artifact capture | Existing, typed | `src/stagemesh/e2e_evidence.py`, `src/stagemesh/validation_services.py`, and `src/stagemesh/visual_reference.py` require all three roles for every declared state, constrain path/size, copy artifacts, verify SHA-256, and bind candidate, baseline, contract, service, and visual-policy fingerprints. | StageMesh validates identity and completeness, not image semantics. |
+| Flaky-render distinction | Existing declared signal | The result must declare `stable: true` and meet the configured bounded `stability_runs`; unstable or insufficient runs are environment failures, while threshold mismatches are assertions. | The project evaluator must actually produce deterministic repeated renders; StageMesh does not inspect browser internals. |
 | Actionable remediation | Existing | Failed configured evaluations append `gate_failed` findings with bounded/redacted output and a stable failure signature; the normal coordinator remediation budget applies. | It can remediate a reported discrepancy, but cannot infer visual meaning from image bytes. |
 | Independent evaluation identity | Partial | `require_independent` refuses a missing evaluator id or one matching the implementation provider. | This is a declared bounded identifier, not proof that a separate human/model inspected the images. |
-| Independent code review before integration | Existing, with an evidence gap | Review is candidate/contract-bound and integration requires passing validation and review. The review prompt includes validation check and gate summaries. | The review prompt does not include the E2E artifact manifest or safe read-only artifact paths, so the reviewer cannot trace or inspect actual/reference/diff images. |
-| Silent golden refresh protection | Partial | Caventra's profile protects E2E files and its hygiene gate checks visual-baseline changes. Scope validation rejects a candidate that changes protected references. | The evaluator checkout is writable and there is no before/after digest fence for declared reference files. |
-| Shared-component cross-screen regression | Configurable, not demonstrated | A Playwright evaluator can declare requirements for multiple screens; omitted or failed ids fail closed. | No Caventra experiment proving the second-screen failure was run. |
+| Independent code review before integration | Existing with bounded artifact handoff | Review is candidate/contract-bound; before prompting, StageMesh revalidates captured artifact checksums and supplies only project-relative roots, typed paths, sizes, digests, requirement results, and visual-policy identity. | This makes evidence inspectable but does not prove a human or model interpreted the pixels correctly. |
+| Silent golden refresh protection | Existing, opt-in | StageMesh hashes declared reference, fixture, tolerance, gate, and package inputs in the exact candidate, before and after evaluation; it rejects mutation, path/symlink escape, stale identity, and explicit update-golden modes. | The project must declare every acceptance-policy input; undeclared external tool bytes remain outside this proof. |
+| Shared-component cross-screen regression | Demonstrated synthetically in StageMesh | The hermetic acceptance matrix declares a second screen and proves that a PASS claim with an over-threshold difference fails as an assertion. | No Caventra screen was exercised. |
 | Native mobile / Maestro | Unsupported and not qualified | The shipped Caventra profile represents `apps/web-v2`; StageMesh evaluation kinds are `browser` and `api`, with no Maestro/native-device adapter or native-app evidence model. | Defer until a real native stack and device/emulator authority are separately established. Do not represent web viewport coverage as native-mobile evidence. |
 
 ## What the current trace can prove
@@ -69,9 +66,11 @@ For a configured browser service, StageMesh can bind and retain this chain:
 7. independent review outcome for the same candidate and contract; and
 8. integration outcome for that exact candidate.
 
-It cannot currently bind a Figma revision to step 1 or show that the reviewer in
-step 7 inspected the artifacts from step 5. Therefore the acceptance chain in
-#505 is incomplete even though its middle is implemented.
+It can bind a reviewed project revision identifier and make step 5 artifacts
+available to step 7 as checksum-revalidated, content-free references. It cannot
+prove that the identifier came from a live Figma service or that the reviewer
+correctly interpreted the pixels. Therefore #505 still requires the separately
+approved synthetic Caventra experiment.
 
 ## Proposed bounded web toolchain
 
@@ -87,7 +86,7 @@ path.
 | Storybook, if already supported by the project | Exercise shared components in named states and provide a fast component-level check. | It is not a substitute for routed-screen behavior or responsive browser coverage. |
 | Playwright project evaluator | Start the synthetic app, render fixed states/viewports, disable motion/network variance, compare approved references, run functional assertions, and emit actual/reference/diff/trace artifacts plus the StageMesh result manifest. | It cannot update references or relax thresholds. An unstable render returns failure, not PASS. |
 | StageMesh | Run the declared evaluator on the exact candidate, validate complete requirement coverage, capture bounded artifacts, feed failures into remediation, require independent review, and gate integration. | It does not infer design intent or silently install browser dependencies. |
-| Independent reviewer | Inspect the patch, design contract, gate result, and read-only captured artifacts for the exact candidate. | It cannot treat a green status alone as visual approval. This artifact handoff is a current gap. |
+| Independent reviewer | Inspect the patch, design contract, gate result, and checksum-revalidated read-only captured artifacts for the exact candidate. | It cannot treat a green status alone as visual approval or change policy inputs. |
 
 Figma or Code Connect may be the upstream authoring source, but the experiment
 must consume a reviewed, versioned export inside the project boundary. A live MCP
@@ -126,7 +125,9 @@ records only and must not alter production UI routes or data.
 | `workspace-recovered-desktop` | workspace | recovery | `1440x900` | recovery interaction reaches approved ready state |
 | `activity-shared-desktop` | activity | ready | `1440x900` | shared status banner and primary action remain approved |
 
-An illustrative runtime declaration, not a change to the shipped Caventra profile:
+An illustrative runtime declaration, not a change to the shipped Caventra profile.
+One requirement is shown compactly; the approved experiment must repeat the typed
+artifact triplet for every requirement in the table above:
 
 ```json
 {
@@ -137,12 +138,6 @@ An illustrative runtime declaration, not a change to the shipped Caventra profil
       "cwd": "apps/web-v2",
       "command": ["npm.cmd", "run", "e2e:ui-fidelity", "--", "--project=chromium"],
       "timeout_seconds": 180,
-      "artifacts": [
-        "test-results/ui-fidelity/actual.png",
-        "test-results/ui-fidelity/reference.png",
-        "test-results/ui-fidelity/diff.png",
-        "test-results/ui-fidelity/trace.zip"
-      ],
       "evaluator": "playwright-ui-fidelity",
       "require_independent": true,
       "result_manifest": "test-results/ui-fidelity/stagemesh-results.json",
@@ -150,13 +145,29 @@ An illustrative runtime declaration, not a change to the shipped Caventra profil
       "health_command": ["node", "scripts/check-health.mjs", "http://127.0.0.1:4173/health"],
       "startup_timeout_seconds": 60,
       "requirements": [
-        {"id": "workspace-ready-desktop", "kind": "browser", "target": "/synthetic/workspace", "state": "ready", "viewport": "1440x900"},
-        {"id": "workspace-ready-mobile", "kind": "browser", "target": "/synthetic/workspace", "state": "ready", "viewport": "390x844"},
-        {"id": "workspace-empty-mobile", "kind": "browser", "target": "/synthetic/workspace", "state": "empty", "viewport": "390x844"},
-        {"id": "workspace-error-desktop", "kind": "browser", "target": "/synthetic/workspace", "state": "error", "viewport": "1440x900"},
-        {"id": "workspace-recovered-desktop", "kind": "browser", "target": "/synthetic/workspace", "state": "recovery", "viewport": "1440x900"},
-        {"id": "activity-shared-desktop", "kind": "browser", "target": "/synthetic/activity", "state": "ready", "viewport": "1440x900"}
-      ]
+        {"id": "workspace-ready-desktop", "kind": "browser", "target": "/synthetic/workspace", "state": "ready", "viewport": "1440x900"}
+      ],
+      "visual_reference": {
+        "revision": "synthetic-workspace-v1",
+        "inputs": [
+          {"path": "e2e/references/workspace-ready-desktop.png", "role": "reference"},
+          {"path": "e2e/fixtures/synthetic-state.json", "role": "fixture"},
+          {"path": "e2e/visual-thresholds.json", "role": "tolerance"},
+          {"path": "e2e/ui-fidelity.spec.ts", "role": "gate"},
+          {"path": "package.json", "role": "package"}
+        ],
+        "artifacts": [
+          {"requirement_id": "workspace-ready-desktop", "role": "actual", "path": "test-results/ui-fidelity/workspace-ready-desktop.actual.png", "content_type": "image/png"},
+          {"requirement_id": "workspace-ready-desktop", "role": "reference", "path": "e2e/references/workspace-ready-desktop.png", "content_type": "image/png"},
+          {"requirement_id": "workspace-ready-desktop", "role": "diff", "path": "test-results/ui-fidelity/workspace-ready-desktop.diff.png", "content_type": "image/png"}
+        ],
+        "comparison": {
+          "algorithm": "playwright-pixel-ratio-v1",
+          "max_difference_ratio": 0.01,
+          "stability_runs": 2
+        },
+        "functional_gates": ["synthetic-ui-functional"]
+      }
     }
   ]
 }
@@ -169,12 +180,13 @@ provided in `STAGEMESH_E2E_POLICY_FINGERPRINT`:
 {
   "policy_fingerprint": "<environment value>",
   "checks": [
-    {"id": "workspace-ready-desktop", "status": "PASS"},
-    {"id": "workspace-ready-mobile", "status": "PASS"},
-    {"id": "workspace-empty-mobile", "status": "PASS"},
-    {"id": "workspace-error-desktop", "status": "PASS"},
-    {"id": "workspace-recovered-desktop", "status": "PASS"},
-    {"id": "activity-shared-desktop", "status": "PASS"}
+    {
+      "id": "workspace-ready-desktop",
+      "status": "PASS",
+      "difference_ratio": 0.0,
+      "stable": true,
+      "render_count": 2
+    }
   ]
 }
 ```
@@ -197,9 +209,8 @@ mask needs a documented rendering reason and separate approval.
 4. **Candidate golden refresh:** attempt to commit a changed reference, threshold,
    mask, fixture, E2E spec, or evaluator. Contract scope must reject the candidate.
 5. **Evaluator-time refresh:** make the evaluator rewrite its approved reference
-   before comparison. This must fail before qualification can pass. Current
-   StageMesh does not supply this proof, so the experiment is blocked on the
-   mutation-fence follow-up below.
+   before comparison. The pre/post protected-input digest fence must fail and retain
+   an actionable environment finding; no PASS evidence may be accepted.
 6. **Flaky rendering:** deliberately vary one render across two clean contexts. The
    evaluator must report an instability failure with no accepted PASS and no
    automatic reference update.
@@ -219,34 +230,25 @@ control fails for the intended reason. The report must retain:
 - proof that neither the candidate nor evaluator changed protected references or
   acceptance policy.
 
-## Minimum follow-up work, deferred pending review
+## Remaining follow-up work
 
-These are scoped ticket candidates, not authorization to implement or change
-Caventra under #505.
+The two StageMesh safety gaps above are implemented and covered synthetically by
+#561. The remaining work is outside this implementation authorization:
 
-1. **Reference mutation fence (StageMesh):** let an explicit browser service
-   declare read-only reference inputs and acceptance-policy files. Hash them before
-   and after evaluation in the disposable checkout and fail if any bytes, path
-   type, or symlink target changes. Persist only bounded paths and digests.
-2. **Review artifact handoff (StageMesh):** add a privacy-bounded validation
-   evidence bundle for independent review containing requirement outcomes and
-   read-only local artifact references/digests for the exact candidate. Keep raw
-   targets, secrets, and unrestricted filesystem access out of the prompt.
-3. **Synthetic Playwright qualification (Caventra, separate approval):** add the
+1. **Synthetic Playwright qualification (Caventra, separate approval):** add the
    reviewed reference bundle, deterministic evaluator, state fixtures, and explicit
    runtime service configuration; execute all positive and negative controls. Do
    not touch production UI or real matter data.
-4. **Native-stack decision (separate discovery):** verify whether Caventra has a
+2. **Native-stack decision (separate discovery):** verify whether Caventra has a
    native mobile target. If it does, define emulator/device isolation and assess
    Maestro. If not, close native-mobile qualification as not applicable rather
    than treating responsive web as equivalent.
 
 ## Go/no-go gate
 
-StageMesh may be described as owning the UI feedback loop only after the two
-StageMesh safety gaps are accepted, the separate synthetic Caventra experiment
-passes on an exact candidate, the independent reviewer can inspect the captured
-evidence, and hosted merge policy rejects the two negative regressions. Until
-then, the accurate statement is: **StageMesh can orchestrate a configured
-candidate-bound browser evaluator and remediate its failures, but unattended
-Caventra design fidelity is not yet qualified.**
+StageMesh may be described as owning the Caventra UI feedback loop only after the
+separate synthetic Caventra experiment passes on an exact candidate and hosted
+merge policy rejects the two negative regressions. Until then, the accurate
+statement is: **StageMesh can govern a configured candidate-bound visual evaluator,
+preserve immutable evidence, and remediate its failures, but unattended Caventra
+design fidelity is not yet qualified.**

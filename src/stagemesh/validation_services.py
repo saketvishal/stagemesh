@@ -21,6 +21,16 @@ from .e2e_evidence import (
     build_e2e_evidence,
 )
 from .remediation import bounded_failure_text
+from .visual_reference import (
+    VisualReferenceError,
+    VisualReferencePolicy,
+    VisualResultError,
+    parse_visual_reference,
+    reject_update_modes,
+    snapshot_visual_inputs,
+    validate_visual_result,
+    visual_policy_fingerprint,
+)
 
 MAX_EVALUATION_REQUIREMENTS = 32
 MAX_EVALUATION_RESULT_BYTES = 64 * 1024
@@ -73,9 +83,10 @@ class ConfiguredService:
     startup_command: tuple[str, ...] = ()
     health_command: tuple[str, ...] = ()
     startup_timeout_seconds: int = 30
+    visual_reference: VisualReferencePolicy | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "name": self.name,
             "kind": self.kind,
             "command": list(self.command),
@@ -94,6 +105,9 @@ class ConfiguredService:
             "health_command": list(self.health_command),
             "startup_timeout_seconds": self.startup_timeout_seconds,
         }
+        if self.visual_reference is not None:
+            payload["visual_reference"] = self.visual_reference.to_dict()
+        return payload
 
     @property
     def policy_fingerprint(self) -> str:
@@ -165,16 +179,29 @@ def discover_validation_services(
             for item in declared:
                 if not isinstance(item, dict):
                     raise ValidationServiceError("validation service must be an object")
+                requirements = _parse_requirements(item.get("requirements", ()))
+                visual_reference = parse_visual_reference(
+                    item.get("visual_reference"),
+                    requirement_ids=tuple(requirement.id for requirement in requirements),
+                )
+                if visual_reference is not None and item.get("artifacts"):
+                    raise ValidationServiceError(
+                        "visual_reference owns typed artifacts; top-level artifacts must be omitted"
+                    )
                 service = ConfiguredService(
                     name=item.get("name"), kind=item.get("kind", "custom"),
                     command=tuple(item["command"]) if isinstance(item.get("command"), list) else (),
                     cwd=item.get("cwd"), env_keys=tuple(item.get("env_keys", ())),
                     port=item.get("port"), url=item.get("url"),
                     timeout_seconds=item.get("timeout_seconds", 120),
-                    artifacts=tuple(item.get("artifacts", ())),
+                    artifacts=(
+                        tuple(artifact.path for artifact in visual_reference.artifacts)
+                        if visual_reference is not None
+                        else tuple(item.get("artifacts", ()))
+                    ),
                     evaluator=item.get("evaluator"),
                     require_independent=item.get("require_independent", False),
-                    requirements=_parse_requirements(item.get("requirements", ())),
+                    requirements=requirements,
                     result_manifest=item.get("result_manifest"),
                     startup_command=_parse_optional_command(
                         item.get("startup_command", ()), "startup_command"
@@ -183,6 +210,7 @@ def discover_validation_services(
                         item.get("health_command", ()), "health_command"
                     ),
                     startup_timeout_seconds=item.get("startup_timeout_seconds", 30),
+                    visual_reference=visual_reference,
                 )
                 _validate_service(service)
                 if any(s.name == service.name for s in services):
@@ -257,6 +285,21 @@ def discover_validation_services(
         package_identity = json.dumps(pkg_data, sort_keys=True, separators=(",", ":")).encode("utf-8")
         config_digest += hashlib.sha256(package_identity).hexdigest()
         config_digest += _npm_configuration_digest(root, _inside(root, service.cwd or "."))
+    for service in services:
+        if service.visual_reference is None:
+            continue
+        try:
+            reject_update_modes(
+                service.command,
+                service.startup_command,
+                service.health_command,
+                service.script_definition,
+            )
+            run_dir = _inside(root, service.cwd or ".")
+            snapshots = snapshot_visual_inputs(run_dir, service.visual_reference)
+            config_digest += visual_policy_fingerprint(service.visual_reference, snapshots)
+        except VisualReferenceError as exc:
+            raise ValidationServiceError(str(exc)) from exc
     environment = {key: os.environ.get(key) for s in services for key in s.env_keys}
     config_digest += hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
     services_tuple = tuple(sorted(services, key=lambda s: s.name))
@@ -389,6 +432,11 @@ def _validate_service(service: ConfiguredService) -> None:
             raise ValidationServiceError("result_manifest refers to protected material")
     if service.requirements and service.result_manifest is None:
         raise ValidationServiceError("evaluation requirements need result_manifest")
+    if service.visual_reference is not None:
+        if service.kind != "browser":
+            raise ValidationServiceError("visual_reference is supported only for browser services")
+        if not service.requirements or service.result_manifest is None:
+            raise ValidationServiceError("visual_reference requires browser requirements and result_manifest")
     for label, command in (
         ("startup_command", service.startup_command),
         ("health_command", service.health_command),
@@ -468,6 +516,19 @@ def _validate_requirement(requirement: EvaluationRequirement, service_kind: str)
         raise ValidationServiceError("API requirement needs an expected HTTP status")
 
 
+def _require_declared_functional_gates(
+    policy: VisualReferencePolicy,
+    bound: BoundChangeContract,
+) -> None:
+    declared = {gate.name for gate in bound.contract.gates}
+    missing = [name for name in policy.functional_gates if name not in declared]
+    if missing:
+        raise ValidationServiceError(
+            "visual_reference functional gates are not declared in the bound contract: "
+            + ", ".join(missing)
+        )
+
+
 def run_configured_evaluations(
     project: Path, bound: BoundChangeContract, manifest: ValidationServicesManifest,
     artifact_root: Path,
@@ -487,6 +548,9 @@ def run_configured_evaluations(
     selected = [s for s in manifest.services if s.kind in {"browser", "api"}]
     if not selected:
         return evaluations, gates, findings
+    for service in selected:
+        if service.visual_reference is not None:
+            _require_declared_functional_gates(service.visual_reference, bound)
     with candidate_workspace(project, bound.candidate_sha) as checkout:
         for index, service in enumerate(selected):
             if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
@@ -505,6 +569,16 @@ def run_configured_evaluations(
                 raise ValidationServiceError(
                     "independent evaluator is missing or matches the implementation provider"
                 )
+            visual_before = (
+                snapshot_visual_inputs(run_dir, service.visual_reference)
+                if service.visual_reference is not None
+                else ()
+            )
+            effective_policy_fingerprint = (
+                visual_policy_fingerprint(service.visual_reference, visual_before)
+                if service.visual_reference is not None
+                else service.policy_fingerprint
+            )
             sources = [_inside(run_dir, path) for path in service.artifacts]
             before = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in sources if p.is_file()}
             policy_result = (
@@ -522,7 +596,7 @@ def run_configured_evaluations(
                 list(service.command),
                 timeout_seconds=service.timeout_seconds,
                 cwd=service.cwd,
-                env=(("STAGEMESH_E2E_POLICY_FINGERPRINT", service.policy_fingerprint),),
+                env=(("STAGEMESH_E2E_POLICY_FINGERPRINT", effective_policy_fingerprint),),
             )
             if service.startup_command:
                 result, lifecycle = _run_with_managed_service(
@@ -539,8 +613,21 @@ def run_configured_evaluations(
                     "healthy": False,
                     "cleanup_confirmed": True,
                 }
-            if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
-                raise ValidationServiceError("service configuration changed during evaluation in the candidate checkout")
+            integrity_errors: list[str] = []
+            if service.visual_reference is not None:
+                try:
+                    visual_after = snapshot_visual_inputs(run_dir, service.visual_reference)
+                    if visual_after != visual_before:
+                        raise ValidationServiceError("visual_reference protected input changed during evaluation")
+                except (OSError, ValueError, VisualReferenceError, ValidationServiceError) as exc:
+                    integrity_errors.append(str(exc))
+            try:
+                if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
+                    raise ValidationServiceError(
+                        "service configuration changed during evaluation in the candidate checkout"
+                    )
+            except (OSError, ValueError, ValidationServiceError) as exc:
+                integrity_errors.append(str(exc))
             secrets = tuple(os.environ.get(key, "") for key in service.env_keys)
             stdout = bounded_failure_text(result.stdout, secrets=secrets)
             stderr = bounded_failure_text(result.stderr, secrets=secrets)
@@ -552,15 +639,21 @@ def run_configured_evaluations(
                 failure_kind = "environment" if kind in {"browser_startup", "service_unavailable", "missing_tool", "permission"} else "assertion"
             command = [bounded_failure_text(p, 500, secrets) for p in result.command]
             references = []
-            artifact_errors = []
-            policy_results: list[dict[str, str]] = []
+            typed_artifacts: list[dict[str, Any]] = []
+            artifact_errors = [bounded_failure_text(error, 500, secrets) for error in integrity_errors]
+            evidence_failure_kind: str | None = "environment" if integrity_errors else None
+            policy_results: list[dict[str, Any]] = []
             if service.requirements:
                 try:
                     policy_results = _validate_policy_result(
                         policy_result,
                         result_before,
                         service,
+                        expected_policy_fingerprint=effective_policy_fingerprint,
                     )
+                except VisualResultError as exc:
+                    artifact_errors.append(bounded_failure_text(str(exc), 500, secrets))
+                    evidence_failure_kind = exc.failure_kind
                 except (OSError, ValueError, ValidationServiceError) as exc:
                     artifact_errors.append(bounded_failure_text(str(exc), 500, secrets))
             for artifact_index, source in enumerate(sources):
@@ -570,7 +663,15 @@ def run_configured_evaluations(
                     stat = source.stat()
                     if not source.is_file() or stat.st_size > MAX_ARTIFACT_SIZE:
                         raise ValidationServiceError("artifact is not a bounded regular file")
-                    if before.get(source) == (stat.st_mtime_ns, stat.st_size):
+                    visual_artifact = (
+                        service.visual_reference.artifacts[artifact_index]
+                        if service.visual_reference is not None
+                        else None
+                    )
+                    if (
+                        (visual_artifact is None or visual_artifact.role != "reference")
+                        and before.get(source) == (stat.st_mtime_ns, stat.st_size)
+                    ):
                         raise ValidationServiceError("configured artifact was not refreshed")
                     target = artifact_root / str(index) / (str(artifact_index) + source.suffix)
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -584,13 +685,35 @@ def run_configured_evaluations(
                             remaining -= len(chunk)
                         if remaining == 0:
                             raise ValidationServiceError("artifact exceeded size limit during capture")
-                    references.append(build_artifact_reference(source.name, target, artifact_root))
+                    reference = build_artifact_reference(
+                        (
+                            f"{visual_artifact.requirement_id}.{visual_artifact.role}"
+                            if visual_artifact is not None
+                            else source.name
+                        ),
+                        target,
+                        artifact_root,
+                        content_type=(
+                            visual_artifact.content_type
+                            if visual_artifact is not None
+                            else "application/octet-stream"
+                        ),
+                    )
+                    references.append(reference)
+                    if visual_artifact is not None:
+                        typed_artifacts.append(
+                            {
+                                "requirement_id": visual_artifact.requirement_id,
+                                "role": visual_artifact.role,
+                                **reference.to_dict(),
+                            }
+                        )
                 except (OSError, ValueError) as exc:
                     artifact_errors.append(bounded_failure_text(str(exc), 500, secrets))
             status = "PASSED" if result.status == "PASSED" and not artifact_errors else "FAILED"
             if artifact_errors:
                 stderr = bounded_failure_text(stderr + "\nartifact collection failed: " + "; ".join(artifact_errors))
-                failure_kind = failure_kind or "environment"
+                failure_kind = failure_kind or evidence_failure_kind or "environment"
             gate = {"name": name, "status": status, "command": command, "returncode": result.returncode,
                     "failure_kind": failure_kind, "stdout": stdout, "stderr": stderr}
             if status != "PASSED":
@@ -607,26 +730,34 @@ def run_configured_evaluations(
                 signature = None
             gate["failure_signature"] = signature
             gates.append(gate)
+            metadata: dict[str, Any] = {
+                "gate": name,
+                "failure_kind": failure_kind,
+                "failure_signature": signature,
+                "policy_fingerprint": effective_policy_fingerprint,
+                "evaluator": service.evaluator,
+                "independent": bool(service.require_independent),
+                "requirements": policy_results,
+                "lifecycle": lifecycle,
+            }
+            if service.visual_reference is not None:
+                metadata["visual_reference"] = {
+                    "revision": service.visual_reference.revision,
+                    "policy_fingerprint": effective_policy_fingerprint,
+                    "comparison": service.visual_reference.comparison.to_dict(),
+                    "functional_gates": list(service.visual_reference.functional_gates),
+                    "protected_inputs": [item.to_dict() for item in visual_before],
+                    "artifacts": typed_artifacts,
+                }
             evidence = build_e2e_evidence(
                 bound, candidate_sha=bound.candidate_sha, service_fingerprint=manifest.fingerprint,
                 kind=service.kind, command=service.command, result="PASS" if status == "PASSED" else "FAIL",
                 artifacts=references, artifact_root=artifact_root,
-                metadata={
-                    "gate": name,
-                    "failure_kind": failure_kind,
-                    "failure_signature": signature,
-                    "policy_fingerprint": service.policy_fingerprint,
-                    "evaluator": service.evaluator,
-                    "independent": bool(service.require_independent),
-                    "requirements": policy_results,
-                    "lifecycle": lifecycle,
-                },
+                metadata=metadata,
             ).to_dict()
             # Executed identity stays bound by the service fingerprint; persist no command credentials.
             evidence["command"] = command
             evaluations.append(evidence)
-        if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
-            raise ValidationServiceError("service configuration changed during evaluation in the candidate checkout")
     if discover_validation_services(project).fingerprint != manifest.fingerprint:
         raise ValidationServiceError("service configuration changed during evaluation")
     return evaluations, gates, findings
@@ -636,7 +767,9 @@ def _validate_policy_result(
     source: Path | None,
     before: tuple[int, int] | None,
     service: ConfiguredService,
-) -> list[dict[str, str]]:
+    *,
+    expected_policy_fingerprint: str,
+) -> list[dict[str, Any]]:
     if source is None or not source.is_file():
         raise ValidationServiceError("evaluation result manifest was not produced")
     stat = source.stat()
@@ -650,25 +783,32 @@ def _validate_policy_result(
         raise ValidationServiceError("evaluation result manifest is invalid JSON") from exc
     if not isinstance(payload, dict):
         raise ValidationServiceError("evaluation result manifest must be an object")
-    if payload.get("policy_fingerprint") != service.policy_fingerprint:
+    if payload.get("policy_fingerprint") != expected_policy_fingerprint:
         raise ValidationServiceError("evaluation result policy fingerprint mismatch")
     checks = payload.get("checks")
     if not isinstance(checks, list) or len(checks) > MAX_EVALUATION_REQUIREMENTS:
         raise ValidationServiceError("evaluation result checks are missing or excessive")
     expected = {requirement.id for requirement in service.requirements}
-    observed: dict[str, str] = {}
+    observed: dict[str, dict[str, Any]] = {}
     for check in checks:
         if not isinstance(check, dict):
             raise ValidationServiceError("evaluation result check must be an object")
         check_id, status = check.get("id"), check.get("status")
         if check_id not in expected or check_id in observed or status not in {"PASS", "FAIL"}:
             raise ValidationServiceError("evaluation result check is unknown duplicate or invalid")
-        observed[check_id] = status
+        observed[check_id] = check
     if set(observed) != expected:
         raise ValidationServiceError("evaluation result omits required coverage")
-    if set(observed.values()) != {"PASS"}:
+    if {check["status"] for check in observed.values()} != {"PASS"}:
         raise ValidationServiceError("evaluation result contains a failed requirement")
-    return [{"id": requirement.id, "status": observed[requirement.id]} for requirement in service.requirements]
+    results: list[dict[str, Any]] = []
+    for requirement in service.requirements:
+        check = observed[requirement.id]
+        result: dict[str, Any] = {"id": requirement.id, "status": check["status"]}
+        if service.visual_reference is not None:
+            result.update(validate_visual_result(check, service.visual_reference))
+        results.append(result)
+    return results
 
 
 def _run_with_managed_service(
@@ -680,7 +820,7 @@ def _run_with_managed_service(
     """Start only a declared service, require bounded health, then prove cleanup."""
     from .gate_process import GateCleanupUnconfirmed, spawn_gate_process, terminate_owned_gate
 
-    environment = {**os.environ, "STAGEMESH_E2E_POLICY_FINGERPRINT": service.policy_fingerprint}
+    environment = {**os.environ, **dict(evaluation_gate.env)}
     environment.setdefault("PYTHONUNBUFFERED", "1")
     src = run_dir / "src"
     if src.is_dir():

@@ -1275,7 +1275,14 @@ def _e2e_summary(
             "artifact_paths": [],
         }
     configured = [
-        {"name": service.name, "kind": service.kind}
+        {
+            "name": service.name,
+            "kind": service.kind,
+            "visual_reference": service.visual_reference is not None,
+            "reference_revision": (
+                service.visual_reference.revision if service.visual_reference is not None else None
+            ),
+        }
         for service in services.services
         if service.kind in {"browser", "api"}
     ]
@@ -1330,12 +1337,38 @@ def _e2e_summary(
             if isinstance(ref, dict) and isinstance(ref.get("path"), str)
         ][:32]
         artifacts.extend(paths)
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        visual = metadata.get("visual_reference") if isinstance(metadata.get("visual_reference"), dict) else None
+        visual_summary = None
+        if visual is not None:
+            visual_summary = {
+                "revision": str(visual.get("revision") or "")[:200],
+                "policy_fingerprint": str(visual.get("policy_fingerprint") or "")[:64],
+                "functional_gates": [
+                    str(name)[:100]
+                    for name in (
+                        visual.get("functional_gates")
+                        if isinstance(visual.get("functional_gates"), list)
+                        else []
+                    )[:32]
+                ],
+                "requirement_count": len(metadata.get("requirements", []))
+                if isinstance(metadata.get("requirements"), list)
+                else 0,
+                "protected_input_count": len(visual.get("protected_inputs", []))
+                if isinstance(visual.get("protected_inputs"), list)
+                else 0,
+                "typed_artifact_count": len(visual.get("artifacts", []))
+                if isinstance(visual.get("artifacts"), list)
+                else 0,
+            }
         evaluations.append(
             {
                 "kind": str(item.get("kind") or "unknown")[:40],
                 "result": result,
                 "command": [str(part)[:200] for part in command[:32]],
                 "artifact_paths": paths,
+                "visual_reference": visual_summary,
             }
         )
     root = payload.get("e2e_artifact_root")
@@ -1551,6 +1584,11 @@ def format_doctor(report: dict[str, Any]) -> str:
         f"  e2e: {e2e.get('status', 'unknown')}"
         + (f"; evaluations={len(e2e['evaluations'])}" if e2e.get("evaluations") else "")
         + (f"; artifacts={len(e2e['artifact_paths'])}" if e2e.get("artifact_paths") else "")
+        + (
+            f"; visual={sum(1 for item in e2e['evaluations'] if item.get('visual_reference'))}"
+            if any(item.get("visual_reference") for item in e2e.get("evaluations", []))
+            else ""
+        )
         + (
             f"; policy={e2e['policy']['status']}; declared-checks="
             f"{sum(len(item['requirements']) for item in e2e['policy']['policies'])}"

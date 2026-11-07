@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contracts import CONTRACT_VERSION, BoundChangeContract, canonical_contract_json
+from .contracts import BoundChangeContract
 from .release import ReleaseValidationError, validate_candidate_sha
 from .security import WorkspaceBoundary
 
@@ -84,8 +84,7 @@ def validate_artifact_reference(
     norm_path = ref.path.replace("\\", "/").strip()
     # Check traversal or root
     if (
-        norm_path.startswith("/")
-        or norm_path.startswith("../")
+        norm_path.startswith(("/", "../"))
         or "/../" in norm_path
         or norm_path == ".."
         or ":/" in norm_path
@@ -260,17 +259,15 @@ def validate_e2e_evidence_manifest(
         bound_cand = validate_candidate_sha(bound.candidate_sha) if bound.candidate_sha else None
     except ReleaseValidationError as exc:
         raise E2EEvidenceValidationError(str(exc)) from exc
-    if exp_cand:
-        if norm_cand != exp_cand:
-            raise E2EEvidenceValidationError(
-                f"candidate sha changed: expected {exp_cand}, manifest has {norm_cand}"
-            )
+    if exp_cand and norm_cand != exp_cand:
+        raise E2EEvidenceValidationError(
+            f"candidate sha changed: expected {exp_cand}, manifest has {norm_cand}"
+        )
 
-    if bound_cand:
-        if norm_cand != bound_cand:
-            raise E2EEvidenceValidationError(
-                f"candidate sha does not match bound contract: expected {bound_cand}, got {norm_cand}"
-            )
+    if bound_cand and norm_cand != bound_cand:
+        raise E2EEvidenceValidationError(
+            f"candidate sha does not match bound contract: expected {bound_cand}, got {norm_cand}"
+        )
 
     if manifest.contract_digest != bound.digest:
         raise E2EEvidenceValidationError(
@@ -282,11 +279,10 @@ def validate_e2e_evidence_manifest(
             f"baseline sha mismatch: expected {bound.baseline_sha}, manifest has {manifest.baseline_sha}"
         )
 
-    if expected_service_fingerprint:
-        if manifest.service_fingerprint != expected_service_fingerprint:
-            raise E2EEvidenceValidationError(
-                f"service fingerprint mismatch: expected {expected_service_fingerprint}, got {manifest.service_fingerprint}"
-            )
+    if expected_service_fingerprint and manifest.service_fingerprint != expected_service_fingerprint:
+        raise E2EEvidenceValidationError(
+            f"service fingerprint mismatch: expected {expected_service_fingerprint}, got {manifest.service_fingerprint}"
+        )
 
     if manifest.kind not in ALLOWED_KINDS:
         raise E2EEvidenceValidationError(f"invalid manifest kind: {manifest.kind}")
@@ -402,3 +398,89 @@ def read_e2e_evidence(
         artifact_root=artifact_root,
     )
     return manifest
+
+
+def review_e2e_projection(payload: dict[str, Any], project: Path) -> list[dict[str, Any]]:
+    """Return checksum-revalidated, content-free E2E evidence for an independent review prompt."""
+    root_value = payload.get("e2e_artifact_root")
+    evaluations = payload.get("e2e_evaluations")
+    if not isinstance(root_value, str) or not isinstance(evaluations, list):
+        return []
+    project_root = project.resolve()
+    artifact_root = Path(root_value).resolve()
+    try:
+        WorkspaceBoundary(project_root).require_inside(artifact_root)
+        root_relative = artifact_root.relative_to(project_root).as_posix()
+    except Exception as exc:
+        raise E2EEvidenceValidationError("E2E artifact root escapes the project") from exc
+    projected: list[dict[str, Any]] = []
+    for item in evaluations[:16]:
+        if not isinstance(item, dict):
+            continue
+        refs: list[dict[str, Any]] = []
+        for raw in item.get("artifacts", [])[:MAX_ARTIFACTS]:
+            if not isinstance(raw, dict):
+                raise E2EEvidenceValidationError("E2E artifact reference is invalid")
+            try:
+                ref = ArtifactReference(
+                    name=raw["name"],
+                    path=raw["path"],
+                    sha256=raw["sha256"],
+                    size=raw["size"],
+                    content_type=raw.get("content_type", "application/octet-stream"),
+                )
+            except KeyError as exc:
+                raise E2EEvidenceValidationError("E2E artifact reference is incomplete") from exc
+            refs.append(validate_artifact_reference(ref, artifact_root).to_dict())
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        visual = metadata.get("visual_reference")
+        visual_projection = None
+        if isinstance(visual, dict):
+            typed_artifacts = visual.get("artifacts") if isinstance(visual.get("artifacts"), list) else []
+            protected_inputs = (
+                visual.get("protected_inputs") if isinstance(visual.get("protected_inputs"), list) else []
+            )
+            functional_gates = (
+                visual.get("functional_gates") if isinstance(visual.get("functional_gates"), list) else []
+            )
+            visual_projection = {
+                "revision": str(visual.get("revision") or "")[:200],
+                "policy_fingerprint": str(visual.get("policy_fingerprint") or "")[:64],
+                "comparison": visual.get("comparison") if isinstance(visual.get("comparison"), dict) else {},
+                "functional_gates": [str(name)[:100] for name in functional_gates[:32]],
+                "requirements": metadata.get("requirements") if isinstance(metadata.get("requirements"), list) else [],
+                "artifacts": [
+                    {
+                        "requirement_id": str(entry.get("requirement_id") or "")[:100],
+                        "role": str(entry.get("role") or "")[:20],
+                        "path": str(entry.get("path") or "")[:500],
+                        "sha256": str(entry.get("sha256") or "")[:64],
+                        "size": entry.get("size"),
+                    }
+                    for entry in typed_artifacts[:MAX_ARTIFACTS]
+                    if isinstance(entry, dict)
+                ],
+                "protected_inputs": [
+                    {
+                        "path": str(entry.get("path") or "")[:500],
+                        "role": str(entry.get("role") or "")[:20],
+                        "sha256": str(entry.get("sha256") or "")[:64],
+                        "size": entry.get("size"),
+                    }
+                    for entry in protected_inputs[:64]
+                    if isinstance(entry, dict)
+                ],
+            }
+        projected.append(
+            {
+                "candidate_sha": str(item.get("candidate_sha") or "")[:64],
+                "contract_digest": str(item.get("contract_digest") or "")[:64],
+                "service_fingerprint": str(item.get("service_fingerprint") or "")[:64],
+                "kind": str(item.get("kind") or "")[:40],
+                "result": str(item.get("result") or "")[:20],
+                "artifact_root": root_relative,
+                "artifacts": refs,
+                "visual_reference": visual_projection,
+            }
+        )
+    return projected
