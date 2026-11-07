@@ -75,6 +75,25 @@ def test_compatible_fast_path_families_union_without_claiming_unknown_coverage()
     assert set(hosted.direct_test_targets) == set(local.direct_test_targets)
 
 
+def test_objective_governance_has_a_bounded_two_os_component_plan() -> None:
+    paths = (
+        "src/stagemesh/objective_governance.py",
+        "tests/test_objective_governance.py",
+        "docs/objective-governance.md",
+    )
+
+    local = derive_validation_plan(ChangeContract("Objective governance", paths), paths)
+    hosted = derive_ci_validation_plan(paths)
+
+    assert local.full_regression_required is False
+    assert local.affected_components == ("objective_governance",)
+    assert local.direct_test_targets == ("tests/test_objective_governance.py",)
+    assert hosted.mode == COMPONENT
+    assert hosted.required_os == ("windows", "linux")
+    assert hosted.browser_required is False
+    assert hosted.windows_installer_required is False
+
+
 def test_exclusive_operator_family_mixed_with_another_family_fails_broad() -> None:
     paths = ("src/stagemesh/activity.py", "src/stagemesh/capabilities.py")
     local = derive_validation_plan(ChangeContract("Mixed", allowed_files=paths), paths)

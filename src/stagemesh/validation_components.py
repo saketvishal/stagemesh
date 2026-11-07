@@ -4,6 +4,7 @@ The catalog is deliberately repository-specific.  Exact roots may opt into a
 focused fast path only when their direct and dependent contracts have been
 reviewed.  Unknown, mixed, or cross-cutting scope remains broad by default.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -187,6 +188,16 @@ AUDITED_ROOTS = (
         ),
     ),
     *_family_roots(
+        family="objective-governance",
+        roots=(("src/stagemesh/objective_governance.py", "objective_governance"),),
+        direct=("tests/test_objective_governance.py",),
+        dependent=(
+            "tests/test_planning_execution.py",
+            "tests/test_spec_planning.py",
+            "tests/test_spec_planning_gate.py",
+        ),
+    ),
+    *_family_roots(
         family="operator",
         roots=(
             ("src/stagemesh/activity.py", "activity_read_model"),
@@ -250,9 +261,7 @@ def resolve_component_impact(
     components = tuple(sorted({root.component for root in selected}))
     families = tuple(sorted({root.family for root in selected}))
     direct = tuple(sorted({target for root in selected for target in root.direct_tests}))
-    dependent = tuple(
-        sorted({target for root in selected for target in root.dependent_tests})
-    )
+    dependent = tuple(sorted({target for root in selected for target in root.dependent_tests}))
     complete = bool(selected) and not unknown
     exclusive_conflict = len(families) > 1 and any(root.exclusive_family for root in selected)
     fast = complete and not exclusive_conflict and all(root.fast_path for root in selected)

@@ -145,11 +145,12 @@ count, extension alone or arbitrary directory membership.
 | Operator | `activity.py`, `activity_periods.py`, `operator.py`, `api_server.py`, and the three packaged UI assets | Existing eight direct and seven browser/API/installer dependent tests | Windows + Linux |
 | Skills/capabilities | `agent_skills.py`, `capabilities.py`, `capability_contracts.py`, `capability_discovery.py`, `capability_vendor.py`, `claude_plugin_capabilities.py`, `mcp_capabilities.py`, `provider_events.py` | Agent-skill, registry, MCP proxy/authorization, and provider-event direct tests plus provider acceptance/authorization/registry and run-window/recovery contracts | Windows + Linux |
 | Task sources | `task_sources.py` | GitHub/local source, invariant, outbound lifecycle, progress-preservation, and zero-config direct tests plus admission diagnosis, objective, queue, selection, and publication contracts | Windows + Linux |
+| Objective governance | `objective_governance.py` | Objective plan/challenge/revision/evaluation direct controls plus task-level planning and execution-gate compatibility checks | Windows + Linux |
 
 An `operator` plan requires both protected Windows and Linux jobs, the real-browser
 test and Windows installer/timezone acceptance. A `component` plan also requires
-both operating systems for the currently audited skills/capability and task-source
-families. The planner writes versioned JSON with a selector-policy fingerprint;
+both operating systems for the currently audited skills/capability, task-source,
+and objective-governance families. The planner writes versioned JSON with a selector-policy fingerprint;
 a separate runner rejects symlinks, oversized/malformed plans, unsupported
 contracts/modes/OS values, empty direct targets, missing/stale policy identity,
 pytest options, traversal, shell text, and every target outside the immutable
