@@ -37,3 +37,11 @@ def test_hands_off_install_and_upgrade_reject_stale_codex_executables() -> None:
         assert "[IO.Path]::IsPathRooted($codexExecutable)" in script
         assert "Test-Path -LiteralPath $codexExecutable -PathType Leaf" in script
         assert "Invoke-Bounded $codexExecutable @('--version') 30" in script
+
+
+def test_native_acceptance_retains_driver_reports_before_disposable_cleanup() -> None:
+    script = (WINDOWS_ACCEPTANCE / "run-native-acceptance.ps1").read_text(encoding="utf-8")
+
+    assert "project\\.stagemesh\\driver\\reports" in script
+    assert "Join-Path $evidence 'driver-reports'" in script
+    assert "'--initial-only'" not in script
