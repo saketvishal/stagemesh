@@ -167,6 +167,13 @@ def popen_session_kwargs() -> dict[str, object]:
     return {"start_new_session": True}
 
 
+def popen_descendant_kwargs() -> dict[str, object]:
+    """Hide a nested child without moving it outside its owner's killable process tree."""
+    kwargs = popen_session_kwargs()
+    kwargs.pop("start_new_session", None)
+    return kwargs
+
+
 def kill_process_tree(proc: subprocess.Popen[str]) -> bool:
     confirmed = False
     if sys.platform == "win32":

@@ -27,7 +27,7 @@ from stagemesh.continuous_driver import (
     status,
 )
 from stagemesh.driver_scheduler import DriverSchedulerError, WindowsDriverScheduler, driver_command
-from stagemesh.execution import kill_process_tree, popen_session_kwargs
+from stagemesh.execution import kill_process_tree, popen_descendant_kwargs, popen_session_kwargs
 from stagemesh.persistence import Store
 from stagemesh.process_identity import popen_identity, process_identity
 
@@ -428,6 +428,11 @@ def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path, monkeypat
 
     assert process_identity(pid) is None
     assert not child_owner_path(project).exists()
+
+
+def test_nested_driver_child_stays_in_the_wrapper_process_tree() -> None:
+    assert "start_new_session" in popen_session_kwargs() or sys.platform == "win32"
+    assert "start_new_session" not in popen_descendant_kwargs()
 
 
 def test_confirmed_tree_kill_waits_for_delayed_child_reaping(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

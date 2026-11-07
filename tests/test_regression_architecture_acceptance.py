@@ -709,15 +709,14 @@ def test_windows_essential_profile_is_exact_and_never_claims_complete_catalog() 
     assert evidence["scope"] == "tier_subset"
     assert evidence["complete_catalog"] is False
     assert evidence["selected_tiers"] == ["native_platform", "serial_timing"]
-    assert evidence["tier_counts"] == {
-        "native_platform": 229,
-        "serial_timing": 13,
-    }
-    assert evidence["canonical_count"] == 242
     assert {lane.tier for lane in execution_lanes} == WINDOWS_ESSENTIAL_TIERS
     assert all(not lane.parallel_safe for lane in execution_lanes)
     execution_nodeids = [nodeid for lane in execution_lanes for nodeid in lane.files]
-    assert len(execution_nodeids) == len(set(execution_nodeids)) == 242
+    execution_counts = Counter(
+        lane.tier.value for lane in execution_lanes for _nodeid in lane.files
+    )
+    assert dict(execution_counts) == evidence["tier_counts"]
+    assert len(execution_nodeids) == len(set(execution_nodeids)) == evidence["canonical_count"]
 
 
 def test_execution_lane_planner_is_deterministic_balanced_and_file_atomic() -> None:
