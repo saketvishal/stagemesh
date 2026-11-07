@@ -60,7 +60,6 @@ from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
 from .config import (
-    BALANCED_PROVIDER_POOLS,
     ConfigValidationError,
     StageMeshConfig,
     TaskSelectionConfig,
@@ -123,6 +122,7 @@ from .provider_acceptance import (
     run_live_provider_smoke,
     run_provider_acceptance,
 )
+from .provider_catalog import balanced_provider_pools, discovered_provider_entries
 from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .provider_pool import (
     IMPLEMENT,
@@ -246,6 +246,30 @@ def _ensure_default_github_task_source(project: Path) -> bool:
     return changed
 
 
+def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...]]:
+    """Create the project-local provider registry once, without provider calls."""
+    config_path = runtime_dir(project) / "config.json"
+    data: dict[str, object] = {}
+    if config_path.exists():
+        try:
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ConfigValidationError("config file must be valid JSON") from exc
+        if not isinstance(loaded, dict):
+            raise ConfigValidationError("config root must be an object")
+        data = loaded
+    if "providers" in data:
+        providers = data["providers"]
+        if not isinstance(providers, dict):
+            raise ConfigValidationError("providers must be an object")
+        return False, tuple(sorted(str(name) for name in providers))
+    providers = discovered_provider_entries()
+    data["providers"] = providers
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return True, tuple(sorted(providers))
+
+
 def _missing_github_task_source_check(config, project: Path) -> dict[str, object] | None:
     if not (config.github.owner and config.github.repo):
         return None
@@ -267,6 +291,7 @@ def command_init(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
     configured_github_source = _ensure_default_github_task_source(project)
+    initialized_providers, registered_providers = _ensure_provider_registry(project)
     store = Store(db_path(project))
     store.migrate()
     if args.task:
@@ -308,6 +333,12 @@ def command_init(args: argparse.Namespace) -> int:
                     "registered": registered,
                     "profile": profile_status,
                     "github_task_source": "configured" if configured_github_source else "unchanged",
+                    "provider_registry": {
+                        "status": "initialized" if initialized_providers else "unchanged",
+                        "registered": list(registered_providers),
+                        "authorized": list(config.authorized_providers or ()),
+                        "provider_calls": 0,
+                    },
                     "task_source_sync": source_sync,
                 },
                 indent=2,
@@ -318,6 +349,10 @@ def command_init(args: argparse.Namespace) -> int:
     print(f"initialized StageMesh at {runtime_dir(project)}")
     if configured_github_source:
         print("configured GitHub task source for stagemesh:ready issues")
+    if initialized_providers:
+        names = ", ".join(registered_providers) or "none"
+        authorized = ", ".join(config.authorized_providers or ()) or "none"
+        print(f"initialized provider registry (registered: {names}; authorized: {authorized}; provider calls: 0)")
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
         if is_placeholder(load_profile(project)):
@@ -4301,6 +4336,12 @@ def command_config(args: argparse.Namespace) -> int:
                         "configured": config.github.configured,
                     },
                     "database_url": display_database_url,
+                    "provider_registry": {
+                        "source": "project" if config.providers_explicit else "legacy_defaults",
+                        "registered": sorted(adapter_by_name),
+                        "authorization_configured": config.authorized_providers is not None,
+                        "authorized_for_unattended": list(config.authorized_providers or ()),
+                    },
                     "routing": {
                         "mode": config.routing_mode,
                         "single_agent_provider": config.single_agent_provider,
@@ -4327,6 +4368,8 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"github.repo: {config.github.repo or ''}")
     print(f"github.configured: {config.github.configured}")
     print(f"database_url: {display_database_url}")
+    print(f"provider_registry.source: {'project' if config.providers_explicit else 'legacy_defaults'}")
+    print(f"provider_registry.registered: {', '.join(sorted(adapter_by_name))}")
     print(f"routing.mode: {config.routing_mode}")
     print(f"routing.provider_profile: {config.provider_profile or ''}")
     print(f"routing.single_agent_provider: {config.single_agent_provider or ''}")
@@ -4398,7 +4441,17 @@ def command_provider_profile(args: argparse.Namespace) -> int:
         return 2
     routing["provider_profile"] = "balanced"
     routing.setdefault("provider_selection_policy", "least_recently_used")
-    routing["pools"] = {stage: list(names) for stage, names in BALANCED_PROVIDER_POOLS.items()}
+    configured = {adapter.name for adapter in adapters_from_config(load_config(project))}
+    if not configured:
+        print(
+            "provider profile cannot be enabled: the project provider registry is empty; "
+            "run `stagemesh init` after installing a provider or add one to config.json",
+            file=sys.stderr,
+        )
+        return 2
+    routing["pools"] = {
+        stage: list(names) for stage, names in balanced_provider_pools(configured).items()
+    }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     payload = {"provider_profile": "balanced", "config": str(config_path), "routing": routing}

@@ -154,7 +154,7 @@ def test_provider_rows_are_bounded_without_hiding_the_total(
     status, body, _ = request(root, db)
 
     assert status == 200
-    assert body["provider_total"] == 109
+    assert body["provider_total"] == 105
     assert body["provider_limit"] == 100
     assert body["providers_truncated"] is True
     assert len(body["providers"]) == 100

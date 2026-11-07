@@ -39,10 +39,13 @@ stagemesh continue
 stagemesh status
 ```
 
+`stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without launching them. The registry is a snapshot: rerunning init does not replace operator edits, arbitrary command providers can be added under `providers`, and an explicitly empty registry stays empty. Detection or registration does **not** authenticate, authorize, or invoke a provider; unattended use still requires the separate `authorization.unattended_providers` opt-in.
+
 For StageMesh development, bootstrap the project-owned provider pool and run the fast synthetic stabilization gate before broader acceptance:
 
 ```bash
-python scripts/bootstrap_stagemesh.py --providers codex,claude,grok,agy
+python scripts/bootstrap_stagemesh.py
+stagemesh init --project .
 python scripts/stabilization_gate.py
 # Final, authoritative local gate (writes bounded machine-readable evidence):
 python scripts/run_regression.py --report .stagemesh/regression-report.json
@@ -69,7 +72,7 @@ Founder hands-off operation is opt-in per project. Its deterministic policy, cap
 
 ## Providers, skills, MCP, and plugins
 
-StageMesh selects eligible providers at runtime from project-owned pools. `codex`, `claude`, `grok`, and `agy` are built in; projects may register other command providers and stage-specific commands. Provider availability, stage compatibility, independent-review identity, cooldown, and optional live acceptance are evaluated before dispatch. A provider failure falls through to the next eligible provider within configured budgets.
+StageMesh selects eligible providers at runtime from project-owned pools. It ships adapter definitions for Codex, Claude, Grok, and Agy, but initialized projects route only providers recorded in their local registry; projects may register arbitrary command providers and stage-specific commands. Provider registration, executable availability, explicit authorization, live acceptance, and recorded invocation are separate states. Stage compatibility, independent-review identity, cooldown, and optional live acceptance are evaluated before dispatch. A provider failure falls through to the next eligible registered provider within configured budgets.
 
 `stagemesh skills --json` inventories the five installed, pinned automatic skills, and `stagemesh skills --task <id> --json` previews deterministic stage selection without launching a provider. Projects inventory additional skills, MCP definitions, and skills-only Claude plugin packages in `.stagemesh/capabilities.json`. Registration is not invocation: `stagemesh capabilities --json` reports registry availability, while `stagemesh capabilities --task <id> --json` distinguishes attached, activated, loaded, invoked, and content-integrity evidence. Capability contracts opt in by ID, and dispatch refuses relevant policy or source-pin drift.
 

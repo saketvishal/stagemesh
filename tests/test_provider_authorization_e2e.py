@@ -120,7 +120,7 @@ def test_codex_down_never_falls_through_to_grok_or_agy_and_review_blocks(world, 
     assert "claude" in used, rig.text() + failures(rig)  # the authorized fallback implemented
     assert "grok" not in used and "agy" not in used
     assert rig.stage != Stage.DONE  # nobody independent of claude is available: a blocker, not a substitution
-    assert "not_authorized" in rig.text()
+    assert set(rig.coordinator.executor.pool.adapters) == {"codex", "claude"}
 
 
 def test_authorized_pair_completes_a_task_with_independent_review(world):

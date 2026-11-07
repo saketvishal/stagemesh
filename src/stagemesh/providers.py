@@ -57,6 +57,7 @@ from .git_identity import provider_environment
 from .mcp_capabilities import McpCapabilityError, configure_mcp_command
 from .persistence import Store
 from .process_identity import owner_execution_fields, popen_identity
+from .provider_catalog import PROVIDER_CATALOG, catalog_commands, write_capable_command
 from .provider_events import (
     CAPABILITY_EVIDENCE_MISSING,
     CAPABILITY_POLICY_VIOLATION,
@@ -1284,55 +1285,24 @@ def _is_external_workspace_mutation(exc: Exception) -> bool:
     return getattr(exc, "code", None) == EXTERNAL_WORKSPACE_MUTATION
 
 
-READ_ONLY_GIT_TOOLS = "Bash(git status*),Bash(git diff*),Bash(git log*),Bash(git show*),Bash(git rev-parse*)"
-
-WRITE_CAPABLE_DEFAULT_COMMANDS = {
-    "codex": "codex exec --sandbox workspace-write",
-    "claude": (
-        "claude -p --permission-mode acceptEdits --permission-prompts none "
-        f"--allowedTools 'Edit,Write,MultiEdit,{READ_ONLY_GIT_TOOLS},Bash(python *),Bash(pytest *),Bash(ruff *)'"
-    ),
-    "grok": (
-        "grok --permission-mode acceptEdits --always-approve "
-        "--allow Edit --allow Write --allow MultiEdit "
-        "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
-        "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
-        "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
-    ),
-    "agy": "agy --mode accept-edits",
-}
-
-LEGACY_DEFAULT_COMMANDS = {
-    "codex": "codex exec",
-    "claude": "claude -p",
-    "grok": "grok",
-    "agy": "agy",
-}
-
-PROVIDER_COMMAND_ENVS = {
-    "codex": "STAGEMESH_CODEX_CMD",
-    "claude": "STAGEMESH_CLAUDE_CMD",
-    "grok": "STAGEMESH_GROK_CMD",
-    "agy": "STAGEMESH_AGY_CMD",
-}
+# Public compatibility views; the source of truth is the adapter catalog.
+WRITE_CAPABLE_DEFAULT_COMMANDS = {item.name: item.command for item in PROVIDER_CATALOG}
+LEGACY_DEFAULT_COMMANDS = {item.name: item.legacy_command for item in PROVIDER_CATALOG}
+PROVIDER_COMMAND_ENVS = {item.name: item.command_env for item in PROVIDER_CATALOG}
 
 
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
-    commands = {
-        name: os.environ.get(PROVIDER_COMMAND_ENVS[name]) or command
-        for name, command in WRITE_CAPABLE_DEFAULT_COMMANDS.items()
-    }
-    return adapters_from_commands(commands)
+    return adapters_from_commands(catalog_commands())
 
 
 def _write_capable_command(name: str, command: str) -> str:
-    if name in LEGACY_DEFAULT_COMMANDS and shlex.split(command) == shlex.split(LEGACY_DEFAULT_COMMANDS[name]):
-        return WRITE_CAPABLE_DEFAULT_COMMANDS[name]
-    return command
+    return write_capable_command(name, command)
 
 
 def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
-    commands = {adapter.name: shlex.join(adapter.command) for adapter in approved_default_adapters()}
+    commands = {}
+    if not config.providers_explicit:  # compatibility for projects not yet initialized with a registry
+        commands = {adapter.name: shlex.join(adapter.command) for adapter in approved_default_adapters()}
     commands.update({name: _write_capable_command(name, command) for name, command in config.provider_commands.items()})
     adapters = adapters_from_commands(commands)
     # Object-form entries declare which stages a provider serves; plain strings and built-ins serve both.

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .domain import Stage
 from .github import detect_github_repository
+from .provider_catalog import balanced_provider_pools, catalog_names
 from .routing import RoutingMode
 from .security import SecurityBoundaryError, WorkspaceBoundary
 
@@ -20,16 +21,14 @@ class ConfigValidationError(ValueError):
     pass
 
 
-# Default registry entries (their commands live in providers.approved_default_adapters). They are not the only providers allowed.
-BUILTIN_PROVIDERS = ("codex", "claude", "grok", "agy")
+# Compatibility aliases for older callers. Runtime provider membership comes
+# from the project registry once ``stagemesh init`` has written one.
+BUILTIN_PROVIDERS = catalog_names()
 PROVIDER_STAGES = ("IMPLEMENT", "REVIEW")
 SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted")
 _LEGACY_CAPABILITIES = {"code": "IMPLEMENT", "review": "REVIEW"}
 PROVIDER_PROFILES = ("balanced",)
-BALANCED_PROVIDER_POOLS = {
-    "IMPLEMENT": ("codex", "grok", "claude", "agy"),
-    "REVIEW": ("claude", "grok", "agy", "codex"),
-}
+BALANCED_PROVIDER_POOLS = balanced_provider_pools(BUILTIN_PROVIDERS)
 
 
 TIE_BREAKERS = ("issue_number", "created_at")
@@ -453,6 +452,7 @@ class StageMeshConfig:
     single_agent_provider: str | None
     database_url: str | None
     source: str
+    providers_explicit: bool
     require_independent_review: bool = True
     integration_ref: str | None = None
     provider_pools: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -503,6 +503,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         data = loaded
         source = str(path)
     github_data = _optional_mapping(data, "github")
+    providers_explicit = "providers" in data
     providers = _optional_mapping(data, "providers")
     task_sources_data = data.get("task_sources", [])
     routing_data = _optional_mapping(data, "routing")
@@ -514,7 +515,10 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         token=os.environ.get("STAGEMESH_GITHUB_TOKEN") or _string(github_data.get("token")),
     )
     provider_commands, provider_specs = _parse_providers(providers)
-    for name in sorted(set(BUILTIN_PROVIDERS) | set(provider_commands)):
+    environment_provider_names = set(provider_commands)
+    if not providers_explicit:  # legacy projects keep defaults until `stagemesh init` writes a registry
+        environment_provider_names.update(BUILTIN_PROVIDERS)
+    for name in sorted(environment_provider_names):
         env_value = os.environ.get("STAGEMESH_" + re.sub("[^A-Za-z0-9]", "_", name).upper() + "_CMD")
         if env_value:
             provider_commands[name] = env_value
@@ -541,13 +545,13 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
             f"routing.provider_selection_policy must be one of: {', '.join(SELECTION_POLICIES)}"
         )
     provider_pools = _provider_pools(_optional_mapping(routing_data, "pools"))
+    known = set(provider_commands) if providers_explicit else set(BUILTIN_PROVIDERS) | set(provider_commands)
     if provider_profile == "balanced":
         provider_pools = {
-            **{stage: tuple(names) for stage, names in BALANCED_PROVIDER_POOLS.items()},
+            **balanced_provider_pools(known),
             **provider_pools,
         }
     provider_weights = _provider_weights(_optional_mapping(routing_data, "provider_weights"))
-    known = set(BUILTIN_PROVIDERS) | set(provider_commands)
     for stage, names in provider_pools.items():
         unknown = [n for n in names if n not in known]
         if unknown:
@@ -588,6 +592,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         or _string(routing_data.get("single_agent_provider")),
         database_url=database_url,
         source=source,
+        providers_explicit=providers_explicit,
         require_independent_review=require_review,
         integration_ref=integration_ref,
         provider_pools=provider_pools,
