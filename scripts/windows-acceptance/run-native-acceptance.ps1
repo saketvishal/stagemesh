@@ -188,6 +188,10 @@ finally {
         Start-Sleep -Seconds 2
         if ($rootSafe -and (Test-Path $rootSafe)) {
             Get-ChildItem -Path $rootSafe -Recurse -Filter 'driver.log' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName (Join-Path $evidence 'tick-driver.log') -ErrorAction SilentlyContinue }
+            $driverReports = Join-Path $rootSafe 'project\.stagemesh\driver\reports'
+            if (Test-Path $driverReports) {
+                Copy-Item -LiteralPath $driverReports -Destination (Join-Path $evidence 'driver-reports') -Recurse -Force -ErrorAction SilentlyContinue
+            }
             Remove-Item -Recurse -Force $rootSafe -ErrorAction SilentlyContinue
         }
         Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue

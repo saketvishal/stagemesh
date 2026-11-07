@@ -36,14 +36,26 @@ def record(step: str, **details) -> None:
 
 
 def cli(project: Path, *args: str, timeout: float = 120) -> subprocess.CompletedProcess[str]:
+    from stagemesh.execution import popen_session_kwargs
+
     return subprocess.run(
         [sys.executable, "-m", "stagemesh.cli", "--project", str(project), *args],
         capture_output=True, text=True, timeout=timeout, check=False,
+        **popen_session_kwargs(),
     )
 
 
 def git(project: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=project, capture_output=True, text=True, check=True).stdout.strip()
+    from stagemesh.execution import popen_session_kwargs
+
+    return subprocess.run(
+        ["git", *args],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+        **popen_session_kwargs(),
+    ).stdout.strip()
 
 
 def calls(path: Path) -> list[dict]:
@@ -53,9 +65,15 @@ def calls(path: Path) -> list[dict]:
 
 
 def write_providers(project: Path, calls_file: Path, *, sleep: float = 0.0) -> None:
-    base = f'"{sys.executable}" "{MOCK}" --calls "{calls_file}"' + (f" --sleep {sleep}" if sleep else "")
+    base = f'"{sys.executable}" "{MOCK}" --calls "{calls_file}"'
     config = {"providers": {
-        name: {"command": base + (" --role review" if stage == "REVIEW" else " --role implement"), "capabilities": [stage]}
+        name: {
+            "command": (
+                f'{base} --identity "{name}" --role {"review" if stage == "REVIEW" else "implement"}'
+                + (f" --sleep {sleep}" if sleep else "")
+            ),
+            "capabilities": [stage],
+        }
         for name, stage in CAPS.items()
     }, "authorization": {"unattended_providers": list(CAPS)}}
     (project / ".stagemesh" / "config.json").write_text(json.dumps(config), encoding="utf-8")
@@ -114,6 +132,45 @@ def tasks_done(project: Path) -> list[str]:
         store.close()
 
 
+def task_snapshot(project: Path) -> dict[str, list[dict[str, object]]]:
+    """Small failure artifact retained even when the disposable project is removed."""
+    from stagemesh.persistence import Store
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        tasks = [
+            dict(row)
+            for row in store.conn.execute(
+                "SELECT id, title, stage, status, updated_at FROM tasks ORDER BY id"
+            )
+        ]
+        failures = [
+            dict(row)
+            for row in store.conn.execute(
+                "SELECT task_id, kind, status, actor, result, updated_at FROM executions "
+                "WHERE status != 'SUCCEEDED' ORDER BY updated_at DESC LIMIT 20"
+            )
+        ]
+        return {"tasks": tasks, "non_successful_executions": failures}
+    finally:
+        store.close()
+
+
+def all_remaining_tasks_blocked(project: Path) -> dict[str, list[dict[str, object]]] | None:
+    snapshot = task_snapshot(project)
+    statuses = [str(task["status"]) for task in snapshot["tasks"]]
+    if statuses and "BLOCKED" in statuses and all(status in {"BLOCKED", "DONE"} for status in statuses):
+        return snapshot
+    return None
+
+
+def safe_task_snapshot(project: Path) -> dict[str, object]:
+    try:
+        return task_snapshot(project)
+    except Exception as exc:  # noqa: BLE001 -- diagnostics must not prevent cleanup
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def ticks(project: Path) -> list[dict]:
     from stagemesh import continuous_driver
     from stagemesh.persistence import Store
@@ -130,16 +187,24 @@ def finished(project: Path) -> list[dict]:
     return [e["payload"] for e in ticks(project) if e["event_type"] == "driver.tick_finished"]
 
 
-def wait_for(predicate, seconds: float, label: str, interval: float = 5.0):
+def wait_for(predicate, seconds: float, label: str, interval: float = 5.0, abort=None):
     deadline = time.time() + seconds
     while time.time() < deadline:
         value = predicate()
         if value:
             return value
+        stopped = abort() if abort is not None else None
+        if stopped:
+            record(f"ABORT {label}", reason="all remaining tasks are blocked", snapshot=stopped)
+            return False
         time.sleep(interval)
     value = predicate()
     if not value:
-        record(f"TIMEOUT {label}")
+        stopped = abort() if abort is not None else None
+        if stopped:
+            record(f"ABORT {label}", reason="all remaining tasks are blocked", snapshot=stopped)
+        else:
+            record(f"TIMEOUT {label}")
     return value
 
 
@@ -154,7 +219,16 @@ def project_processes(root: Path) -> list[tuple[int, str]]:
         script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.Name -ne 'powershell.exe' -and "
                   "$_.CommandLine.IndexOf('" + needle.replace("'", "''") + "', [StringComparison]::OrdinalIgnoreCase) -ge 0 } | "
                   "ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId,$_.ParentProcessId,$_.CommandLine }")
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60, check=False).stdout
+        from stagemesh.execution import popen_session_kwargs
+
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            **popen_session_kwargs(),
+        ).stdout
         for line in out.splitlines():
             pid, _, rest = line.partition("|")
             parent, _, command = rest.partition("|")
@@ -176,7 +250,14 @@ def project_processes(root: Path) -> list[tuple[int, str]]:
 
 def kill_tree(pid: int) -> None:
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], check=False, capture_output=True)
+        from stagemesh.execution import popen_session_kwargs
+
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            check=False,
+            capture_output=True,
+            **popen_session_kwargs(),
+        )
     else:
         import signal
         try:
@@ -192,14 +273,19 @@ def schedule_exists(project: Path) -> bool:
     return scheduler.exists(scheduler.handle)
 
 
-def run(direct: bool, tasks: int) -> int:
+def run(direct: bool, tasks: int, *, initial_only: bool = False) -> int:
     from stagemesh import continuous_driver
 
+    EVIDENCE.clear()
+    PARENTS.clear()
     if os.environ.get("STAGEMESH_ACCEPT_DRIVER") != "1":
         print("refusing to install a driver: set STAGEMESH_ACCEPT_DRIVER=1 to authorize this disposable run", file=sys.stderr)
         return 2
     if not direct and sys.platform != "win32":
         print("scheduler mode needs Windows; use --direct for a dry run", file=sys.stderr)
+        return 2
+    if initial_only and not direct:
+        print("--initial-only is a short direct diagnostic and cannot replace scheduler acceptance", file=sys.stderr)
         return 2
     root = Path(tempfile.mkdtemp(prefix="sm-driver-accept-")).resolve()  # long form: 8.3 names never match real command lines
     if os.environ.get("STAGEMESH_ACCEPT_IDS"):  # recorded before anything can fail so the wrapper can always clean up
@@ -253,10 +339,19 @@ def run(direct: bool, tasks: int) -> int:
             tick_now()
             return len(tasks_done(project)) >= n
         target = min(2, tasks)
-        reached = wait_for(lambda: done_at_least(target), 420 if not direct else 60, "repeated_ticks", 20 if not direct else 1)
+        reached = wait_for(
+            lambda: done_at_least(target),
+            420 if not direct else 60,
+            "repeated_ticks",
+            20 if not direct else 1,
+            abort=lambda: all_remaining_tasks_blocked(project),
+        )
         check(bool(reached), "repeated_execution_completes_tasks", done=tasks_done(project), ticks=len(finished(project)))
         stages = [c["stage"] for c in calls(calls_file)]
         check("implement" in stages and "review" in stages, "mock_provider_ran_implement_and_independent_review", stages=stages)
+        record("initial_task_snapshot", snapshot=safe_task_snapshot(project))
+        if not reached or initial_only:
+            return 1 if failures else 0
 
         # 2. pause: no provider is reached while paused
         before = len(calls(calls_file))
@@ -284,7 +379,13 @@ def run(direct: bool, tasks: int) -> int:
             result = cli(project, "driver", "resume", "--reason", "acceptance resume", "--json")
         check(result.returncode == 0, "resume_command", out=result.stdout[-200:], err=result.stderr[-200:])
         if tasks > done_before:
-            reached = wait_for(lambda: (tick_now() or len(tasks_done(project)) > done_before), 420 if not direct else 60, "resume_progress", 20 if not direct else 1)
+            reached = wait_for(
+                lambda: (tick_now() or len(tasks_done(project)) > done_before),
+                420 if not direct else 60,
+                "resume_progress",
+                20 if not direct else 1,
+                abort=lambda: all_remaining_tasks_blocked(project),
+            )
             check(bool(reached), "resume_continues_work", done=tasks_done(project))
 
         # 4. overlap prevention with a slow provider: exactly one run-window at a time
@@ -337,7 +438,13 @@ def run(direct: bool, tasks: int) -> int:
             check(not survivors, "tree_fully_killed", survivors=[(pid, c[:100]) for pid, c in survivors])
             write_providers(project, calls_file)
             done_before = len(tasks_done(project))
-            reached = wait_for(lambda: (tick_now() or len(tasks_done(project)) > done_before), 420 if not direct else 90, "recovery_progress", 20 if not direct else 1)
+            reached = wait_for(
+                lambda: (tick_now() or len(tasks_done(project)) > done_before),
+                420 if not direct else 90,
+                "recovery_progress",
+                20 if not direct else 1,
+                abort=lambda: all_remaining_tasks_blocked(project),
+            )
             check(bool(reached), "recovered_after_crash_and_continued", done=tasks_done(project))
             audit_types = {e["event_type"] for e in ticks(project)}
             recovery_states = {f.get("state") for f in finished(project)}
@@ -379,7 +486,7 @@ def run(direct: bool, tasks: int) -> int:
         for pid, _command in project_processes(root):
             kill_tree(pid)
         out = os.environ.get("STAGEMESH_ACCEPT_EVIDENCE")
-        payload = {"failures": failures, "evidence": EVIDENCE}
+        payload = {"failures": failures, "evidence": EVIDENCE, "snapshot": safe_task_snapshot(project)}
         if out:
             Path(out).write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         log = project / ".stagemesh" / "driver" / "driver.log"
@@ -392,6 +499,7 @@ def run(direct: bool, tasks: int) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--direct", action="store_true")
+    parser.add_argument("--initial-only", action="store_true")
     parser.add_argument("--tasks", type=int, default=5)
     arguments = parser.parse_args()
-    raise SystemExit(run(arguments.direct, arguments.tasks))
+    raise SystemExit(run(arguments.direct, arguments.tasks, initial_only=arguments.initial_only))

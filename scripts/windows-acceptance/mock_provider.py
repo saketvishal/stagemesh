@@ -16,14 +16,27 @@ from pathlib import Path
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--calls", required=True)
+    parser.add_argument("--identity", required=True)
+    parser.add_argument("--role", choices=("implement", "review"), required=True)
     parser.add_argument("--sleep", type=float, default=0.0)
     parser.add_argument("--fail", action="store_true")
-    args, _unknown = parser.parse_known_args()
-    prompt = sys.stdin.read()
-    review = '"decision"' in prompt or "PASS" in prompt and "FAIL_WITH_FINDINGS" in prompt
-    stage = "review" if review else "implement"
+    args = parser.parse_args()
+    sys.stdin.read()
+    review = args.role == "review"
+    stage = args.role
     with open(args.calls, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"t": time.time(), "pid": os.getpid(), "stage": stage, "cwd": os.getcwd()}) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "t": time.time(),
+                    "pid": os.getpid(),
+                    "identity": args.identity,
+                    "stage": stage,
+                    "cwd": os.getcwd(),
+                }
+            )
+            + "\n"
+        )
     if args.sleep:
         time.sleep(args.sleep)
     if args.fail:
