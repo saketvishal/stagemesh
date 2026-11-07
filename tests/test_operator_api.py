@@ -7,6 +7,7 @@ import pytest
 
 from stagemesh.api_server import OBJECTIVES_CONTRACT, OPERATOR_CONTRACT, ActivityApi
 from stagemesh.domain import ExecutionKind, ExecutionStatus
+from stagemesh.efficiency import Usage, record_provider_call
 from stagemesh.persistence import Store
 
 TOKEN = "operator-api-token"
@@ -46,6 +47,30 @@ def test_operator_snapshot_is_bounded_read_only_and_uses_an_independent_contract
     assert body["sections"]["pending_decisions"][-1]["status"] == "UNKNOWN"
     assert headers["Cache-Control"] == "no-store"
     assert db.read_bytes() == before
+
+
+def test_operator_snapshot_projects_only_validated_provider_reported_cost(db: Path) -> None:
+    store = Store(db)
+    task = store.upsert_task("operator task", source_id="operator-task")
+    record_provider_call(
+        store,
+        task_id=task,
+        purpose="implementation",
+        provider="fixture",
+        outcome="succeeded",
+        duration_seconds=1,
+        usage=Usage(requests=1, cost_amount="1.250", cost_currency="USD"),
+    )
+    store.close()
+
+    status, body, _ = request(db)
+
+    assert status == 200
+    efficiency, = body["sections"]["efficiency"]
+    assert efficiency["billing_cost"] == "1.250 USD"
+    assert efficiency["billing_cost_comparable"] is True
+    assert efficiency["usage"]["requests"] == 1
+    assert efficiency["usage"]["costs"] == [{"currency": "USD", "amount": "1.250"}]
 
 
 def test_operator_snapshot_projects_current_status_without_raw_process_or_payload_data(db: Path) -> None:

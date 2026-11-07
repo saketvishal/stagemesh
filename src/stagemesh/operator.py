@@ -297,6 +297,12 @@ def _recent_efficiency_row(store: Store) -> Mapping[str, object]:
         "ORDER BY updated_at DESC, rowid DESC LIMIT ?", (RECENT_METRIC_LIMIT,)
     ).fetchall()
     durations = [call["duration_seconds"] for call in calls if isinstance(call.get("duration_seconds"), (int, float))]
+    usage = usage_totals(calls)
+    billing_cost = (
+        "UNKNOWN"
+        if not usage["costs"]
+        else ", ".join(f"{item['amount']} {item['currency']}" for item in usage["costs"])
+    )
     return {
         "scope": f"latest {RECENT_METRIC_LIMIT} records per type; samples, not lifetime totals",
         "provider_attempts": len(calls),
@@ -308,8 +314,9 @@ def _recent_efficiency_row(store: Store) -> Mapping[str, object]:
         "checks_executed": ran,
         "checks_reused": reused,
         "validation_seconds": round(sum(max(0.0, row["updated_at"] - row["started_at"]) for row in validations), 3),
-        "usage": usage_totals(calls),
-        "billing_cost": "UNKNOWN",
+        "usage": usage,
+        "billing_cost": billing_cost,
+        "billing_cost_comparable": usage["cost_comparable"],
     }
 
 

@@ -26,6 +26,34 @@ REQUIREMENTS = (
         "viewport": "1440x900",
     },
     {
+        "id": "workspace-ready-mobile",
+        "kind": "browser",
+        "target": "/synthetic/workspace",
+        "state": "ready",
+        "viewport": "390x844",
+    },
+    {
+        "id": "workspace-empty-mobile",
+        "kind": "browser",
+        "target": "/synthetic/workspace",
+        "state": "empty",
+        "viewport": "390x844",
+    },
+    {
+        "id": "workspace-error-desktop",
+        "kind": "browser",
+        "target": "/synthetic/workspace",
+        "state": "error",
+        "viewport": "1440x900",
+    },
+    {
+        "id": "workspace-recovered-desktop",
+        "kind": "browser",
+        "target": "/synthetic/workspace",
+        "state": "recovery",
+        "viewport": "1440x900",
+    },
+    {
         "id": "activity-shared-desktop",
         "kind": "browser",
         "target": "/synthetic/activity",
@@ -85,27 +113,24 @@ def _visual_policy() -> dict:
 
 def _evaluator_code(
     *,
-    activity_ratio: float = 0.0,
+    mismatch_ids: tuple[str, ...] = (),
     stable: bool = True,
+    omit_check: str | None = None,
     omit_artifact: str | None = None,
     mutate_input: str | None = None,
 ) -> str:
     checks = [
         {
-            "id": "workspace-ready-desktop",
+            "id": requirement["id"],
             "status": "PASS",
-            "difference_ratio": 0.0,
+            "difference_ratio": 0.25 if requirement["id"] in mismatch_ids else 0.0,
             "stable": stable,
             "render_count": 2,
-        },
-        {
-            "id": "activity-shared-desktop",
-            "status": "PASS",
-            "difference_ratio": activity_ratio,
-            "stable": stable,
-            "render_count": 2,
-        },
+        }
+        for requirement in REQUIREMENTS
     ]
+    if omit_check is not None:
+        checks = [check for check in checks if check["id"] != omit_check]
     output_paths = [
         f"results/{requirement['id']}.{role}.png"
         for requirement in REQUIREMENTS
@@ -224,23 +249,27 @@ def test_benign_visual_match_is_bound_auditable_and_reviewable(visual_evaluation
     assert evidence["baseline_sha"] == baseline
     assert evidence["result"] == "PASS"
     assert visual["revision"] == "synthetic-design-v1"
-    assert len(visual["protected_inputs"]) == 6
-    assert len(visual["artifacts"]) == 6
+    assert len(visual["protected_inputs"]) == 10
+    assert len(visual["artifacts"]) == 18
     assert {item["role"] for item in visual["artifacts"]} == {"actual", "reference", "diff"}
     assert {item["id"] for item in evidence["metadata"]["requirements"]} == {
         "workspace-ready-desktop",
+        "workspace-ready-mobile",
+        "workspace-empty-mobile",
+        "workspace-error-desktop",
+        "workspace-recovered-desktop",
         "activity-shared-desktop",
     }
 
     projection = review_e2e_projection(payload, project)
     assert projection[0]["artifact_root"].startswith(".stagemesh/artifacts/e2e/")
-    assert len(projection[0]["artifacts"]) == 6
+    assert len(projection[0]["artifacts"]) == 18
     assert projection[0]["visual_reference"]["policy_fingerprint"] == visual["policy_fingerprint"]
 
     report = task_doctor(store, project, task_id)
     assert report["e2e"]["status"] == "passed"
     assert report["e2e"]["configured_services"][0]["visual_reference"] is True
-    assert report["e2e"]["evaluations"][0]["visual_reference"]["typed_artifact_count"] == 6
+    assert report["e2e"]["evaluations"][0]["visual_reference"]["typed_artifact_count"] == 18
     assert "; visual=1" in format_doctor(report)
 
     class CapturingReviewer:
@@ -267,8 +296,22 @@ def test_benign_visual_match_is_bound_auditable_and_reviewable(visual_evaluation
 @pytest.mark.parametrize(
     ("code", "failure_kind", "message"),
     [
-        (_evaluator_code(activity_ratio=0.25), "assertion", "approved threshold"),
+        (
+            _evaluator_code(mismatch_ids=("workspace-ready-desktop", "workspace-ready-mobile")),
+            "assertion",
+            "approved threshold",
+        ),
+        (
+            _evaluator_code(mismatch_ids=("activity-shared-desktop",)),
+            "assertion",
+            "approved threshold",
+        ),
         (_evaluator_code(stable=False), "environment", "unstable"),
+        (
+            _evaluator_code(omit_check="workspace-error-desktop"),
+            "environment",
+            "omits required coverage",
+        ),
         (
             _evaluator_code(omit_artifact="results/workspace-ready-desktop.diff.png"),
             "environment",

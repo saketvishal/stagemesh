@@ -402,8 +402,9 @@ provider output, commands, environment values, arbitrary URLs, and external
 evidence URLs are never serialized.
 
 `recent_failures.scope` distinguishes a still-current failure from history.
-The efficiency section is explicitly a bounded sample; provider usage is shown
-only when providers recorded it, and billing cost remains `UNKNOWN`. Pending
+The efficiency section is explicitly a bounded sample; provider usage and exact
+currency-qualified cost are shown only when providers recorded them. Missing cost
+remains `UNKNOWN`, and mixed currencies remain visibly separate. Pending
 approval coverage always retains an `UNKNOWN` row because absence from the
 bounded journal never grants permission. The shipped dashboard exposes Activity
 and Status views, keeps task links as an explicit retained-history drill-down,
@@ -589,7 +590,10 @@ These are deliberately separate observations:
 None of these facts alone proves a provider is currently healthy, has quota, or
 will complete work. `provider_calls=0`, `network_calls=0` and
 `database_writes=0` make this request's operational boundary explicit.
-Billing usage remains `UNKNOWN` because StageMesh must not invent token or cost telemetry.
+Billing usage remains `UNKNOWN` in the provider-registry projection: it is a
+zero-call configuration/status request and must not infer telemetry. Exact receipts,
+when present on prior `provider.call` audit events, appear only in the bounded
+efficiency projection.
 
 The projection never returns command text or arguments, executable paths,
 configuration text, environment values, credentials, provider output, cooldown
