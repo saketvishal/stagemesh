@@ -12,7 +12,7 @@ from .continuous_driver import (
     finish_child_cleanup,
     save_child_owner,
 )
-from .execution import kill_process_tree
+from .execution import kill_process_tree, popen_descendant_kwargs
 from .process_identity import owner_identity, process_identity
 
 
@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     release_owner = True
     save_child_owner(project, identity)
     try:
-        process = subprocess.Popen(command, cwd=project)
+        process = subprocess.Popen(command, cwd=project, **popen_descendant_kwargs())
         release_owner = False  # any failure after launch must retain ownership until cleanup is confirmed
         child_identity = process_identity(process.pid)
         try:

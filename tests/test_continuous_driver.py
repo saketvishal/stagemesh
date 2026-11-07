@@ -27,7 +27,7 @@ from stagemesh.continuous_driver import (
     status,
 )
 from stagemesh.driver_scheduler import DriverSchedulerError, WindowsDriverScheduler, driver_command
-from stagemesh.execution import kill_process_tree, popen_session_kwargs
+from stagemesh.execution import kill_process_tree, popen_descendant_kwargs, popen_session_kwargs
 from stagemesh.persistence import Store
 from stagemesh.process_identity import popen_identity, process_identity
 
@@ -430,6 +430,11 @@ def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path, monkeypat
     assert not child_owner_path(project).exists()
 
 
+def test_nested_driver_child_stays_in_the_wrapper_process_tree() -> None:
+    assert "start_new_session" in popen_session_kwargs() or sys.platform == "win32"
+    assert "start_new_session" not in popen_descendant_kwargs()
+
+
 def test_confirmed_tree_kill_waits_for_delayed_child_reaping(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from stagemesh.domain import ProcessIdentity
 
@@ -478,7 +483,13 @@ def test_driver_scheduler_is_project_owned_idempotent_and_reversible(project: Pa
     assert handle == same == scheduler.handle
     assert scheduler.definition.is_file()
     definition = scheduler.definition.read_text(encoding="utf-16")
-    assert f"<Command>{sys.executable}</Command>" in definition and "driver tick" in definition  # direct exec, no cmd.exe
+    expected_python = (
+        Path(sys.executable).with_name("pythonw.exe")
+        if sys.platform == "win32"
+        else Path(sys.executable)
+    )
+    assert f"<Command>{expected_python}</Command>" in definition
+    assert "driver tick" in definition  # direct exec, no cmd.exe
     assert "--log-file" in definition
     assert calls[0][0:2] == ["schtasks", "/Create"]
     assert calls[0][calls[0].index("/XML") + 1] == str(scheduler.definition)
@@ -780,6 +791,7 @@ def test_task_definition_has_startup_recovery_power_and_bounding_behavior(projec
     assert settings["DisallowStartIfOnBatteries"] == "false" and settings["StopIfGoingOnBatteries"] == "false"
     assert settings["MultipleInstancesPolicy"] == "IgnoreNew"
     assert settings["ExecutionTimeLimit"] == "PT120M"
+    assert settings["Hidden"] == "true"
     principal = root.find("t:Principals/t:Principal", ns)
     assert principal.find("t:RunLevel", ns).text == "LeastPrivilege"
     assert principal.find("t:LogonType", ns).text == "InteractiveToken"
@@ -801,6 +813,36 @@ def test_task_definition_can_exec_a_program_directly_with_escaped_arguments(proj
     exec_node = root.find("t:Actions/t:Exec", {"t": TASK_NAMESPACE})
 
     assert exec_node.find("t:Arguments", {"t": TASK_NAMESPACE}).text == '-m stagemesh.cli --project "C:/a & b" driver tick'
+
+
+def test_driver_command_uses_windowless_python_on_windows(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = project / "runtime" / "python.exe"
+    executable.parent.mkdir()
+    executable.touch()
+    windowless = executable.with_name("pythonw.exe")
+    windowless.touch()
+    monkeypatch.setattr(driver_scheduler.sys, "platform", "win32")
+    monkeypatch.setattr(driver_scheduler.sys, "executable", str(executable))
+
+    command = driver_command(project)
+
+    assert command[0] == str(windowless)
+    assert command[1:3] == ["-m", "stagemesh.cli"]
+
+
+def test_driver_command_fails_closed_without_windowless_python(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = project / "runtime" / "python.exe"
+    executable.parent.mkdir()
+    executable.touch()
+    monkeypatch.setattr(driver_scheduler.sys, "platform", "win32")
+    monkeypatch.setattr(driver_scheduler.sys, "executable", str(executable))
+
+    with pytest.raises(DriverSchedulerError, match="windowless Python is required"):
+        driver_command(project)
 
 
 def test_failed_registration_leaves_no_definition_and_limit_rounds_up(project: Path) -> None:

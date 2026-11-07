@@ -39,6 +39,16 @@ New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 Start-Transcript -Path (Join-Path $evidence 'transcript.txt') -Force | Out-Null
 
 $summary = [ordered]@{ commit = $Commit; started = $started.ToString('o'); steps = [ordered]@{}; provider_state = $null; cleanup = [ordered]@{} }
+$requiredSummarySteps = @(
+    'no_provider_command_overrides', 'checkout_is_pinned_commit_and_clean', 'python_3_11_or_newer',
+    'install_stagemesh', 'provider_login_state_recorded', 'focused_driver_tests_on_this_host',
+    'process_tree_diagnostic_ran', 'driver_lifecycle_mock_providers', 'cleanup_complete'
+)
+# Pre-populate every mandatory gate as failed. Ctrl+C, host shutdown, or any other early exit therefore remains FAIL even when
+# cleanup succeeds; a step can become true only after it actually completed.
+foreach ($requiredStep in $requiredSummarySteps) {
+    $summary.steps[$requiredStep] = [ordered]@{ ok = $false; detail = 'not completed' }
+}
 function Step($name, $ok, $detail = '') {
     $summary.steps[$name] = [ordered]@{ ok = [bool]$ok; detail = "$detail" }
     $tag = if ($ok) { 'PASS' } else { 'FAIL' }
@@ -50,7 +60,7 @@ function Invoke-Bounded($label, $exe, $argList, $timeoutSeconds, $cwd) {
     $out = Join-Path $evidence "$label.out.txt"
     $err = Join-Path $evidence "$label.err.txt"
     $p = Start-Process -FilePath $exe -ArgumentList ($argList | ForEach-Object { Quote $_ }) -WorkingDirectory $cwd `
-        -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+        -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -WindowStyle Hidden
     $null = $p.Handle
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
     while (-not $p.WaitForExit(120000)) {
@@ -187,7 +197,7 @@ finally {
     }
     catch { $summary.cleanup.error = "$($_.Exception.Message)"; Step 'cleanup_complete' $false $summary.cleanup.error }
     $summary.finished = (Get-Date).ToString('o')
-    $allOk = (@($summary.steps.Values | Where-Object { -not $_.ok }).Count -eq 0) -and ($summary.steps.Count -ge 8)
+    $allOk = @($requiredSummarySteps | Where-Object { -not $summary.steps[$_].ok }).Count -eq 0
     $summary.result = if ($allOk) { 'PASS' } else { 'FAIL' }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $evidence 'summary.json') -Encoding UTF8
     Write-Host ''

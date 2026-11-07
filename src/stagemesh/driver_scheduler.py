@@ -68,6 +68,8 @@ def build_task_xml(
       timeout so the driver bounds and kills its `run-window` child tree first (`kill_process_tree`, verified).
       A tick the watchdog ends can leave that child running; the next tick sees its durable owner and does not overlap.
     * Least privilege, interactive token: no stored credentials and no elevation.
+    * The task is hidden and its Python action uses the windowless interpreter, so unattended ticks do not
+      open terminals.
     """
     if interval_seconds < 60 or interval_seconds % 60:
         raise DriverSchedulerError("Task Scheduler cadence must be an exact whole number of minutes")
@@ -96,6 +98,7 @@ def build_task_xml(
         "    <AllowStartOnDemand>true</AllowStartOnDemand>\n"
         "    <AllowHardTerminate>true</AllowHardTerminate>\n"
         "    <WakeToRun>false</WakeToRun>\n"
+        "    <Hidden>true</Hidden>\n"
         "    <Enabled>true</Enabled>\n"
         f"    <ExecutionTimeLimit>PT{-(-execution_limit_seconds // 60)}M</ExecutionTimeLimit>\n"
         "  </Settings>\n"
@@ -208,4 +211,22 @@ def default_driver_scheduler(project: Path) -> DriverScheduler | None:
 def driver_command(project: Path) -> list[str]:
     resolved = Path(project).resolve()
     log = resolved / ".stagemesh" / "driver" / "driver.log"
-    return [sys.executable, "-m", "stagemesh.cli", "--project", str(resolved), "driver", "tick", "--log-file", str(log)]
+    executable = Path(sys.executable)
+    if sys.platform == "win32":
+        windowless = executable.with_name("pythonw.exe")
+        if not windowless.is_file():
+            raise DriverSchedulerError(
+                f"windowless Python is required for the background driver but was not found: {windowless}"
+            )
+        executable = windowless
+    return [
+        str(executable),
+        "-m",
+        "stagemesh.cli",
+        "--project",
+        str(resolved),
+        "driver",
+        "tick",
+        "--log-file",
+        str(log),
+    ]
