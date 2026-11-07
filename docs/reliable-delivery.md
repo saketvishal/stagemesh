@@ -257,10 +257,13 @@ evidence; normal validation policy may reuse eligible machine checks, while both
 ## Effort accounting and budgets
 
 `provider.call` (task, candidate, provider, purpose `implementation`/`remediation`/`review`/`diagnosis`, outcome, normalized failure
-class, duration, provider-reported usage) and `stage.transition` events feed `stagemesh efficiency` together with the existing
-executions and `validation_reuse` evidence. Usage the provider did not report is `null`/unknown and is never summed as zero; keys are
-`input`/`output`/`cached_input` because the audit redactor masks any key containing the word for a credential. No prompts, provider
-output or client content is stored. Budgets (`budgets` in `.stagemesh/config.json`, defaults: 5 consecutive equivalent failures, above the bounded hands-off provider-exhaustion recovery, 30
+class, duration, provider-reported telemetry) and `stage.transition` events feed `stagemesh efficiency` together with the existing
+executions and `validation_reuse` evidence. Structured receipts may include token counts, request count, exact decimal cost plus
+currency, and bounded provider-reported model/runtime/execution identity. Floats, free text, malformed values, missing currency,
+and ambiguous usage blocks remain unknown. Unknown fields are never summed as zero; currencies remain separate and are never
+converted or estimated. Reports are scoped to the current project store and can group by objective, task, role, provider and time
+window. No prompts, provider output, subscription quota, reset time, inferred price, or client content is stored. Budgets (`budgets`
+in `.stagemesh/config.json`, defaults: 5 consecutive equivalent failures, above the bounded hands-off provider-exhaustion recovery, 30
 provider calls per task; optional per-window calls and reported-usage caps) come from the ledger, so they survive new windows and
 restarts, and are checked between stages and waves, with additional checks before staged pooled review attempts and fallbacks; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
 (`budget_exhausted`) and a fresh start by the operator (`retry-task`) resets the task's counters. Budgets never skip validation or review.

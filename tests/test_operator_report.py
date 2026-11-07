@@ -102,6 +102,23 @@ def test_no_usage_receipt_never_becomes_zero_tokens_or_zero_cost(store):
     assert efficiency["billing_cost"] == "UNKNOWN"
 
 
+def test_operator_projects_only_provider_reported_cost_and_keeps_currencies_separate(store):
+    record_provider_call(
+        store, task_id="T1", purpose="implementation", provider="fixture", outcome="succeeded", duration_seconds=1,
+        usage=Usage(cost_amount="1.25", cost_currency="USD"),
+    )
+    record_provider_call(
+        store, task_id="T1", purpose="review", provider="fixture", outcome="succeeded", duration_seconds=1,
+        usage=Usage(cost_amount="2", cost_currency="EUR"),
+    )
+
+    efficiency = sections(operator_report(store))["Recent Efficiency And Usage"][0]
+
+    assert efficiency["billing_cost"] == "2 EUR, 1.25 USD"
+    assert efficiency["billing_cost_comparable"] is False
+    assert efficiency["usage"]["cost_calls_reporting"] == 2
+
+
 def test_bounded_legacy_provider_outcomes_remain_unknown_instead_of_failed(store):
     for _ in range(102):
         record_audit(store, "provider.call", {"task_id": "T1"})

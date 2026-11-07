@@ -72,6 +72,54 @@ def test_usage_is_extracted_only_when_unambiguous_and_unknown_is_never_zero(stdo
         assert usage.input is None and usage.output is None and usage.cached_input is None and not usage.reported
 
 
+def test_structured_request_cost_and_identity_receipts_are_preserved_without_price_inference() -> None:
+    usage = extract_usage(json.dumps({
+        "type": "result",
+        "model": "fixture-model-v2",
+        "runtime": "fixture-cli/1.4",
+        "execution_id": "run-fixture-7",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "request_count": 1,
+            "cost": {"amount": "0.012300", "currency": "usd"},
+        },
+    }))
+
+    assert usage == Usage(10, 2, None, 1, "0.012300", "USD", "fixture-model-v2", "fixture-cli/1.4", "run-fixture-7")
+    assert usage.to_dict()["cost"] == {"amount": "0.012300", "currency": "USD", "reported": True}
+
+    identity_only = extract_usage(json.dumps({"type": "result", "model": "m", "usage": {}}))
+    assert identity_only.model == "m" and not identity_only.reported and identity_only.telemetry_reported
+
+
+@pytest.mark.parametrize(
+    "cost",
+    [
+        {"amount": 0.25, "currency": "USD"},  # JSON float cannot prove source precision
+        {"amount": "-1", "currency": "USD"},
+        {"amount": "1.0", "currency": ""},
+        {"amount": "not-a-number", "currency": "USD"},
+        {"amount": "1E+1000000", "currency": "USD"},
+        {"amount": "1" * 81, "currency": "USD"},
+    ],
+)
+def test_untrustworthy_cost_shapes_remain_unknown(cost: dict[str, object]) -> None:
+    usage = extract_usage(json.dumps({"type": "result", "usage": {"cost": cost}}))
+    assert usage.cost_amount is None and usage.cost_currency is None and not usage.telemetry_reported
+
+
+def test_turn_costs_sum_only_when_every_turn_reports_the_same_currency() -> None:
+    same = "\n".join([
+        json.dumps({"type": "turn.completed", "model": "m", "usage": {"requests": 1, "cost": {"amount": "0.10", "currency": "USD"}}}),
+        json.dumps({"type": "turn.completed", "model": "m", "usage": {"requests": 2, "cost": {"amount": "0.20", "currency": "USD"}}}),
+    ])
+    mixed = same.replace('"USD"', '"EUR"', 1)
+
+    assert extract_usage(same) == Usage(None, None, None, 3, "0.30", "USD", "m")
+    assert extract_usage(mixed).cost_amount is None
+
+
 def test_totals_count_only_reported_calls_and_say_how_many_were_unknown() -> None:
     calls = [
         {"usage": Usage(100, 20, 60).to_dict()}, {"usage": Usage().to_dict()}, {"usage": Usage(50, None, None).to_dict()}, {},
@@ -79,7 +127,25 @@ def test_totals_count_only_reported_calls_and_say_how_many_were_unknown() -> Non
     totals = usage_totals(calls)
     assert (totals["input"], totals["output"], totals["cached_input"]) == (150, 20, 60)
     assert totals["calls_reporting"] == 2 and totals["calls_unknown"] == 2
-    assert usage_totals([{"usage": Usage().to_dict()}]) == {"input": None, "output": None, "cached_input": None, "unit": "tokens", "calls_reporting": 0, "calls_unknown": 1}
+    unknown = usage_totals([{"usage": Usage().to_dict()}])
+    assert (unknown["input"], unknown["output"], unknown["calls_reporting"], unknown["calls_unknown"]) == (None, None, 0, 1)
+    assert unknown["requests"] is None and unknown["costs"] == []
+
+
+def test_totals_keep_currencies_separate_and_report_field_coverage() -> None:
+    calls = [
+        {"usage": Usage(requests=1, cost_amount="1.20", cost_currency="USD").to_dict()},
+        {"usage": Usage(requests=2, cost_amount="0.80", cost_currency="USD").to_dict()},
+        {"usage": Usage(cost_amount="3", cost_currency="EUR").to_dict()},
+        {"usage": Usage().to_dict()},
+    ]
+
+    totals = usage_totals(calls)
+
+    assert totals["requests"] == 3 and totals["request_calls_reporting"] == 2 and totals["request_calls_unknown"] == 2
+    assert totals["costs"] == [{"currency": "EUR", "amount": "3"}, {"currency": "USD", "amount": "2.00"}]
+    assert totals["cost_calls_reporting"] == 3 and totals["cost_calls_unknown"] == 1
+    assert totals["cost_comparable"] is False
 
 
 def test_recorded_usage_survives_the_audit_redactor_and_nothing_private_is_stored(tmp_path: Path) -> None:
@@ -93,8 +159,8 @@ def test_recorded_usage_survives_the_audit_redactor_and_nothing_private_is_store
     record_provider_call(store, task_id="T", purpose="implementation", provider="codex", outcome="succeeded", duration_seconds=2.0)
     first, second = _events(store, PROVIDER_CALL)
 
-    assert first["usage"] == {"input": 120, "output": 30, "cached_input": 80, "unit": "tokens", "reported": True}  # not ***REDACTED***
-    assert second["usage"] == {"input": None, "output": None, "cached_input": None, "unit": "tokens", "reported": False}
+    assert first["usage"] == Usage(120, 30, 80).to_dict()  # not ***REDACTED***
+    assert second["usage"] == Usage().to_dict()
     assert first["duration_seconds"] == 1.235 and first["purpose"] == "review"
     assert first["failure_class"].startswith("timed out waiting for fixture db_engine at #.#.#.# after #s")
     assert len(first["failure_class"]) <= 80  # bounded: a class label, not a log
@@ -135,7 +201,7 @@ def test_the_real_implementation_adapter_records_one_call_with_reported_usage(tm
     call, = provider_calls(rig.store, TASK)
     assert call["purpose"] == "implementation" and call["provider"] == "codex" and call["outcome"] == "succeeded"
     assert call["candidate_sha"] == rig.store.latest_candidate(TASK)["sha"] and call["duration_seconds"] >= 0
-    assert call["usage"] == {"input": 900, "output": 100, "cached_input": 700, "unit": "tokens", "reported": True}
+    assert call["usage"] == Usage(900, 100, 700).to_dict()
 
 
 def test_a_provider_that_reports_nothing_is_recorded_as_unknown_not_zero(tmp_path: Path) -> None:
@@ -170,8 +236,8 @@ def test_review_attempts_are_recorded_per_call_with_usage_noted_by_the_adapter(t
 
     calls = provider_calls(rig.store, TASK)
     assert [c["purpose"] for c in calls] == ["implementation", "review"]
-    assert calls[1]["provider"] == "claude" and calls[1]["outcome"] == "succeeded"
-    assert calls[1]["usage"] == {"input": 300, "output": 40, "cached_input": None, "unit": "tokens", "reported": True}  # cached: unknown, not 0
+    assert calls[1]["provider"] == "claude" and calls[1]["outcome"] == "succeeded", calls[1]
+    assert calls[1]["usage"] == Usage(300, 40).to_dict()  # cached: unknown, not 0
 
 
 def test_a_fake_reviewer_that_cannot_report_usage_is_still_counted_with_unknown_usage(tmp_path: Path) -> None:
@@ -196,6 +262,43 @@ def test_stage_transitions_and_check_reuse_are_reported_per_task(tmp_path: Path)
     assert task["task_id"] == TASK and task["provider_attempts"] == 2 and task["attempts_by_purpose"] == {"implementation": 1, "review": 1}
     assert task["stage_transitions"] >= 3 and task["checks_reused"] >= 2 and task["validation_seconds"] >= 0
     assert {t["from"] for t in _events(rig.store, "stage.transition")} >= {"IMPLEMENT", "VALIDATE"}
+
+
+def test_report_groups_provider_receipts_by_objective_task_role_provider_and_window(tmp_path: Path) -> None:
+    store = Store(tmp_path / "s.sqlite3")
+    store.migrate()
+    store.upsert_task("first", source_id="T1")
+    store.upsert_task("second", source_id="T2")
+    store.save_objective("O1", "Objective", {"tasks": [{"id": "T1"}, {"id": "T2"}]})
+    record_provider_call(
+        store,
+        task_id="T1",
+        purpose="implementation",
+        provider="codex",
+        outcome="succeeded",
+        duration_seconds=1,
+        usage=Usage(10, 2, requests=1, cost_amount="0.10", cost_currency="USD"),
+    )
+    record_provider_call(
+        store,
+        task_id="T2",
+        purpose="review",
+        provider="claude",
+        outcome="succeeded",
+        duration_seconds=1,
+        usage=Usage(5, 1, requests=1),
+    )
+
+    report = efficiency_report(store, since=0, until=9_999_999_999)
+
+    assert report["project_scope"] == "current_store"
+    assert report["window"] == {"since": 0, "until": 9_999_999_999}
+    assert [(row["provider"], row["provider_attempts"]) for row in report["by_provider"]] == [("claude", 1), ("codex", 1)]
+    assert [(row["role"], row["provider_attempts"]) for row in report["by_role"]] == [("implementation", 1), ("review", 1)]
+    objective, = report["by_objective"]
+    assert objective["objective_id"] == "O1" and objective["task_ids"] == ["T1", "T2"]
+    assert objective["usage"]["input"] == 15 and objective["usage"]["costs"] == [{"currency": "USD", "amount": "0.10"}]
+    store.close()
 
 
 def test_the_efficiency_command_prints_honest_totals(tmp_path: Path, capsys) -> None:

@@ -25,6 +25,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -46,23 +47,66 @@ _HEX = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 @dataclass(frozen=True)
 class Usage:
-    """Provider-reported usage. `None` means the provider did not say; it is never treated as zero."""
+    """Provider-reported telemetry. `None` means unavailable; it is never treated as zero.
+
+    Cost is accepted only as a decimal string (or integer) paired with a bounded
+    currency identifier.  Floats are deliberately rejected because their source
+    precision cannot be recovered.  Identity fields are provider receipts, not
+    locally inferred model or subscription claims.
+    """
 
     input: int | None = None
     output: int | None = None
     cached_input: int | None = None
+    requests: int | None = None
+    cost_amount: str | None = None
+    cost_currency: str | None = None
+    model: str | None = None
+    runtime: str | None = None
+    provider_execution_id: str | None = None
 
     @property
     def reported(self) -> bool:
         return any(value is not None for value in (self.input, self.output, self.cached_input))
 
+    @property
+    def telemetry_reported(self) -> bool:
+        return (
+            self.reported
+            or self.requests is not None
+            or self.cost_amount is not None
+            or any(value is not None for value in (self.model, self.runtime, self.provider_execution_id))
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return {"input": self.input, "output": self.output, "cached_input": self.cached_input, "unit": "tokens", "reported": self.reported}
+        return {
+            "input": self.input,
+            "output": self.output,
+            "cached_input": self.cached_input,
+            "unit": "tokens",
+            "reported": self.reported,
+            "requests": self.requests,
+            "cost": (
+                None
+                if self.cost_amount is None or self.cost_currency is None
+                else {"amount": self.cost_amount, "currency": self.cost_currency, "reported": True}
+            ),
+            "identity": {
+                "model": self.model,
+                "runtime": self.runtime,
+                "provider_execution_id": self.provider_execution_id,
+            },
+            "telemetry_reported": self.telemetry_reported,
+        }
 
 
 _INPUT_KEYS = ("input_tokens", "prompt_tokens", "input")
 _OUTPUT_KEYS = ("output_tokens", "completion_tokens", "output")
 _CACHED_KEYS = ("cached_input_tokens", "cache_read_input_tokens", "cached_tokens")
+_REQUEST_KEYS = ("requests", "request_count")
+_CURRENCY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{1,15}$")
+_DECIMAL_AMOUNT = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d+)?$")
+_IDENTITY = re.compile(r"^[^\x00-\x1f\x7f]{1,160}$")
 
 
 def _count(source: dict[str, Any], names: tuple[str, ...]) -> int | None:
@@ -73,11 +117,86 @@ def _count(source: dict[str, Any], names: tuple[str, ...]) -> int | None:
     return None
 
 
-def _usage_from(obj: Any) -> Usage | None:
+def _bounded_identity(source: dict[str, Any], *names: str) -> str | None:
+    for name in names:
+        value = source.get(name)
+        if isinstance(value, str) and _IDENTITY.fullmatch(value):
+            return value
+    return None
+
+
+def _reported_cost(source: dict[str, Any]) -> tuple[str | None, str | None]:
+    raw_cost = source.get("cost")
+    if isinstance(raw_cost, dict):
+        raw_amount = raw_cost.get("amount")
+        raw_currency = raw_cost.get("currency")
+    else:
+        raw_amount = source.get("cost_amount")
+        raw_currency = source.get("cost_currency")
+    if isinstance(raw_amount, bool) or not isinstance(raw_amount, (str, int)):
+        return None, None
+    rendered_amount = str(raw_amount)
+    if len(rendered_amount) > 80 or not _DECIMAL_AMOUNT.fullmatch(rendered_amount):
+        return None, None
+    if not isinstance(raw_currency, str) or not _CURRENCY.fullmatch(raw_currency):
+        return None, None
+    try:
+        amount = Decimal(rendered_amount)
+    except InvalidOperation:
+        return None, None
+    if not amount.is_finite() or amount < 0:
+        return None, None
+    return format(amount, "f"), raw_currency.upper()
+
+
+def _usage_from(obj: Any, envelope: Any = None) -> Usage | None:
     if not isinstance(obj, dict):
         return None
-    usage = Usage(_count(obj, _INPUT_KEYS), _count(obj, _OUTPUT_KEYS), _count(obj, _CACHED_KEYS))
-    return usage if usage.reported else None
+    outer = envelope if isinstance(envelope, dict) else {}
+    amount, currency = _reported_cost(obj)
+    usage = Usage(
+        _count(obj, _INPUT_KEYS),
+        _count(obj, _OUTPUT_KEYS),
+        _count(obj, _CACHED_KEYS),
+        _count(obj, _REQUEST_KEYS),
+        amount,
+        currency,
+        _bounded_identity(outer, "model", "model_id") or _bounded_identity(obj, "model", "model_id"),
+        _bounded_identity(outer, "runtime", "runtime_name") or _bounded_identity(obj, "runtime", "runtime_name"),
+        _bounded_identity(outer, "execution_id", "run_id") or _bounded_identity(obj, "execution_id", "run_id"),
+    )
+    return usage if usage.telemetry_reported else None
+
+
+def _consistent_identity(items: list[Usage], name: str) -> str | None:
+    values = {str(value) for item in items if (value := getattr(item, name)) is not None}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _sum_turn_usage(turns: list[Usage]) -> Usage:
+    def total(name: str) -> int | None:
+        values = [getattr(item, name) for item in turns if getattr(item, name) is not None]
+        return sum(values) if values else None
+
+    costs = [(item.cost_amount, item.cost_currency) for item in turns]
+    complete_costs = all(amount is not None and currency is not None for amount, currency in costs)
+    currencies = {currency for _amount, currency in costs if currency is not None}
+    amount = None
+    currency = None
+    if complete_costs and len(currencies) == 1:
+        amount = format(sum((Decimal(str(value)) for value, _currency in costs), Decimal(0)), "f")
+        currency = next(iter(currencies))
+    return Usage(
+        total("input"),
+        total("output"),
+        total("cached_input"),
+        total("requests"),
+        amount,
+        currency,
+        _consistent_identity(turns, "model"),
+        _consistent_identity(turns, "runtime"),
+        _consistent_identity(turns, "provider_execution_id"),
+    )
 
 
 def _json_objects(text: str) -> list[dict[str, Any]]:
@@ -110,19 +229,15 @@ def extract_usage(stdout: str, stderr: str = "") -> Usage:
     else - several unlabelled usage blocks, free text such as "tokens used: 12k" - is reported as unknown rather than guessed.
     """
     objects = _json_objects(stdout)
-    results = [_usage_from(o.get("usage")) for o in objects if o.get("type") == "result" and "usage" in o]
+    results = [_usage_from(o.get("usage"), o) for o in objects if o.get("type") == "result" and "usage" in o]
     results = [u for u in results if u is not None]
     if results:
         return results[-1]
-    turns = [_usage_from(o.get("usage")) for o in objects if o.get("type") == "turn.completed" and "usage" in o]
+    turns = [_usage_from(o.get("usage"), o) for o in objects if o.get("type") == "turn.completed" and "usage" in o]
     turns = [u for u in turns if u is not None]
     if turns:
-        def total(name: str) -> int | None:
-            values = [getattr(u, name) for u in turns if getattr(u, name) is not None]
-            return sum(values) if values else None
-
-        return Usage(total("input"), total("output"), total("cached_input"))
-    blocks = [u for o in objects if (u := _usage_from(o.get("usage"))) is not None]
+        return _sum_turn_usage(turns)
+    blocks = [u for o in objects if (u := _usage_from(o.get("usage"), o)) is not None]
     return blocks[0] if len(blocks) == 1 else Usage()
 
 
@@ -175,7 +290,7 @@ def record_provider_call(
             "duration_seconds": None if duration_seconds is None else round(max(0.0, float(duration_seconds)), 3),
             "usage": (usage or Usage()).to_dict(),
         })
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110 - measurement must never change provider execution
         pass
 
 
@@ -246,19 +361,95 @@ def equivalent_failure_streak(calls: list[dict[str, Any]]) -> tuple[int, str | N
 
 
 def usage_totals(calls: list[dict[str, Any]]) -> dict[str, Any]:
-    """Totals over *reported* usage only, with the unknown calls counted separately (never as zero)."""
+    """Totals over reported telemetry only; unknown fields are never converted to zero.
+
+    Currency totals stay separated.  A mixed-currency report therefore cannot be
+    mistaken for one comparable monetary total.
+    """
     totals: dict[str, int | None] = {"input": None, "output": None, "cached_input": None}
-    reported = 0
+    token_reported = 0
+    request_total: int | None = None
+    request_reported = 0
+    costs: dict[str, Decimal] = {}
+    cost_reported = 0
     for call in calls:
         usage = call.get("usage") or {}
-        if not usage.get("reported"):
+        if usage.get("reported"):
+            token_reported += 1
+            for name in ("input", "output", "cached_input"):
+                value = usage.get(name)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    totals[name] = (totals[name] or 0) + value
+        requests = usage.get("requests")
+        if isinstance(requests, int) and not isinstance(requests, bool) and requests >= 0:
+            request_reported += 1
+            request_total = (request_total or 0) + requests
+        cost = usage.get("cost")
+        if isinstance(cost, dict):
+            currency = cost.get("currency")
+            amount = cost.get("amount")
+            rendered_amount = str(amount)
+            if len(rendered_amount) > 80 or not _DECIMAL_AMOUNT.fullmatch(rendered_amount):
+                continue
+            try:
+                decimal_amount = Decimal(rendered_amount)
+            except (InvalidOperation, ValueError):
+                continue
+            if (
+                isinstance(currency, str)
+                and _CURRENCY.fullmatch(currency)
+                and decimal_amount.is_finite()
+                and decimal_amount >= 0
+            ):
+                cost_reported += 1
+                key = currency.upper()
+                costs[key] = costs.get(key, Decimal(0)) + decimal_amount
+    cost_rows = [
+        {"currency": currency, "amount": format(amount, "f")}
+        for currency, amount in sorted(costs.items())
+    ]
+    return {
+        **totals,
+        "unit": "tokens",
+        "calls_reporting": token_reported,
+        "calls_unknown": len(calls) - token_reported,
+        "requests": request_total,
+        "request_calls_reporting": request_reported,
+        "request_calls_unknown": len(calls) - request_reported,
+        "costs": cost_rows,
+        "cost_calls_reporting": cost_reported,
+        "cost_calls_unknown": len(calls) - cost_reported,
+        "cost_comparable": len(cost_rows) == 1,
+    }
+
+
+def _grouped_usage(calls: list[dict[str, Any]], field: str, label: str) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for call in calls:
+        value = call.get(field)
+        key = str(value) if value is not None else "unknown"
+        groups.setdefault(key, []).append(call)
+    return [
+        {label: key, "provider_attempts": len(group), "usage": usage_totals(group)}
+        for key, group in sorted(groups.items())
+    ]
+
+
+def _objective_tasks(store: Store) -> dict[str, set[str]]:
+    objectives: dict[str, set[str]] = {}
+    for row in store.conn.execute("SELECT id,payload FROM objectives ORDER BY id"):
+        payload = _loads(row["payload"])
+        tasks = payload.get("tasks")
+        if not isinstance(tasks, list):
             continue
-        reported += 1
-        for name in totals:
-            value = usage.get(name)
-            if isinstance(value, int):
-                totals[name] = (totals[name] or 0) + value
-    return {**totals, "unit": "tokens", "calls_reporting": reported, "calls_unknown": len(calls) - reported}
+        task_ids = {
+            str(item["id"])
+            for item in tasks
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
+        }
+        if task_ids:
+            objectives[str(row["id"])] = task_ids
+    return objectives
 
 
 # --- budgets -------------------------------------------------------------------------------------------------------------------
@@ -370,6 +561,8 @@ def task_efficiency(store: Store, task_id: str, since: float = 0.0, until: float
         "task_id": task_id,
         "provider_attempts": len(calls),
         "attempts_by_purpose": by_purpose,
+        "usage_by_role": _grouped_usage(calls, "purpose", "role"),
+        "usage_by_provider": _grouped_usage(calls, "provider", "provider"),
         "equivalent_failure_retries": sum(count - 1 for count in failures.values() if count > 1),
         "current_equivalent_failure_streak": {"count": streak, "class": signature},
         "failure_classes": failures,
@@ -389,8 +582,24 @@ def efficiency_report(store: Store, task_ids: list[str] | None = None, since: fl
     tasks = [task_efficiency(store, task_id, since, until) for task_id in ids]
     tasks = [t for t in tasks if t["provider_attempts"] or t["stage_transitions"] or t["checks_executed"] or t["checks_reused"]]
     calls = [call for t in ids for call in provider_calls(store, t, since, until)]
+    objectives = []
+    for objective_id, objective_task_ids in _objective_tasks(store).items():
+        selected = objective_task_ids.intersection(ids)
+        objective_calls = [call for task_id in sorted(selected) for call in provider_calls(store, task_id, since, until)]
+        if objective_calls:
+            objectives.append({
+                "objective_id": objective_id,
+                "task_ids": sorted(selected),
+                "provider_attempts": len(objective_calls),
+                "usage": usage_totals(objective_calls),
+            })
     return {
         "tasks": tasks,
+        "by_objective": objectives,
+        "by_provider": _grouped_usage(calls, "provider", "provider"),
+        "by_role": _grouped_usage(calls, "purpose", "role"),
+        "window": {"since": since, "until": until},
+        "project_scope": "current_store",
         "totals": {
             "provider_attempts": sum(t["provider_attempts"] for t in tasks),
             "equivalent_failure_retries": sum(t["equivalent_failure_retries"] for t in tasks),
@@ -400,7 +609,10 @@ def efficiency_report(store: Store, task_ids: list[str] | None = None, since: fl
             "validation_seconds": round(sum(t["validation_seconds"] for t in tasks), 3),
             "usage": usage_totals(calls),
         },
-        "note": "usage totals count only calls whose provider reported usage; calls_unknown is how many reported none (never counted as zero)",
+        "note": (
+            "token, request and cost totals count only fields reported by providers; unknown fields are never counted as zero; "
+            "currencies remain separate; objective groups may overlap and must not be summed"
+        ),
     }
 
 
@@ -413,6 +625,13 @@ def format_efficiency(report: dict[str, Any]) -> list[str]:
         "usage (provider-reported): "
         + (f"input {usage['input']}, output {usage['output']}, cached input {usage['cached_input']}" if usage["calls_reporting"] else "unknown")
         + f"; {usage['calls_reporting']} call(s) reported, {usage['calls_unknown']} unknown",
+        "requests (provider-reported): "
+        + (str(usage["requests"]) if usage["request_calls_reporting"] else "unknown")
+        + f"; {usage['request_calls_reporting']} call(s) reported, {usage['request_calls_unknown']} unknown",
+        "cost (provider-reported): "
+        + (", ".join(f"{item['amount']} {item['currency']}" for item in usage["costs"]) if usage["costs"] else "unknown")
+        + f"; {usage['cost_calls_reporting']} call(s) reported, {usage['cost_calls_unknown']} unknown"
+        + ("; mixed currencies not summed" if len(usage["costs"]) > 1 else ""),
     ]
     for task in report["tasks"]:
         lines.append(

@@ -659,6 +659,21 @@ def serialize_operator_report(report: OperatorReport) -> dict[str, Any]:
     usage = efficiency.get("usage") if isinstance(efficiency.get("usage"), Mapping) else {}
     attempts = efficiency.get("attempts_by_purpose")
     attempts = attempts if isinstance(attempts, Mapping) else {}
+    raw_costs = usage.get("costs")
+    safe_costs = []
+    if isinstance(raw_costs, list):
+        for item in raw_costs[:16]:
+            if not isinstance(item, Mapping):
+                continue
+            currency = _safe_text(item.get("currency"), 16)
+            amount = _safe_text(item.get("amount"), 80)
+            if (
+                currency is not None
+                and re.fullmatch(r"[A-Z][A-Z0-9_-]{1,15}", currency)
+                and amount is not None
+                and re.fullmatch(r"\d+(?:\.\d+)?", amount)
+            ):
+                safe_costs.append({"currency": currency, "amount": amount})
     safe_efficiency = {
         "scope": _safe_text(efficiency.get("scope"), 200) or "bounded recent sample",
         "provider_attempts": _safe_number(efficiency.get("provider_attempts")),
@@ -675,10 +690,17 @@ def serialize_operator_report(report: OperatorReport) -> dict[str, Any]:
         "validation_seconds": _safe_number(efficiency.get("validation_seconds")),
         "usage": {
             key: (_safe_text(usage.get(key), 20) if key == "unit" else _safe_number(usage.get(key)))
-            for key in ("input", "output", "cached_input", "unit", "calls_reporting", "calls_unknown")
+            for key in (
+                "input", "output", "cached_input", "unit", "calls_reporting", "calls_unknown",
+                "requests", "request_calls_reporting", "request_calls_unknown",
+                "cost_calls_reporting", "cost_calls_unknown",
+            )
         },
-        "billing_cost": "UNKNOWN",
+        "billing_cost": _safe_text(efficiency.get("billing_cost"), 200) or "UNKNOWN",
+        "billing_cost_comparable": bool(efficiency.get("billing_cost_comparable")),
     }
+    safe_efficiency["usage"]["costs"] = safe_costs
+    safe_efficiency["usage"]["cost_comparable"] = bool(usage.get("cost_comparable"))
     body_sections: dict[str, list[dict[str, Any]]] = {
         "attention": [
             {

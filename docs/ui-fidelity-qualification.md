@@ -2,15 +2,16 @@
 
 Issues: #505 qualification; #561 StageMesh implementation
 
-Base repository checkpoint: `75a3516fd9abcda6b7bebdd6f935e005a8f61d67`
+Base repository checkpoint: `54131452c7128d8ae27d88dbb61930fb45f0d98c`
 
-Qualification date: 2026-11-06
+Qualification date: 2026-11-07
 
 ## Decision
 
-**No-go for unattended Caventra UI fidelity ownership today. The provider-neutral
-StageMesh governance layer is implemented under #561; a bounded synthetic Caventra
-web experiment still requires a separate approved task.**
+**The provider-neutral StageMesh governance layer is qualified with a bounded,
+hermetic six-state synthetic experiment. This is a go for governing an explicitly
+configured project-owned visual evaluator, but remains a no-go for claiming that
+StageMesh has visually validated or autonomously redesigned the real Caventra UI.**
 
 StageMesh already has most of the control loop: bounded contracts, isolated
 candidate checkouts, configured browser commands, exact-candidate validation,
@@ -27,9 +28,10 @@ not prove the complete Caventra design-to-code loop required by #505. In particu
   through the new governance layer.
 
 No live browser, Figma, Storybook, Maestro, native-device, or Caventra production
-UI run was performed for this qualification. No Caventra source or runtime
-configuration was changed. The conclusions below are repository evidence, not a
-claim that an external toolchain is installed or operational.
+UI run was performed for this qualification. The evaluator is a deterministic
+synthetic command, not Playwright. No Caventra source, runtime configuration, or
+approved baseline was changed. The conclusions below are repository evidence, not
+a claim that an external toolchain is installed or operational.
 
 ## Capability audit
 
@@ -50,7 +52,8 @@ claim that an external toolchain is installed or operational.
 | Independent evaluation identity | Partial | `require_independent` refuses a missing evaluator id or one matching the implementation provider. | This is a declared bounded identifier, not proof that a separate human/model inspected the images. |
 | Independent code review before integration | Existing with bounded artifact handoff | Review is candidate/contract-bound; before prompting, StageMesh revalidates captured artifact checksums and supplies only project-relative roots, typed paths, sizes, digests, requirement results, and visual-policy identity. | This makes evidence inspectable but does not prove a human or model interpreted the pixels correctly. |
 | Silent golden refresh protection | Existing, opt-in | StageMesh hashes declared reference, fixture, tolerance, gate, and package inputs in the exact candidate, before and after evaluation; it rejects mutation, path/symlink escape, stale identity, and explicit update-golden modes. | The project must declare every acceptance-policy input; undeclared external tool bytes remain outside this proof. |
-| Shared-component cross-screen regression | Demonstrated synthetically in StageMesh | The hermetic acceptance matrix declares a second screen and proves that a PASS claim with an over-threshold difference fails as an assertion. | No Caventra screen was exercised. |
+| Responsive, empty, error and recovery states | Demonstrated synthetically in StageMesh | `tests/test_visual_reference_governance.py` declares desktop ready/error/recovery, mobile ready/empty, and a dependent activity screen; every state requires typed actual/reference/diff evidence. | The evaluator emits synthetic bytes; it does not prove browser rendering fidelity. |
+| Mismatching design and shared-component cross-screen regression | Demonstrated synthetically in StageMesh | The hermetic acceptance matrix rejects desktop/mobile drift and independently rejects drift on the dependent activity screen. | No Caventra screen was exercised. |
 | Native mobile / Maestro | Unsupported and not qualified | The shipped Caventra profile represents `apps/web-v2`; StageMesh evaluation kinds are `browser` and `api`, with no Maestro/native-device adapter or native-app evidence model. | Defer until a real native stack and device/emulator authority are separately established. Do not represent web viewport coverage as native-mobile evidence. |
 
 ## What the current trace can prove
@@ -67,10 +70,10 @@ For a configured browser service, StageMesh can bind and retain this chain:
 8. integration outcome for that exact candidate.
 
 It can bind a reviewed project revision identifier and make step 5 artifacts
-available to step 7 as checksum-revalidated, content-free references. It cannot
-prove that the identifier came from a live Figma service or that the reviewer
-correctly interpreted the pixels. Therefore #505 still requires the separately
-approved synthetic Caventra experiment.
+available to step 7 as checksum-revalidated, content-free references. The accepted
+hermetic matrix proves this StageMesh governance chain. It cannot prove that the
+identifier came from a live Figma service, that a browser rendered Caventra, or that
+the reviewer correctly interpreted the pixels.
 
 ## Proposed bounded web toolchain
 
@@ -97,8 +100,8 @@ separate objective.
 
 ## Synthetic experiment specification
 
-This experiment belongs in a separately approved Caventra task. It uses synthetic
-records only and must not alter production UI routes or data.
+This experiment is implemented as hermetic StageMesh acceptance coverage using
+synthetic records only. It does not alter production UI routes or data.
 
 ### Approved inputs
 
@@ -232,13 +235,14 @@ control fails for the intended reason. The report must retain:
 
 ## Remaining follow-up work
 
-The two StageMesh safety gaps above are implemented and covered synthetically by
-#561. The remaining work is outside this implementation authorization:
+No further StageMesh core change is required for the bounded synthetic qualification.
+The following work remains outside this authorization and is not kept open under
+#505:
 
-1. **Synthetic Playwright qualification (Caventra, separate approval):** add the
-   reviewed reference bundle, deterministic evaluator, state fixtures, and explicit
-   runtime service configuration; execute all positive and negative controls. Do
-   not touch production UI or real matter data.
+1. **Live project-owned browser qualification (separate approval):** configure a
+   real deterministic Playwright evaluator and approved reference bundle in the
+   target project, then run it against an exact candidate. Do not touch production
+   UI, refresh an approved baseline, or use real matter data without separate scope.
 2. **Native-stack decision (separate discovery):** verify whether Caventra has a
    native mobile target. If it does, define emulator/device isolation and assess
    Maestro. If not, close native-mobile qualification as not applicable rather
@@ -246,9 +250,8 @@ The two StageMesh safety gaps above are implemented and covered synthetically by
 
 ## Go/no-go gate
 
-StageMesh may be described as owning the Caventra UI feedback loop only after the
-separate synthetic Caventra experiment passes on an exact candidate and hosted
-merge policy rejects the two negative regressions. Until then, the accurate
-statement is: **StageMesh can govern a configured candidate-bound visual evaluator,
-preserve immutable evidence, and remediate its failures, but unattended Caventra
-design fidelity is not yet qualified.**
+The accurate statement is: **StageMesh can govern a configured candidate-bound
+visual evaluator, preserve immutable typed evidence, reject missing or silently
+refreshed evidence and visual regressions, return failures to remediation, and bind
+independent review to the same candidate. The six-state hermetic qualification is
+synthetic; unattended real-Caventra design fidelity remains not run and unproven.**
