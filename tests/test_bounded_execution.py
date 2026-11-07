@@ -25,6 +25,26 @@ TASK = "TASK-1"
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(120)"]
 
 
+def test_windows_background_processes_never_create_a_console(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stagemesh import execution
+
+    class StartupInfo:
+        dwFlags = 0
+        wShowWindow = None
+
+    monkeypatch.setattr(execution.sys, "platform", "win32")
+    monkeypatch.setattr(execution.subprocess, "STARTUPINFO", StartupInfo, raising=False)
+    monkeypatch.setattr(execution.subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+    monkeypatch.setattr(execution.subprocess, "SW_HIDE", 0, raising=False)
+
+    startup = execution.popen_session_kwargs()["startupinfo"]
+
+    assert startup.dwFlags & 1
+    assert startup.wShowWindow == 0
+
+
 def _setup(tmp_path: Path, contract: dict[str, object] | None = None) -> tuple[Path, Store]:
     project = tmp_path / "repo"
     project.mkdir()

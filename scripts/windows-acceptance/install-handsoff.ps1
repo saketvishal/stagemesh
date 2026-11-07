@@ -31,7 +31,7 @@ $env:GIT_TERMINAL_PROMPT = '0'
 function Invoke-Bounded($exe, $argList, $timeoutSeconds) {
     $out = [IO.Path]::GetTempFileName(); $err = [IO.Path]::GetTempFileName()
     $quoted = $argList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }
-    $p = Start-Process -FilePath $exe -ArgumentList $quoted -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+    $p = Start-Process -FilePath $exe -ArgumentList $quoted -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -WindowStyle Hidden
     $null = $p.Handle
     if (-not $p.WaitForExit($timeoutSeconds * 1000)) { taskkill /F /T /PID $p.Id *> $null; Remove-Item $out, $err -ErrorAction SilentlyContinue; return @{ code = -1; text = 'timed out' } }
     $p.WaitForExit()
@@ -39,6 +39,11 @@ function Invoke-Bounded($exe, $argList, $timeoutSeconds) {
     $result = @{ code = [int]$p.ExitCode; text = "$text" }
     Remove-Item $out, $err -ErrorAction SilentlyContinue
     return $result
+}
+function Configured-Executable($command) {
+    $trimmed = "$command".Trim()
+    if ($trimmed -match '^"([^"]+)"') { return $Matches[1] }
+    return @($trimmed -split '\s+', 2)[0]
 }
 function Fail($message) {
     Write-Host "REFUSED: $message" -ForegroundColor Red
@@ -57,7 +62,10 @@ if (-not $newest) { Fail "no native acceptance evidence under $EvidenceRoot" }
 $summaryFile = Join-Path $newest.FullName 'summary.json'
 $s = $null
 if (Test-Path $summaryFile) { try { $s = Get-Content $summaryFile -Raw | ConvertFrom-Json } catch { } }
-if (-not $s -or $s.commit -ne $Commit -or $s.result -ne 'PASS') { Fail "the newest native acceptance ($($newest.Name)) is not a PASS for commit $Commit" }
+if (-not $s -or $s.commit -ne $Commit -or $s.result -ne 'PASS' -or
+    -not $s.steps.driver_lifecycle_mock_providers.ok -or -not $s.steps.cleanup_complete.ok) {
+    Fail "the newest native acceptance ($($newest.Name)) is not a complete lifecycle PASS for commit $Commit"
+}
 if (Test-Path $Base) { Fail "$Base already exists; refusing to reuse or overwrite it" }
 
 # 2. python ---------------------------------------------------------------------------------------------------------------------
@@ -123,6 +131,15 @@ if (Test-Path $KnownGoodConfig) {
     } catch { }
 }
 if (-not $codexCommand -or $codexCommand -notmatch '(--model|\s-m)\s') { Fail "no known-good pinned Codex command found in $KnownGoodConfig" }
+$codexExecutable = Configured-Executable $codexCommand
+if (-not [IO.Path]::IsPathRooted($codexExecutable) -or
+    -not (Test-Path -LiteralPath $codexExecutable -PathType Leaf)) {
+    Fail "the pinned Codex executable does not exist: $codexExecutable"
+}
+$codexVersion = Invoke-Bounded $codexExecutable @('--version') 30
+if ($codexVersion.code -ne 0) {
+    Fail "the pinned Codex executable did not pass its offline version check: $codexExecutable"
+}
 $config = @{
     budgets = @{ max_provider_calls_per_task = 12; max_equivalent_failures = 3; max_provider_calls_per_window = 30 }
     routing = @{ require_independent_review = $true; pools = @{ IMPLEMENT = @('codex', 'claude'); REVIEW = @('codex', 'claude') } }

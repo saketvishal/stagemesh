@@ -6,6 +6,9 @@ eligibility, isolated implementation, exact-SHA validation and review, remediati
 
 The Windows Task Scheduler process is independent of ChatGPT and its UI. After explicit installation, closing ChatGPT does not stop
 the scheduled command. The Windows user session, configured provider CLIs, repository credentials and machine must still be available.
+Scheduled ticks use the virtual environment's windowless Python interpreter, and background child processes start with a hidden
+Windows startup state that preserves process-tree cleanup. Normal unattended operation must not open terminal windows on the
+operator's desktop; installation fails closed if the windowless interpreter is unavailable.
 
 ## Safe opt-in
 

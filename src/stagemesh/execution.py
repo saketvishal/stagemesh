@@ -155,8 +155,16 @@ def provider_timeout_seconds(configured: float | None = None) -> float:
 
 
 def popen_session_kwargs() -> dict[str, object]:
-    """Start providers in their own process group so the whole tree can be killed on timeout."""
-    return {} if sys.platform == "win32" else {"start_new_session": True}
+    """Keep background provider processes non-interactive while preserving tree cleanup."""
+    if sys.platform == "win32":
+        # Do not use CREATE_NO_WINDOW here: real-host evidence showed that it changes the venv
+        # launcher tree enough for `taskkill /T` to miss a grandchild. STARTUPINFO hides the
+        # window while preserving the proven tree topology.
+        startup = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+        startup.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        startup.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        return {"startupinfo": startup}
+    return {"start_new_session": True}
 
 
 def kill_process_tree(proc: subprocess.Popen[str]) -> bool:
@@ -164,7 +172,10 @@ def kill_process_tree(proc: subprocess.Popen[str]) -> bool:
     if sys.platform == "win32":
         try:
             result = subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False, timeout=5
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+                timeout=5,
             )
             confirmed = result.returncode == 0
         except subprocess.TimeoutExpired:

@@ -222,7 +222,7 @@ def run_spec(project: Path, name: str) -> int:
 
 def test_every_task_has_a_reference_and_the_specs_discriminate(tmp_path: Path) -> None:
     project = tmp_path / "sandbox"
-    ids = sandbox.create_sandbox(project, sys.executable)
+    ids = sandbox.create_sandbox(project, sys.executable, task_count=20)
     assert len(ids) == 20 and {task["name"] for task in sandbox.TASKS} == set(REFERENCE)
     for task in sandbox.TASKS:
         assert run_spec(project, task["name"]) != 0, f"{task['name']} spec passes on the empty scaffold"
@@ -237,6 +237,7 @@ def test_contracts_forbid_editing_the_specs_and_use_absolute_python(tmp_path: Pa
 
     project = tmp_path / "sandbox"
     ids = sandbox.create_sandbox(project, sys.executable)
+    assert len(ids) == 10
     for task_id in ids:
         contract = json.loads((project / ".stagemesh" / "contracts" / f"{task_id}.json").read_text(encoding="utf-8"))
         assert not any(path.startswith("spec/") for path in contract["allowed_files"])
@@ -249,21 +250,50 @@ def test_sandbox_refuses_a_non_empty_directory(tmp_path: Path) -> None:
         sandbox.create_sandbox(tmp_path, sys.executable)
 
 
-def test_extend_adds_only_missing_tasks_and_leaves_existing_rows_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_extend_adds_only_missing_tasks_and_leaves_existing_rows_alone(tmp_path: Path) -> None:
     project = tmp_path / "sandbox"
-    sandbox.create_sandbox(project, sys.executable)
-    # simulate a live sandbox that was created with only the first ten tasks
+    initial = sandbox.create_sandbox(project, sys.executable)
+    assert len(initial) == 10
     from stagemesh.persistence import Store
 
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     store.migrate()
-    store.conn.execute("DELETE FROM tasks WHERE source_id > 'SANDBOX-10'")
-    store.conn.commit()
+    before = store.conn.execute("SELECT id, source_id FROM tasks ORDER BY source_id").fetchall()
     store.close()
-    for task in sandbox.TASKS[10:]:
-        (project / "spec" / f"check_{task['name']}.py").unlink()
-    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "drop"], cwd=project, check=True, env={**__import__("os").environ})
     added = sandbox.extend_sandbox(project, sys.executable)
     assert added and len(added) == 10
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    after = store.conn.execute(
+        "SELECT id, source_id FROM tasks WHERE source_id <= 'SANDBOX-10' ORDER BY source_id"
+    ).fetchall()
+    store.close()
+    assert [(row["id"], row["source_id"]) for row in after] == [
+        (row["id"], row["source_id"]) for row in before
+    ]
     assert sandbox.extend_sandbox(project, sys.executable) == []
+
+
+def test_custom_task_batch_preserves_global_task_numbers(tmp_path: Path) -> None:
+    project = tmp_path / "sandbox"
+
+    ids = sandbox.create_sandbox(project, sys.executable, task_start=11, task_count=3)
+
+    assert len(ids) == 3
+    from stagemesh.persistence import Store
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    sources = [
+        row[0] for row in store.conn.execute("SELECT source_id FROM tasks ORDER BY source_id")
+    ]
+    store.close()
+    assert sources == ["SANDBOX-11", "SANDBOX-12", "SANDBOX-13"]
+    assert not (project / "spec" / "check_slugify.py").exists()
+    assert (project / "spec" / "check_caesar.py").is_file()
+
+
+@pytest.mark.parametrize(("start", "count"), [(0, 10), (1, 0), (15, 10), (21, 1)])
+def test_task_batch_refuses_out_of_range_requests(tmp_path: Path, start: int, count: int) -> None:
+    with pytest.raises(SystemExit, match="task batch must fit"):
+        sandbox.create_sandbox(tmp_path / "sandbox", task_start=start, task_count=count)

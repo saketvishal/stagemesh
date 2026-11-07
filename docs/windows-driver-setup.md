@@ -13,6 +13,10 @@ the whole process tree with automatic recovery, stop and uninstall. Its single T
 files are removed even on failure. Evidence goes to `.stagemesh\acceptance-evidence\native-<timestamp>\` in the main checkout
 (ignored by git): `summary.json`, `transcript.txt`, logs, and the lifecycle JSON.
 
+Acceptance and persistent operation launch background helpers without visible terminal windows. Every mandatory acceptance step
+starts failed and becomes passing only after completion, so an interruption followed by successful cleanup cannot produce a false
+PASS. The persistent installer independently requires both the lifecycle and cleanup gates.
+
 ## Step 2: persistent installation (`install-handsoff.ps1`)
 
 It refuses, and changes nothing, unless the native acceptance passed for the same commit, both coding CLIs are installed and
@@ -26,6 +30,10 @@ package repository with ten real tasks. Each task asks a provider to add one mod
 provider's own tests and an independent `spec/check_*.py` oracle (which the contract forbids the provider to edit) both pass and a
 different provider approves the exact candidate. Integration is `local`, inside that sandbox repository only. Nothing is pushed,
 published, merged elsewhere or deployed.
+
+The generator defaults to tasks 1-10 and accepts an explicit one-based start and count for a bounded batch; the upgrade path
+defaults to tasks 11-20 and preserves existing task rows. The installer also rejects a stale or relative Codex executable and runs
+its offline `--version` check before scheduling provider work.
 
 Bounds: one task at a time; 40-minute windows, one per 10 minutes; at most 2 tasks and 6 steps per task per window; 12 provider
 calls per task and 30 per window; three consecutive failed ticks block the driver until `driver resume`. A running window is

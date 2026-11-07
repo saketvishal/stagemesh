@@ -35,13 +35,18 @@ function Fail($message) {
 function Invoke-Bounded($exe, $argList, $timeoutSeconds) {
     $out = [IO.Path]::GetTempFileName(); $err = [IO.Path]::GetTempFileName()
     $quoted = $argList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }
-    $p = Start-Process -FilePath $exe -ArgumentList $quoted -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+    $p = Start-Process -FilePath $exe -ArgumentList $quoted -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -WindowStyle Hidden
     $null = $p.Handle
     if (-not $p.WaitForExit($timeoutSeconds * 1000)) { taskkill /F /T /PID $p.Id *> $null; Remove-Item $out, $err -ErrorAction SilentlyContinue; return @{ code = -1; text = 'timed out' } }
     $p.WaitForExit()
     $result = @{ code = [int]$p.ExitCode; text = "$(Get-Content $out -Raw -ErrorAction SilentlyContinue)$(Get-Content $err -Raw -ErrorAction SilentlyContinue)" }
     Remove-Item $out, $err -ErrorAction SilentlyContinue
     return $result
+}
+function Configured-Executable($command) {
+    $trimmed = "$command".Trim()
+    if ($trimmed -match '^"([^"]+)"') { return $Matches[1] }
+    return @($trimmed -split '\s+', 2)[0]
 }
 
 # 0. preconditions ----------------------------------------------------------------------------------------------------------
@@ -60,6 +65,15 @@ if (Test-Path $KnownGoodConfig) {
     } catch { }
 }
 if (-not $codexCommand -or $codexCommand -notmatch '(--model|\s-m)\s') { Fail "no known-good pinned Codex command found in $KnownGoodConfig" }
+$codexExecutable = Configured-Executable $codexCommand
+if (-not [IO.Path]::IsPathRooted($codexExecutable) -or
+    -not (Test-Path -LiteralPath $codexExecutable -PathType Leaf)) {
+    Fail "the pinned Codex executable does not exist: $codexExecutable"
+}
+$codexVersion = Invoke-Bounded $codexExecutable @('--version') 30
+if ($codexVersion.code -ne 0) {
+    Fail "the pinned Codex executable did not pass its offline version check: $codexExecutable"
+}
 
 $py = $null
 $candidates = @()

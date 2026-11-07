@@ -292,9 +292,24 @@ def _register_tasks(project: Path, python: str, store, numbered: list[tuple[int,
     return ids
 
 
-def create_sandbox(project: Path, python: str = sys.executable) -> list[str]:
+def _task_batch(start: int, count: int) -> list[tuple[int, dict[str, str]]]:
+    if start < 1 or count < 1 or start + count - 1 > len(TASKS):
+        raise SystemExit(
+            f"task batch must fit within 1..{len(TASKS)} (start={start}, count={count})"
+        )
+    return list(enumerate(TASKS[start - 1 : start - 1 + count], start=start))
+
+
+def create_sandbox(
+    project: Path,
+    python: str = sys.executable,
+    *,
+    task_start: int = 1,
+    task_count: int = 10,
+) -> list[str]:
     """Create the repo, tasks and contracts. Returns the task ids. Refuses to touch a non-empty directory."""
     project = Path(project)
+    numbered = _task_batch(task_start, task_count)
     if project.exists() and any(project.iterdir()):
         raise SystemExit(f"refusing to reuse a non-empty directory: {project}")
     project.mkdir(parents=True, exist_ok=True)
@@ -307,7 +322,7 @@ def create_sandbox(project: Path, python: str = sys.executable) -> list[str]:
     (project / "tests" / ".gitkeep").write_text("", encoding="utf-8")
     (project / "README.md").write_text(README, encoding="utf-8")
     (project / ".gitignore").write_text(".stagemesh/\n__pycache__/\n*.pyc\n.venv*/\n", encoding="utf-8")
-    for task in TASKS:
+    for _number, task in numbered:
         (project / "spec" / f"check_{task['name']}.py").write_text(SPEC_HEADER + task["spec"], encoding="utf-8")
     _git(project, "add", "-A")
     _git(project, "commit", "-q", "-m", "Scaffold the textkit sandbox and its independent specs")
@@ -317,18 +332,28 @@ def create_sandbox(project: Path, python: str = sys.executable) -> list[str]:
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     store.migrate()
     try:
-        ids = _register_tasks(project, python, store, list(enumerate(TASKS, start=1)))
+        ids = _register_tasks(project, python, store, numbered)
     finally:
         store.close()
     return ids
 
 
-def extend_sandbox(project: Path, python: str = sys.executable) -> list[str]:
+def extend_sandbox(
+    project: Path,
+    python: str = sys.executable,
+    *,
+    task_start: int = 11,
+    task_count: int = 10,
+) -> list[str]:
     """Add the tasks (and their independent specs) that an existing sandbox does not have yet, without touching existing ledger rows."""
     project = Path(project)
     if not (project / ".git").exists() or not (project / ".stagemesh").exists():
         raise SystemExit(f"not a sandbox project: {project}")
-    new = [(number, task) for number, task in enumerate(TASKS, start=1) if not (project / "spec" / f"check_{task['name']}.py").exists()]
+    new = [
+        (number, task)
+        for number, task in _task_batch(task_start, task_count)
+        if not (project / "spec" / f"check_{task['name']}.py").exists()
+    ]
     if not new:
         return []
     for _number, task in new:
@@ -349,6 +374,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("project")
     parser.add_argument("--extend", action="store_true", help="add the tasks an existing sandbox does not have yet")
+    parser.add_argument(
+        "--task-start", type=int, help="one-based first task (default: 1, or 11 with --extend)"
+    )
+    parser.add_argument("--task-count", type=int, default=10, help="number of tasks in this bounded batch")
     arguments = parser.parse_args()
     action = extend_sandbox if arguments.extend else create_sandbox
-    print(json.dumps(action(Path(arguments.project)), indent=2))
+    start = (
+        arguments.task_start
+        if arguments.task_start is not None
+        else (11 if arguments.extend else 1)
+    )
+    result = action(Path(arguments.project), task_start=start, task_count=arguments.task_count)
+    print(json.dumps(result, indent=2))
