@@ -35,7 +35,8 @@ marker = project / "child.pid"
 script = project / "tree.py"
 script.write_text(
     "import pathlib, subprocess, sys, time\n"
-    "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+    "from stagemesh.execution import popen_descendant_kwargs\n"
+    "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], **popen_descendant_kwargs())\n"
     "pathlib.Path(sys.argv[1]).write_text(str(c.pid))\n"
     "time.sleep(60)\n",
     encoding="utf-8",

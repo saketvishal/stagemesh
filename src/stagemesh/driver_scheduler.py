@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Protocol
 from xml.sax.saxutils import escape
 
+from .execution import popen_descendant_kwargs
+
 TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 DEFAULT_EXECUTION_LIMIT_SECONDS = 2 * 60 * 60
 
@@ -35,7 +37,14 @@ Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
 
 def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(argv), capture_output=True, text=True, check=False, timeout=60)
+    return subprocess.run(
+        list(argv),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        **popen_descendant_kwargs(),
+    )
 
 
 def current_user_id() -> str:

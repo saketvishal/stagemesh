@@ -19,16 +19,18 @@ from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree
 
-from stagemesh.driver_scheduler import TASK_NAMESPACE, WindowsDriverScheduler, build_task_xml, current_user_id
+from stagemesh.driver_scheduler import TASK_NAMESPACE, WindowsDriverScheduler
+from stagemesh.execution import popen_descendant_kwargs
 
 WORKER = r'''
 import os, subprocess, sys, time
 from datetime import datetime
+from stagemesh.execution import popen_descendant_kwargs
 log, seconds = sys.argv[1], float(sys.argv[2])
 def note(text):
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(f"{datetime.now().astimezone().isoformat()} {text}\n")
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], **popen_descendant_kwargs())
 note(f"start pid={os.getpid()} grandchild={child.pid}")
 time.sleep(seconds)
 note(f"end pid={os.getpid()}")
@@ -44,13 +46,25 @@ def record(step: str, **details) -> None:
     print(json.dumps(entry), flush=True)
 
 
+def run_tool(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, **kwargs, **popen_descendant_kwargs())
+
+
 def schtasks(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["schtasks", *args], capture_output=True, text=True, timeout=60)
+    return run_tool(["schtasks", *args], capture_output=True, text=True, timeout=60)
 
 
 def alive(pid: int) -> bool:
-    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+    out = run_tool(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
     return str(pid) in out
+
+
+def windowless_python() -> str:
+    executable = Path(sys.executable)
+    candidate = executable.with_name("pythonw.exe")
+    if not candidate.is_file():
+        raise RuntimeError(f"windowless Python is required for native scheduler acceptance: {candidate}")
+    return str(candidate)
 
 
 def started_pids(log: Path) -> list[tuple[int, int]]:
@@ -74,9 +88,9 @@ def wait_for(predicate, seconds: float, interval: float = 1.0):
 
 
 def python_and_cmd_table() -> list[list]:
-    script = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'python.exe','cmd.exe' } | "
+    script = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'python.exe','pythonw.exe','cmd.exe' } | "
               "ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.CreationDate.ToString('s') }")
-    out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
+    out = run_tool(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
     return [line.split("|") for line in out.splitlines() if line.count("|") == 3]
 
 
@@ -84,10 +98,10 @@ def kill_leftovers(root: Path) -> None:
     """Kill only processes whose command line points into this run's own temp directory (never by a remembered PID)."""
     script = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'powershell.exe' -and $_.CommandLine -and $_.CommandLine.Contains('"
               + str(root).replace("'", "''") + "') -and $_.ProcessId -ne $PID } | ForEach-Object { $_.ProcessId }")
-    out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
+    out = run_tool(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
     for line in out.split():
         if line.isdigit() and int(line) != os.getpid():
-            subprocess.run(["taskkill", "/F", "/T", "/PID", line], check=False, capture_output=True)
+            run_tool(["taskkill", "/F", "/T", "/PID", line], check=False, capture_output=True)
 
 
 def sweep_stale_temp_tasks() -> list[str]:
@@ -138,12 +152,18 @@ def run() -> int:
         )
         (project / suffix / ".stagemesh").mkdir(parents=True, exist_ok=True)
         created.append(scheduler)
-        handle = scheduler.ensure([sys.executable, str(worker), str(log), str(seconds)], 600)
+        handle = scheduler.ensure([windowless_python(), str(worker), str(log), str(seconds)], 600)
         record("created", task=handle, python=sys.version.split()[0], limit_seconds=limit)
         return scheduler, log
 
     try:
-        record("environment", platform=sys.platform, python=sys.version, executable=sys.executable)
+        record(
+            "environment",
+            platform=sys.platform,
+            python=sys.version,
+            executable=sys.executable,
+            scheduler_python=windowless_python(),
+        )
         scheduler, log = install("main", seconds=300, limit=7200)
         name = scheduler.handle
         check(scheduler.exists(name), "registered_task_exists", task=name)
@@ -178,50 +198,48 @@ def run() -> int:
             schtasks("/End", "/TN", name)
             kill_leftovers(root)
 
-        # Controlled variants: how the action is launched decides whether Task Scheduler's end/limit reaches the tree.
-        for variant in ("direct", "cmd"):
-            for kind, limit_seconds in (("end", 7200), ("limit", 60)):
-                label = f"{variant}-{kind}"
-                task_log = root / f"{label}.log"
-                scheduler = WindowsDriverScheduler(
-                    project / label, task_name=f"StageMesh\\accept-{uuid.uuid4().hex[:10]}", execution_limit_seconds=limit_seconds
-                )
-                (project / label / ".stagemesh").mkdir(parents=True, exist_ok=True)
-                created.append(scheduler)
-                worker_argv = [sys.executable, str(worker), str(task_log), "900"]
-                if variant == "direct":  # the production path: the tick (here a stand-in worker) is the task's own process
-                    scheduler.ensure(worker_argv, 600, limit_seconds)
-                    created_rc = 0
-                else:  # comparison only: the pre-XML shape, where cmd.exe is the task's process
-                    launcher = root / f"{label}.cmd"
-                    launcher.write_text(f"@echo off\r\n{subprocess.list2cmdline(worker_argv)}\r\n", encoding="utf-8")
-                    xml = build_task_xml(launcher, 600, user_id=current_user_id(), start=datetime.now().replace(microsecond=0),
-                                         execution_limit_seconds=limit_seconds)
-                    definition = root / f"{label}.xml"
-                    definition.write_text(xml, encoding="utf-16")
-                    created_rc = schtasks("/Create", "/TN", scheduler.handle, "/XML", str(definition), "/F").returncode
-                record("variant_created", variant=label, task=scheduler.handle, rc=created_rc)
-                schtasks("/Run", "/TN", scheduler.handle)
-                pids = wait_for(lambda: started_pids(task_log), 120)
-                if not pids:
-                    check(False, f"{label}_started")
-                    continue
-                worker_pid, grandchild_pid = pids[0]
-                before = python_and_cmd_table()
-                cmd_pid = next((int(r[1]) for r in before if int(r[0]) == worker_pid), None) if variant == "cmd" else None
-                primary = (lambda: not alive(cmd_pid)) if variant == "cmd" and cmd_pid else (lambda: not alive(worker_pid))
-                began = time.monotonic()
-                if kind == "end":
-                    schtasks("/End", "/TN", scheduler.handle)
-                gone = wait_for(primary, 40 if kind == "end" else 330, interval=2)
-                # Demonstrated on real Windows: Task Scheduler's End and ExecutionTimeLimit terminate ONLY the task's own
-                # process (the action), never its descendants. Descendant cleanup is therefore the driver's job.
-                check(bool(gone), f"{label}_terminates_the_task_primary_process", primary=cmd_pid or worker_pid,
-                      seconds=round(time.monotonic() - began, 1), status=task_state(scheduler.handle))
-                record(f"{label}_descendants_after_scheduler_termination", worker_alive=alive(worker_pid),
-                       grandchild_alive=alive(grandchild_pid), table_before=before, table_after=python_and_cmd_table())
+        # Exercise only the windowless production action. The historical cmd.exe comparison opened a console and is
+        # already preserved in prior evidence; it is not a safe native acceptance workload on an operator's desktop.
+        for kind, limit_seconds in (("end", 7200), ("limit", 60)):
+            label = f"direct-{kind}"
+            task_log = root / f"{label}.log"
+            scheduler = WindowsDriverScheduler(
+                project / label,
+                task_name=f"StageMesh\\accept-{uuid.uuid4().hex[:10]}",
+                execution_limit_seconds=limit_seconds,
+            )
+            (project / label / ".stagemesh").mkdir(parents=True, exist_ok=True)
+            created.append(scheduler)
+            scheduler.ensure([windowless_python(), str(worker), str(task_log), "900"], 600, limit_seconds)
+            record("variant_created", variant=label, task=scheduler.handle, rc=0)
+            schtasks("/Run", "/TN", scheduler.handle)
+            pids = wait_for(lambda: started_pids(task_log), 120)
+            if not pids:
+                check(False, f"{label}_started")
+                continue
+            worker_pid, grandchild_pid = pids[0]
+            before = python_and_cmd_table()
+            began = time.monotonic()
+            if kind == "end":
                 schtasks("/End", "/TN", scheduler.handle)
-                kill_leftovers(root)
+            gone = wait_for(lambda: not alive(worker_pid), 40 if kind == "end" else 330, interval=2)
+            # Task Scheduler ends only the action process, not its descendants. Descendant cleanup is the driver's job.
+            check(
+                bool(gone),
+                f"{label}_terminates_the_task_primary_process",
+                primary=worker_pid,
+                seconds=round(time.monotonic() - began, 1),
+                status=task_state(scheduler.handle),
+            )
+            record(
+                f"{label}_descendants_after_scheduler_termination",
+                worker_alive=alive(worker_pid),
+                grandchild_alive=alive(grandchild_pid),
+                table_before=before,
+                table_after=python_and_cmd_table(),
+            )
+            schtasks("/End", "/TN", scheduler.handle)
+            kill_leftovers(root)
     except Exception as exc:  # recorded, never raised past cleanup
         record("unexpected_error", error=repr(exc))
         failures.append("unexpected_error")

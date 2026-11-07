@@ -8,12 +8,16 @@ from pathlib import Path
 
 out = Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from stagemesh.execution import popen_session_kwargs, kill_process_tree  # noqa: E402
+from stagemesh.execution import kill_process_tree, popen_descendant_kwargs, popen_session_kwargs  # noqa: E402
+
+
+def run_tool(argv, **kwargs):
+    return subprocess.run(argv, **kwargs, **popen_descendant_kwargs())
 
 def table():
     ps = ("Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CreationDate"
           " | ConvertTo-Json -Compress")
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=60)
+    r = run_tool(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=60)
     return {p["ProcessId"]: p for p in json.loads(r.stdout)}
 
 def descendants(tbl, root):
@@ -28,7 +32,8 @@ def descendants(tbl, root):
     return seen
 
 TREE = ("import pathlib, subprocess, sys, time\n"
-        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "from stagemesh.execution import popen_descendant_kwargs\n"
+        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], **popen_descendant_kwargs())\n"
         "pathlib.Path(sys.argv[1]).write_text(str(c.pid))\n"
         "time.sleep(120)\n")
 
@@ -53,7 +58,7 @@ def experiment(name, exe, strategy):
     if strategy == "kill_process_tree":
         rec["kill_returned"] = kill_process_tree(proc)
     else:
-        r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, text=True)
+        r = run_tool(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, text=True)
         rec["taskkill"] = {"rc": r.returncode, "out": r.stdout[-400:], "err": r.stderr[-400:]}
     rec["kill_seconds"] = round(time.monotonic() - t0, 3)
     time.sleep(2)
@@ -61,7 +66,7 @@ def experiment(name, exe, strategy):
     rec["survivors"] = [(p, after[p]["Name"], after[p]["ParentProcessId"]) for p in tree_before + [proc.pid] if p in after]
     rec["grandchild_alive_after_2s"] = gc in after
     for p in rec["survivors"]:  # clean up only processes this experiment created
-        subprocess.run(["taskkill", "/F", "/PID", str(p[0])], capture_output=True)
+        run_tool(["taskkill", "/F", "/PID", str(p[0])], capture_output=True)
     return rec
 
 results = {"python": sys.executable, "version": sys.version, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "experiments": []}

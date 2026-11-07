@@ -500,6 +500,23 @@ def test_driver_scheduler_is_project_owned_idempotent_and_reversible(project: Pa
         scheduler.remove("StageMesh\\driver-not-ours")
 
 
+def test_scheduler_helper_commands_use_windowless_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    startup = object()
+    captured: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(driver_scheduler, "popen_descendant_kwargs", lambda: {"startupinfo": startup})
+    monkeypatch.setattr(driver_scheduler.subprocess, "run", run)
+
+    result = driver_scheduler._run(["schtasks", "/Query"])
+
+    assert result.returncode == 0
+    assert captured["startupinfo"] is startup
+
+
 def test_scheduler_query_errors_fail_closed_and_cadence_is_exact(project: Path) -> None:
     denied = lambda argv: subprocess.CompletedProcess(argv, 1, "", "ERROR: Access is denied.")
     scheduler = WindowsDriverScheduler(project, runner=denied)
