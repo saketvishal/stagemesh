@@ -34,10 +34,13 @@ def _schema_status(current: int) -> str:
 
 
 def _providers(config: StageMeshConfig) -> tuple[list[dict[str, Any]], int]:
-    names = sorted(set(BUILTIN_PROVIDERS) | set(config.provider_commands) | set(config.provider_specs))
+    names = set(config.provider_commands) | set(config.provider_specs)
+    if not config.providers_explicit:
+        names.update(BUILTIN_PROVIDERS)
+    ordered_names = sorted(names)
     authorized = set(config.authorized_providers or ())
     rows = []
-    for name in names[:PROVIDER_LIMIT]:
+    for name in ordered_names[:PROVIDER_LIMIT]:
         spec = config.provider_specs.get(name)
         rows.append(
             {
@@ -46,14 +49,14 @@ def _providers(config: StageMeshConfig) -> tuple[list[dict[str, Any]], int]:
                 "command_source": (
                     "PROJECT_OR_ENV"
                     if name in config.provider_commands
-                    else "BUILTIN"
-                    if name in BUILTIN_PROVIDERS
+                    else "LEGACY_DEFAULT"
+                    if not config.providers_explicit and name in BUILTIN_PROVIDERS
                     else "UNAVAILABLE"
                 ),
                 "authorized_for_unattended": name in authorized,
             }
         )
-    return rows, len(names)
+    return rows, len(ordered_names)
 
 
 def _runtime() -> dict[str, Any]:

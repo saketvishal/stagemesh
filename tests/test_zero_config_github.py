@@ -290,9 +290,10 @@ def test_init_preserves_explicit_disabled_or_local_sources(tmp_path: Path, sourc
     path = project / ".stagemesh/config.json"
     path.parent.mkdir()
     path.write_text(json.dumps({"task_sources": sources}), encoding="utf-8")
-    before = path.read_bytes()
     assert cli_module.main(["--project", str(project), "init"]) == 0
-    assert path.read_bytes() == before
+    initialized = json.loads(path.read_text(encoding="utf-8"))
+    assert initialized["task_sources"] == sources
+    assert "providers" in initialized  # provider initialization is independent of task-source policy
 
 
 @pytest.mark.parametrize("value", [False, 0, [], ""])

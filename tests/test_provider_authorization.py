@@ -192,7 +192,10 @@ def test_unpinned_codex_model_blocks_unattended_startup(tmp_path, monkeypatch):
     (project / ".stagemesh" / "config.json").write_text(
         json.dumps({
             "authorization": {"unattended_providers": ["codex", "claude"]},
-            "providers": {"codex": {"command": "codex exec --model known-good --sandbox workspace-write", "capabilities": ["IMPLEMENT", "REVIEW"]}},
+            "providers": {
+                "codex": {"command": "codex exec --model known-good --sandbox workspace-write", "capabilities": ["IMPLEMENT", "REVIEW"]},
+                "claude": "claude -p",
+            },
         }),
         encoding="utf-8",
     )
@@ -204,7 +207,10 @@ def test_provider_authorization_report_lists_only_authorized_providers(tmp_path,
 
     project = project_with(tmp_path, {
         "authorization": {"unattended_providers": ["codex", "claude"]},
-        "providers": {"codex": {"command": "codex exec --model known-good", "capabilities": ["IMPLEMENT", "REVIEW"]}},
+        "providers": {
+            "codex": {"command": "codex exec --model known-good", "capabilities": ["IMPLEMENT", "REVIEW"]},
+            "claude": "claude -p",
+        },
     })
     assert main(["--project", str(project), "provider-authorization"]) == 0
     report = json.loads(capsys.readouterr().out)
@@ -275,7 +281,9 @@ def test_live_smoke_of_an_authorized_adapter_works_unattended_and_a_denied_one_d
 
 
 def test_bare_name_resolving_into_the_project_or_via_relative_path_is_refused(tmp_path, monkeypatch):
-    import os, stat
+    import os
+    import stat
+
     from stagemesh import provider_authorization as pa
 
     proj = tmp_path / "proj"

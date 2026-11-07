@@ -53,14 +53,17 @@ def _command_discovery(adapter: RuntimeCommandAdapter) -> str:
 
 
 def _configured_names(config: StageMeshConfig) -> set[str]:
-    return set(BUILTIN_PROVIDERS) | set(config.provider_commands) | set(config.provider_specs)
+    names = set(config.provider_commands) | set(config.provider_specs)
+    if not config.providers_explicit:
+        names.update(BUILTIN_PROVIDERS)
+    return names
 
 
 def _source(config: StageMeshConfig, name: str) -> str:
     if name in config.provider_commands:
         return "PROJECT_OR_ENV"
-    if name in BUILTIN_PROVIDERS:
-        return "BUILTIN"
+    if not config.providers_explicit and name in BUILTIN_PROVIDERS:
+        return "LEGACY_DEFAULT"
     return "RECORDED_ONLY"
 
 

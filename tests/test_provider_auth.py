@@ -244,5 +244,6 @@ def test_driver_authentication_includes_the_distinct_research_executable(tmp_pat
     assert _real_provider_auth_blockers(tmp_path) == []
     assert seen["executables"]["claude"] == ("C:/coding/claude.exe", "C:/research/claude.exe")
     config["research"] = {"provider": "grok", "command": "C:/research/grok.exe"}
+    config["providers"]["grok"] = "C:/research/grok.exe"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     assert any("research provider grok" in blocker for blocker in _real_provider_auth_blockers(tmp_path))

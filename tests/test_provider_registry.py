@@ -63,14 +63,13 @@ def test_object_form_providers_and_policy_are_parsed(tmp_path: Path) -> None:
     assert config.provider_selection_policy == "weighted" and config.provider_weights == {"codex": 2}
 
 
-def test_adapters_carry_declared_capabilities_and_builtins_stay_registered(tmp_path: Path) -> None:
+def test_explicit_registry_carries_declared_capabilities_without_injecting_catalog_providers(tmp_path: Path) -> None:
     project = _config(
         tmp_path,
         {"providers": {"my-agent": {"command": "my-agent run", "capabilities": ["IMPLEMENT"]}, "reviewer-bot": {"command": "rb review", "capabilities": ["REVIEW"]}}},
     )
     adapters = {a.name: a for a in adapters_from_config(load_config(project))}
-    assert {"codex", "claude", "grok"} <= set(adapters)  # built-in defaults need no config
-    assert {"code", "review"} <= adapters["codex"].capabilities
+    assert set(adapters) == {"my-agent", "reviewer-bot"}
     assert "code" in adapters["my-agent"].capabilities and "review" not in adapters["my-agent"].capabilities
     assert "review" in adapters["reviewer-bot"].capabilities and "code" not in adapters["reviewer-bot"].capabilities
     assert adapters["my-agent"].command == ("my-agent", "run")
@@ -100,7 +99,10 @@ def test_invalid_provider_and_policy_config_is_rejected(tmp_path: Path, data: di
 
 
 def test_env_command_overrides_work_for_builtins_and_custom_providers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    project = _config(tmp_path, {"providers": {"my-agent": {"command": "my-agent run"}}})
+    project = _config(
+        tmp_path,
+        {"providers": {"codex": {"command": "codex exec"}, "my-agent": {"command": "my-agent run"}}},
+    )
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", "codex --override")
     monkeypatch.setenv("STAGEMESH_MY_AGENT_CMD", "other-agent go")
     commands = load_config(project).provider_commands
@@ -164,12 +166,12 @@ def test_capacity_text_shows_policy_pools_and_each_provider_once(tmp_path: Path,
     assert [line for line in lines if line.startswith("active provider profile:")] == ["active provider profile: balanced"]
     assert [line for line in lines if line.startswith("selection policy:")] == ["selection policy: least_recently_used"]
     assert [line for line in lines if line.strip().startswith("pool:")] == [
-        "  pool: codex, grok, claude, agy",
-        "  pool: claude, grok, agy, codex",
+        "  pool: claude",
+        "  pool: claude",
     ]
     assert len([line for line in lines if line.strip().startswith("most recent use:")]) == 2
-    for name in ("codex", "grok", "claude", "agy"):
-        assert len([line for line in lines if line.startswith(f"provider {name} ")]) == 1
+    assert len([line for line in lines if line.startswith("provider claude ")]) == 1
+    assert not any(line.startswith("provider codex ") for line in lines)
     claude_line = next(line for line in lines if line.startswith("provider claude "))
     assert "max concurrency 3" in claude_line and "live check" in claude_line and "command " in claude_line
     assert not any(line.startswith("chosen:") for line in lines)
@@ -254,11 +256,11 @@ def test_custom_providers_implement_and_review_with_clear_logging(tmp_path: Path
     assert "final implementation provider: my-agent (custom provider)" in text
 
 
-def test_builtin_default_providers_are_labelled_as_such(tmp_path: Path) -> None:
+def test_catalog_providers_are_labelled_as_such(tmp_path: Path) -> None:
     rig = Rig(tmp_path, {"codex": "ok", "extra-agent": "ok"}, pools={IMPLEMENT: ("codex", "extra-agent"), REVIEW: ("extra-agent",)})
     rig.tick(2)
-    assert "selected implementation provider codex (built-in default provider)" in rig.text()
-    assert "extra-agent (custom;" in rig.text() and "codex (built-in;" in rig.text()
+    assert "selected implementation provider codex (catalog provider)" in rig.text()
+    assert "extra-agent (custom;" in rig.text() and "codex (catalog;" in rig.text()
 
 
 def test_provider_without_the_stage_capability_is_skipped(tmp_path: Path) -> None:

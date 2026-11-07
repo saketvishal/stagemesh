@@ -200,7 +200,7 @@ def test_provider_status_bounds_rows_and_reports_truncation(
     status, body, _ = request(root, db)
 
     assert status == 200
-    assert body["provider_total"] == 109
+    assert body["provider_total"] == 105
     assert body["provider_total_kind"] == "EXACT"
     assert body["provider_limit"] == 100
     assert body["truncated"] is True

@@ -18,7 +18,7 @@ from .autonomy.destructive_git import execute_preserved_cleanup
 from .autonomy.gitfacts import GitFacts
 from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
-from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
+from .config import SELECTION_POLICIES
 from .contract_binding import bound_contract_from_record
 from .contracts import candidate_workspace, run_gate
 from .domain import ExecutionKind, ExecutionStatus
@@ -27,6 +27,7 @@ from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .git import GitError
 from .persistence import Store
 from .provider_acceptance import live_provider_readiness
+from .provider_catalog import catalog_names
 from .provider_cooldown import (
     DEFAULT_FAILURE_COOLDOWN_SECONDS,
     DEFAULT_QUOTA_COOLDOWN_SECONDS,
@@ -58,7 +59,7 @@ from .workspaces import (
 IMPLEMENT = "IMPLEMENT"
 REVIEW = "REVIEW"
 STAGE_CAPABILITY = {IMPLEMENT: "code", REVIEW: "review"}
-DEFAULT_PROVIDER_ORDER = BUILTIN_PROVIDERS  # built-ins sort ahead of custom providers when no priority says otherwise
+DEFAULT_PROVIDER_ORDER = catalog_names()  # catalog rank only tie-breaks project-registered providers
 DEFAULT_PRIORITY = 100
 PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
@@ -484,7 +485,7 @@ class ProviderPool:
         )
 
     def kind(self, name: str) -> str:
-        return "built-in default provider" if name in BUILTIN_PROVIDERS else "custom provider"
+        return "catalog provider" if name in DEFAULT_PROVIDER_ORDER else "custom provider"
 
     def registry_line(self) -> str:
         stage_of = {"code": "IMPLEMENT", "review": "REVIEW"}
@@ -492,7 +493,7 @@ class ProviderPool:
         for name, adapter in self.adapters.items():
             stages = "+".join(sorted(stage_of[c] for c in adapter.capabilities if c in stage_of)) or "none"
             entries.append(
-                f"{name} ({'built-in' if name in BUILTIN_PROVIDERS else 'custom'}; {stages}; "
+                f"{name} ({'catalog' if name in DEFAULT_PROVIDER_ORDER else 'custom'}; {stages}; "
                 f"priority {self.priorities.get(name, DEFAULT_PRIORITY)}; weight {self.weights.get(name, 1)})"
             )
         return ", ".join(entries) or "(empty)"
