@@ -24,19 +24,26 @@ prove complete affected-caller coverage: agents must inspect direct callers and
 reviewers must check the selected tests. Documentation-only paths do not trigger
 application-test discovery. Integration tests are not guessed from source names.
 
-When the validation plan has a complete exact match in the audited component map,
-StageMesh also adds separate root-level pytest gates for its direct and dependent
-test targets. Direct targets are removed from the dependent list, the contract's
-declared root pytest interpreter, environment and timeout are reused, and existing
-full-suite or exact-target gates suppress redundant additions. An unknown or mixed
-map adds nothing and retains the broader declared policy. Evidence reports
-conventional and audited-component discoveries separately; both remain additive,
-not proof that required gates or independent review can be skipped.
+When the validation plan has a complete exact match in StageMesh's immutable
+audited component catalog, StageMesh also adds separate root-level pytest gates
+for its direct and dependent test targets. Direct targets are removed from the
+executed dependent gate, the contract's declared root pytest interpreter,
+environment and timeout are reused, and existing full-suite or exact-target gates
+suppress redundant additions. A compatible exact operator, capability, or
+task-source scope may record that another full regression is not required; the
+focused gates remain additive and every declared gate and independent-review
+requirement remains authoritative. Cross-cutting catalog entries still require a
+full regression. Unknown, incomplete, or incompatible mixed scope adds no inferred
+gates and fails broad.
 
-This runtime behavior is generic: there are no client names, paths or suites in
-the selection code. Clients receive it when their installed StageMesh package is
-updated, not merely because this repository's profile changed. Running processes
-must finish before a shared installation is upgraded.
+The plan records the SHA-256 catalog fingerprint. This binds the component names
+and direct/dependent targets to the policy that selected them; it is not a digest
+of test results. The conventional nearby-test discovery remains generic: there
+are no client names, paths or suites in that selection code. The audited component catalog is
+used only when StageMesh develops StageMesh. Clients receive the generic behavior
+when their installed StageMesh package is updated, not merely because this
+repository's profile changed. Running processes must finish before a shared
+installation is upgraded.
 
 ## Invariants Are Not All Commands
 
@@ -96,12 +103,13 @@ unrelated behavior, and failed checks must not be removed to make work pass.
 ## StageMesh Hosted CI Plan
 
 StageMesh's own protected `windows` and `linux` jobs consume the separate
-`stagemesh.ci-validation/3` plan. This is not a generic client-repository selector.
+`stagemesh.ci-validation/4` plan. This is not a generic client-repository selector.
 It recognizes only exact audited StageMesh roots for the read-only operator,
 skills/capability, and task-source families. The operator mode retains its fixed
 cross-platform browser and installer regression. Component mode writes a bounded
 JSON plan, then a separate runner validates every pytest target against immutable
-repository policy before executing an argument list without a shell. Both current
+repository policy before executing an argument list without a shell. The runner
+also rejects a missing or stale selector-policy fingerprint. Both current
 component families require Windows and Linux. The planner itself remains data only;
 it does not execute tests, providers or network calls.
 

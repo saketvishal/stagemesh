@@ -5,12 +5,14 @@ implementation pass; an empty log does not establish an environment fault or cod
 speculative implementation retry. Structured collection/setup/service evidence retains its specific diagnosis, while evidence that
 tests were running keeps the existing bounded remediation policy. Independent review of this policy change is required before release.
 
-This explicit map covers six StageMesh boundaries: candidate contract binding,
-exact integration evidence, planning, validation execution, review and the
-read-only operator surface. It is a bounded contribution to #71; **#71 remains
-open**. It is a review
-aid, not a global test selector or proof of complete coverage. Use it with
-[focused validation](focused-validation.md) and the approved task contract.
+The immutable catalog covers exact roots for candidate contract binding, exact
+integration evidence, planning, validation execution, review, the read-only
+operator surface, capabilities and task sources. It is the single component/test
+policy consumed by both task-level validation and hosted CI. It remains a bounded
+selector rather than a call-graph inference engine: shared lifecycle, persistence,
+schema, authorization, security and unknown roots deliberately require broad
+validation. Use it with [focused validation](focused-validation.md) and the
+approved task contract.
 
 ## Component map
 
@@ -64,6 +66,7 @@ one boundary. Listing them does not claim they were all run for this slice.
 | `dependent_test_targets` | Repository-relative pytest targets from the matching dependent-check rows above. |
 | `full_regression_required` | Conservative policy decision for the exact scope. |
 | `full_regression_reasons` | Stable bounded rationale for either decision. A `false` decision still explains the applicable docs/config-only policy. |
+| `component_policy_fingerprint` | SHA-256 identity of the exact audited roots, component names, platform needs and direct/dependent test targets. |
 
 Each array is sorted and de-duplicated independently. A target can appear in both
 test arrays when it has both roles across affected components. Matching uses only
@@ -111,22 +114,23 @@ requirements and candidate identity remain unchanged.
 
 ## Task-contract full-regression decision boundary
 
-The decision is deliberately stricter than the five-row map. Every mapped root is
-a core validation/review boundary and therefore still requires full regression.
-An unmapped localized executable path, a mixed/unknown core scope, an executable
-provider/configuration source, an empty scope, public API impact, dependency impact,
-or an explicit escalation also requires it. Changes to `validation_plan.py` record
-the additional reason that the test-selection policy itself changed.
-
-Only documentation-only and non-executable configuration-only scopes currently
-produce `false`, and only as plan evidence. Declared gates are never removed by this
+Every validation-core root remains a cross-cutting boundary and therefore still
+requires full regression. Exact compatible operator, capability and task-source
+roots may produce `false` only when every executable path is in the shared catalog
+and all direct/dependent contracts are available. Operator roots are exclusive
+from other fast-path families because their browser/installer contract differs.
+An unmapped localized executable path, incompatible mix, executable provider/config
+source, empty scope, public API impact, dependency impact or explicit escalation
+requires full regression. Changes to either planner, the catalog, its acceptance
+test or the runner force full regression. Declared gates are never removed by this
 decision.
 
 ## Hosted-CI decision boundary
 
-The separate `stagemesh.ci-validation/3` planner consumes exact changed paths. It
-recognizes only 16 explicitly listed roots: the seven operator roots above, eight
-skills/capability roots, and `task_sources.py`. Each family owns immutable direct
+The `stagemesh.ci-validation/4` planner consumes exact changed paths from the same
+catalog. Its fast path recognizes only 16 explicitly listed roots: the seven
+operator roots above, eight skills/capability roots, and `task_sources.py`. Each
+family owns immutable direct
 and dependent pytest targets; documentation is neutral support. Ordering, case and
 Windows separators normalize deterministically. Compatible capability/task-source
 roots union their targets; the browser/installer-sensitive operator family does not
@@ -145,9 +149,10 @@ count, extension alone or arbitrary directory membership.
 An `operator` plan requires both protected Windows and Linux jobs, the real-browser
 test and Windows installer/timezone acceptance. A `component` plan also requires
 both operating systems for the currently audited skills/capability and task-source
-families. The planner writes versioned JSON; a separate runner rejects symlinks,
-oversized/malformed plans, unsupported contracts/modes/OS values, empty direct
-targets, pytest options, traversal, shell text, and every target outside the immutable
+families. The planner writes versioned JSON with a selector-policy fingerprint;
+a separate runner rejects symlinks, oversized/malformed plans, unsupported
+contracts/modes/OS values, empty direct targets, missing/stale policy identity,
+pytest options, traversal, shell text, and every target outside the immutable
 component allowlist. It launches pytest with an argument list, never interpolated
 shell text. A `docs` plan records portable
 policy checks and explicitly sets `runtime_coverage=false`. A post-merge `smoke`
@@ -167,33 +172,25 @@ workflow, selection, dependency, schema, security, packaging, or other protected
 boundaries select `full`. Scheduled and manual runs always select `full`, so
 post-merge smoke evidence never replaces the authoritative recurring regression.
 
-## Measured boundary and follow-up
+## Measured boundary and claim limit
 
-This audit records **12 exact source/asset roots** across six boundaries, their
-immediate contract/evidence edges, and **31 distinct test files** in the table.
-These counts measure the documented slice, not transitive dependency coverage,
-coverage percentage or speedup.
-The added planner regressions exercise all three roots with four declaration
-states, allowed-scope fallback, concrete changed files and Windows separators;
-they also cover explicit unknown escalation and unrelated client/helper paths.
-Evidence regressions additionally cover exact target lists, deterministic unions,
-changed-file precedence, mixed and unmapped scope, and persistence through Validator.
+The shared catalog records **21 exact source/asset roots**, **18 stable component
+identities**, **four families**, and **50 distinct direct/dependent test files**.
+Sixteen roots are eligible for a focused hosted path; the five validation-core
+roots are evidence-only mappings that always retain full regression. The catalog
+refactor removes the former separate local and hosted component maps, so one
+fingerprint now identifies the roots and test contracts used by both planners.
 
-Still unmeasured: the full coordinator call graph, dynamic adapter behavior, the
-shared CLI call graph, all storage/schema dependencies, installer implementation,
-and whether these starting test contracts cover every possible change in each
-root. No repository-wide audit, global heuristic selector or claimed speedup is
-included. Hosted results remain candidate-specific evidence, not proof that the
-map is complete.
+Independent acceptance covers every fast root, deterministic compatible unions,
+the exclusive operator boundary, cross-cutting full-only roots, unknown/mixed
+scope, Windows path normalization, policy serialization, missing/stale fingerprint
+rejection, target allowlisting and selector self-change escalation. These checks
+prevent a new or renamed source path from silently acquiring narrow coverage.
 
-Follow-up for #71:
-
-1. Review these edges and test contracts against a concrete future change; record
-   missing dependencies and unresolved impact before proposing narrower gates.
-2. Audit one additional boundary under separately approved scope, especially
-   coordinator evidence admission or shared persistence before claiming transitive coverage.
-3. Measure gate durations and failures for exact candidates, then propose reviewed
-   focused contracts only where evidence establishes a safe boundary.
-4. Keep #71 open until its remaining scope is separately delivered. StageMesh owns
-   candidate creation, independent review and PR/integration. This worktree change
-   neither upgrades the stable runtime nor supplies landing evidence.
+The full coordinator call graph, dynamic adapter behavior, shared CLI call graph,
+storage/schema internals and installer implementation remain intentionally broad.
+They are not inferred as independently testable: their exact and name-based policy
+entries select full regression. A future fast path for one of those areas requires
+new dependency evidence and reviewed direct/dependent contracts; absence from the
+catalog is never evidence that tests can be skipped. Hosted timings and results
+remain exact-candidate evidence rather than a general speedup claim.

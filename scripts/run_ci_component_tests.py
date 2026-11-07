@@ -15,6 +15,7 @@ from stagemesh.ci_validation_plan import (
     CI_VALIDATION_CONTRACT,
     COMPONENT,
     audited_pytest_targets,
+    ci_validation_policy_fingerprint,
 )
 
 MAX_PLAN_BYTES = 1024 * 1024
@@ -32,6 +33,8 @@ def load_targets(path: Path, os_name: str) -> tuple[str, ...]:
         raise TypeError("CI plan root must be an object")
     if payload.get("contract") != CI_VALIDATION_CONTRACT:
         raise ValueError("CI plan contract is unsupported")
+    if payload.get("policy_fingerprint") != ci_validation_policy_fingerprint():
+        raise ValueError("CI plan policy fingerprint is stale or invalid")
     if payload.get("mode") != COMPONENT:
         raise ValueError("CI component runner requires component mode")
     required_os = payload.get("required_os")
