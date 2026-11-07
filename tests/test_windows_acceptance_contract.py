@@ -45,3 +45,21 @@ def test_native_acceptance_retains_driver_reports_before_disposable_cleanup() ->
     assert "project\\.stagemesh\\driver\\reports" in script
     assert "Join-Path $evidence 'driver-reports'" in script
     assert "'--initial-only'" not in script
+
+
+def test_native_scheduler_acceptance_uses_only_windowless_process_helpers() -> None:
+    script = (WINDOWS_ACCEPTANCE / "scheduler_acceptance.py").read_text(encoding="utf-8")
+
+    assert script.count("subprocess.run(") == 1
+    assert "**popen_descendant_kwargs()" in script
+    assert "pythonw.exe" in script
+    assert 'for variant in ("direct", "cmd")' not in script
+
+
+def test_windows_process_diagnostics_hide_every_spawned_helper() -> None:
+    killtree = (WINDOWS_ACCEPTANCE / "diag-killtree.py").read_text(encoding="utf-8")
+    timeout = (WINDOWS_ACCEPTANCE / "diag-timeout.py").read_text(encoding="utf-8")
+
+    assert killtree.count("subprocess.run(") == 1
+    assert killtree.count("**popen_descendant_kwargs()") >= 2
+    assert "**popen_descendant_kwargs()" in timeout

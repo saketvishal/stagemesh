@@ -45,6 +45,37 @@ def test_windows_background_processes_never_create_a_console(
     assert startup.wShowWindow == 0
 
 
+def test_windows_tree_cleanup_command_is_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh import execution
+
+    class StartupInfo:
+        dwFlags = 0
+        wShowWindow = None
+
+    class Process:
+        pid = 12345
+
+        def kill(self) -> None:
+            pass
+
+    captured: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(execution.sys, "platform", "win32")
+    monkeypatch.setattr(execution.subprocess, "STARTUPINFO", StartupInfo, raising=False)
+    monkeypatch.setattr(execution.subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+    monkeypatch.setattr(execution.subprocess, "SW_HIDE", 0, raising=False)
+    monkeypatch.setattr(execution.subprocess, "run", run)
+
+    assert execution.kill_process_tree(Process())
+    startup = captured["startupinfo"]
+    assert startup.dwFlags & 1
+    assert startup.wShowWindow == 0
+
+
 def _setup(tmp_path: Path, contract: dict[str, object] | None = None) -> tuple[Path, Store]:
     project = tmp_path / "repo"
     project.mkdir()

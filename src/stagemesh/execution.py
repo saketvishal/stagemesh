@@ -183,6 +183,7 @@ def kill_process_tree(proc: subprocess.Popen[str]) -> bool:
                 capture_output=True,
                 check=False,
                 timeout=5,
+                **popen_descendant_kwargs(),
             )
             confirmed = result.returncode == 0
         except subprocess.TimeoutExpired:
