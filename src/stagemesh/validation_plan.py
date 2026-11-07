@@ -3,10 +3,11 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .contracts import ChangeContract, GateCommand, declarative_invariants, invariant_gates
+from .validation_components import component_catalog_fingerprint, resolve_component_impact
 
 CONFIG_OR_PROVIDER_COMMAND = "CONFIG_OR_PROVIDER_COMMAND"
 DOCS_ONLY = "DOCS_ONLY"
@@ -79,56 +80,6 @@ _FRONTEND_PATTERNS = (
 )
 _BROWSER_E2E_SCRIPTS = ("e2e:ui-gate", "test:e2e", "e2e", "playwright")
 
-# Bounded evidence from docs/validation-components.md, never executable gate selection.
-# Each exact source root maps to (component, direct pytest targets, dependent targets).
-_AUDITED_COMPONENTS = {
-    "src/stagemesh/contract_binding.py": (
-        "candidate_contract_binding",
-        (
-            "tests/test_candidate_binding_hardening.py",
-            "tests/test_contract_admission.py",
-            "tests/test_contract_fail_closed.py",
-        ),
-        (
-            "tests/test_candidate_isolation_integration.py",
-            "tests/test_completion_integrity.py",
-            "tests/test_task_recovery.py",
-        ),
-    ),
-    "src/stagemesh/integration.py": (
-        "exact_integration_evidence",
-        (
-            "tests/test_candidate_isolation_integration.py",
-            "tests/test_integration_recovery.py",
-            "tests/test_review_reliability.py",
-        ),
-        (
-            "tests/test_completion_integrity.py",
-            "tests/test_landing_recovery.py",
-            "tests/test_reliable_delivery_end_to_end.py",
-        ),
-    ),
-    "src/stagemesh/validation_plan.py": (
-        "planning",
-        ("tests/test_validation_plan.py",),
-        ("tests/test_contract_fail_closed.py", "tests/test_invariant_semantics.py",
-         "tests/test_stagemesh_validation_profile.py"),
-    ),
-    "src/stagemesh/validation.py": (
-        "validation_execution",
-        ("tests/test_contract_fail_closed.py", "tests/test_validation_plan.py"),
-        ("tests/test_builtin_execution_ownership.py", "tests/test_candidate_binding_hardening.py",
-         "tests/test_invariant_semantics.py"),
-    ),
-    "src/stagemesh/review.py": (
-        "review",
-        ("tests/test_review_reliability.py", "tests/test_review_terminalization.py"),
-        ("tests/test_autonomy_review.py", "tests/test_builtin_execution_ownership.py",
-         "tests/test_invariant_semantics.py"),
-    ),
-}
-
-
 @dataclass(frozen=True)
 class ValidationPlan:
     classification: str
@@ -141,6 +92,7 @@ class ValidationPlan:
     dependent_test_targets: tuple[str, ...] = ()
     full_regression_required: bool = False
     full_regression_reasons: tuple[str, ...] = ()
+    component_policy_fingerprint: str = field(default_factory=component_catalog_fingerprint)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -154,6 +106,7 @@ class ValidationPlan:
             "dependent_test_targets": list(self.dependent_test_targets),
             "full_regression_required": self.full_regression_required,
             "full_regression_reasons": list(self.full_regression_reasons),
+            "component_policy_fingerprint": self.component_policy_fingerprint,
         }
 
     @property
@@ -168,21 +121,24 @@ class ValidationPlan:
 def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, ...] = ()) -> ValidationPlan:
     classification = _classification(contract, changed_files)
     reasons = _escalation_reasons(contract, changed_files, classification)
+    scope = tuple(
+        path.replace("\\", "/").casefold()
+        for path in (changed_files or contract.allowed_files)
+    )
+    impact = resolve_component_impact(scope, neutral_test_paths=True)
+    impact_fields = {
+        "affected_components": impact.components if impact.complete else (),
+        "direct_test_targets": impact.direct_tests if impact.complete else (),
+        "dependent_test_targets": impact.dependent_tests if impact.complete else (),
+    }
     if classification == CORE_LIFECYCLE_OR_SCHEMA_SECURITY:
-        scope = {path.replace("\\", "/").casefold() for path in changed_files or contract.allowed_files}
-        impact = [entry for root, entry in _AUDITED_COMPONENTS.items() if root in scope]
-        # Supporting docs/tests are neutral; any other unaudited path invalidates the map.
-        if any(path not in _AUDITED_COMPONENTS and not path.startswith(("docs/", "tests/")) for path in scope):
-            impact = []
         plan = ValidationPlan(
             classification,
             "HIGH",
             _gate_names(contract.gates) or ("focused-tests",),
             _broad_gate_names(contract),
             reasons or ("core lifecycle/state-machine, schema, or security boundary",),
-            affected_components=tuple(sorted({name for name, _, _ in impact})),
-            direct_test_targets=tuple(sorted({target for _, direct, _ in impact for target in direct})),
-            dependent_test_targets=tuple(sorted({target for _, _, dependent in impact for target in dependent})),
+            **impact_fields,
         )
         return _with_full_regression_decision(plan, contract, changed_files)
     if classification == CONFIG_OR_PROVIDER_COMMAND:
@@ -199,6 +155,7 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
         _non_broad_gate_names(contract) or ("focused-tests",),
         (),
         reasons,
+        **impact_fields,
     )
     return _with_full_regression_decision(plan, contract, changed_files)
 
@@ -208,6 +165,7 @@ def _with_full_regression_decision(
 ) -> ValidationPlan:
     """Record a conservative policy decision without removing any declared gate."""
     scope = tuple(path.replace("\\", "/").casefold() for path in (changed_files or contract.allowed_files))
+    impact = resolve_component_impact(scope, neutral_test_paths=True)
     policy_reasons: list[str] = []
 
     if plan.escalation_reasons:
@@ -220,7 +178,12 @@ def _with_full_regression_decision(
         if "src/stagemesh/validation_plan.py" in scope:
             policy_reasons.append("test-selection policy changed")
     elif plan.classification == LOCALIZED_CODE:
-        policy_reasons.append("localized executable source has no audited component impact map")
+        if impact.fast_path_eligible:
+            policy_reasons.append(
+                "exact audited component scope uses direct and dependent contract tests"
+            )
+        else:
+            policy_reasons.append("localized executable source has no complete audited fast path")
     elif plan.classification == CONFIG_OR_PROVIDER_COMMAND:
         executable = any(path.endswith((".py", ".js", ".jsx", ".ts", ".tsx")) for path in scope)
         if executable:
@@ -233,10 +196,9 @@ def _with_full_regression_decision(
     if not scope:
         policy_reasons.append("change scope is empty or unavailable")
 
-    required = bool(plan.escalation_reasons) or plan.classification in {
-        CORE_LIFECYCLE_OR_SCHEMA_SECURITY,
-        LOCALIZED_CODE,
-    }
+    required = bool(plan.escalation_reasons) or plan.classification == CORE_LIFECYCLE_OR_SCHEMA_SECURITY
+    if plan.classification == LOCALIZED_CODE:
+        required = required or not impact.fast_path_eligible
     if plan.classification == CONFIG_OR_PROVIDER_COMMAND:
         required = required or any(
             path.endswith((".py", ".js", ".jsx", ".ts", ".tsx")) for path in scope
