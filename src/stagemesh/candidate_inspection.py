@@ -62,6 +62,8 @@ def inspect_candidate_diff(
         blocking.append("<task-worktree-state>")
     if any(item["severity"] == "error" for item in policy_findings):
         blocking.append("<agent-coding-policy>")
+    if special_modes:
+        blocking.append("<symlink-or-submodule-change>")
     risk_flags: list[str] = []
     if any(_matches(path, _GATE_PATTERNS) for path in paths):
         risk_flags.append("gate_configuration_changed")
@@ -97,6 +99,7 @@ def inspect_candidate_diff(
         "risk_flags": risk_flags,
         "blocking_paths": blocking[:_MAX_PATHS],
         "disposition": disposition,
+        "promotion_blocked": disposition != "ACCEPTABLE",
     }
     canonical = json.dumps(report, sort_keys=True, separators=(",", ":"))
     report["inspection_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()

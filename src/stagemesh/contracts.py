@@ -527,9 +527,14 @@ def evaluate_contract(
             findings.append(
                 {
                     "severity": "error",
-                    "code": "outside_allowed_files",
+                    "code": "OUT_OF_SCOPE_EDIT" if contract.scope_mode is not None else "outside_allowed_files",
                     "path": path,
                     "message": f"{path} is outside the allowed file scope",
+                    **(
+                        {"next_action": "SCOPE_EXPANSION_REQUIRED"}
+                        if contract.scope_mode is not None
+                        else {}
+                    ),
                 }
             )
         if _matches(path, contract.forbidden_files):

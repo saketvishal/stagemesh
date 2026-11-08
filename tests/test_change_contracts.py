@@ -214,6 +214,42 @@ def test_strict_atomic_scope_blocks_an_edit_outside_the_authorized_symbol(tmp_pa
     assert any(item["code"] == "scope_symbol_verification_required" for item in result.findings)
 
 
+def test_atomic_scope_returns_typed_scope_expansion_remediation(tmp_path: Path) -> None:
+    workspace, baseline = _atomic_scope_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "tests").mkdir()
+    (project / "tests" / "test_app.py").write_text("def test_value():\n    assert True\n", encoding="utf-8")
+    candidate = workspace.commit_all("unapproved adjacent test")
+
+    result = evaluate_contract(project, candidate, _strict_scope(), baseline_sha=baseline, run_gates=False)
+
+    finding = next(item for item in result.findings if item["code"] == "OUT_OF_SCOPE_EDIT")
+    assert finding["path"] == "tests/test_app.py"
+    assert finding["next_action"] == "SCOPE_EXPANSION_REQUIRED"
+
+
+def test_bounded_atomic_scope_and_owner_approved_expansion_pass(tmp_path: Path) -> None:
+    workspace, baseline = _atomic_scope_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (project / "tests").mkdir()
+    (project / "tests" / "test_app.py").write_text("def test_value():\n    assert True\n", encoding="utf-8")
+    candidate = workspace.commit_all("bounded implementation and approved test")
+    contract = ChangeContract(
+        objective="Update value and its focused test",
+        allowed_files=("src/app.py",),
+        approved_scope_expansions=("tests/test_app.py",),
+        scope_mode="BOUNDED",
+        scope_owner="operator",
+        scope_revision=2,
+        scope_exceptions=("operator approved the focused regression test",),
+    )
+
+    result = evaluate_contract(project, candidate, contract, baseline_sha=baseline, run_gates=False)
+
+    assert result.passed
+
+
 def test_atomic_scope_classifies_generated_files_and_approved_expansion(tmp_path: Path) -> None:
     contract = _strict_scope(
         allowed_generated_files=("build/report.json",),
@@ -292,6 +328,9 @@ def test_atomic_scope_schema_round_trips_without_changing_legacy_contracts() -> 
     assert contract_admission_problem(parsed) is None
     assert "STRICT atomic scope requires explicit writable files" in str(
         contract_admission_problem(_strict_scope(allowed_files=("src/**",)))
+    )
+    assert "must stay inside the project" in str(
+        contract_admission_problem(_strict_scope(allowed_read_files=("../secret",)))
     )
 
 
@@ -373,6 +412,9 @@ def test_agent_policy_is_provider_neutral_and_hash_bound_in_every_prompt(tmp_pat
     assert all(agent_policy_prompt(policy) in prompt for prompt in prompts)
     assert all(policy.digest in prompt for prompt in prompts)
     assert policy.source == f"baseline:{baseline}:.stagemesh/agent-policy.json"
+    (project / ".stagemesh" / "agent-policy.json").write_text("{}", encoding="utf-8")
+    resumed = load_effective_agent_policy(project, contract, baseline)
+    assert resumed.digest == policy.digest
 
 
 def test_agent_policy_tampering_is_quarantined_without_owner_exception(tmp_path: Path) -> None:
@@ -432,6 +474,45 @@ def test_agent_policy_escalates_gratuitous_abstraction_and_documentation_churn(t
     codes = {item["code"] for item in report["agent_policy_findings"]}
     assert {"agent_policy_abstraction_review", "agent_policy_documentation_review"} <= codes
     assert report["disposition"] == "REVIEW_REQUIRED"
+
+
+def test_agent_policy_escalates_speculative_code_and_filler_comments(tmp_path: Path) -> None:
+    workspace, baseline = _agent_policy_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text(
+        "# This function simply handles a future feature\nTODO = 'future-feature'\n",
+        encoding="utf-8",
+    )
+    candidate = workspace.commit_all("speculative narration")
+
+    report = inspect_candidate_diff(
+        project,
+        baseline,
+        candidate,
+        ChangeContract(objective="fix current widget result", allowed_files=("src/app.py",)),
+    )
+
+    codes = {item["code"] for item in report["agent_policy_findings"]}
+    assert {"agent_policy_speculative_review", "agent_policy_comment_review"} <= codes
+    assert report["promotion_blocked"] is True
+
+
+def test_agent_policy_owner_exception_allows_a_required_abstraction(tmp_path: Path) -> None:
+    workspace, baseline = _agent_policy_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "helpers.py").write_text("class RequiredWrapper:\n    pass\n", encoding="utf-8")
+    candidate = workspace.commit_all("approved abstraction")
+    contract = ChangeContract(
+        objective="Add the required adapter",
+        allowed_files=("src/helpers.py",),
+        agent_policy_exceptions=("allow_unrequested_abstraction",),
+        agent_policy_owner="operator",
+    )
+
+    report = inspect_candidate_diff(project, baseline, candidate, contract)
+
+    assert not report["agent_policy_findings"]
+    assert report["disposition"] == "ACCEPTABLE"
 
 
 def test_invalid_baseline_agent_policy_fails_closed(tmp_path: Path) -> None:
@@ -499,6 +580,9 @@ def test_diff_first_inspection_accounts_for_dirty_untracked_and_ignored_files(tm
     baseline = workspace.commit_all("ignore policy")
     (project / "src/app.py").write_text("VALUE = 2\n", encoding="utf-8")
     candidate = workspace.commit_all("candidate")
+    (project / "src/app.py").write_text("VALUE = 3\n", encoding="utf-8")
+    (project / "staged.txt").write_text("staged but not committed\n", encoding="utf-8")
+    workspace.run("add", "staged.txt")
     (project / "scratch.txt").write_text("not committed\n", encoding="utf-8")
     (project / "debug.log").write_text("ignored but accounted\n", encoding="utf-8")
 
@@ -510,9 +594,60 @@ def test_diff_first_inspection_accounts_for_dirty_untracked_and_ignored_files(tm
         workspace=project,
     )
 
+    assert report["workspace_state"]["staged"] == ["staged.txt"]
+    assert report["workspace_state"]["unstaged"] == ["src/app.py"]
     assert report["workspace_state"]["untracked"] == ["scratch.txt"]
     assert report["workspace_state"]["ignored_not_in_candidate"] == ["debug.log"]
     assert report["disposition"] == "QUARANTINED"
+
+
+def test_diff_first_inspection_blocks_symlink_mode_and_accounts_for_binary_and_gate_changes(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    baseline = workspace.head()
+    (project / "asset.bin").write_bytes(b"\x00\x01\x02\x00")
+    workflow = project / ".github" / "workflows" / "gate.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: gate\n", encoding="utf-8")
+    link_target = project / "link-target.txt"
+    link_target.write_text("outside-target\n", encoding="utf-8")
+    workspace.run("add", "asset.bin", ".github/workflows/gate.yml", "link-target.txt")
+    blob = workspace.run("hash-object", "-w", "link-target.txt").stdout.strip()
+    workspace.run("update-index", "--add", "--cacheinfo", f"120000,{blob},linked-path")
+    workspace.run("commit", "-m", "binary gate and symlink mode")
+    candidate = workspace.head()
+
+    report = inspect_candidate_diff(
+        project,
+        baseline,
+        candidate,
+        ChangeContract(objective="inspect special changes", allowed_files=("**",)),
+    )
+
+    assert report["binary_paths"] == ["asset.bin"]
+    assert report["gate_configuration_paths"] == [".github/workflows/gate.yml"]
+    assert report["special_modes"][0]["path"] == "linked-path"
+    assert "<symlink-or-submodule-change>" in report["blocking_paths"]
+    assert report["disposition"] == "QUARANTINED"
+
+
+def test_diff_inflation_blocks_promotion_until_independent_review(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    baseline = workspace.head()
+    (project / "src" / "app.py").write_text("VALUE = 2\nEXTRA = 3\n", encoding="utf-8")
+    candidate = workspace.commit_all("larger than expected")
+
+    report = inspect_candidate_diff(
+        project,
+        baseline,
+        candidate,
+        ChangeContract(objective="one-line value change", allowed_files=("src/app.py",), max_diff_lines=1),
+    )
+
+    assert "diff_line_expectation_exceeded" in report["risk_flags"]
+    assert report["disposition"] == "REVIEW_REQUIRED"
+    assert report["promotion_blocked"] is True
 
 
 def test_contract_runs_required_gates_and_blocks_failures(tmp_path: Path) -> None:

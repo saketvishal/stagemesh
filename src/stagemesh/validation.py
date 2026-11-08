@@ -158,6 +158,21 @@ class Validator:
                     diff_inspection["quarantine_ref"] = quarantine_candidate(
                         store, project, task_id, diff_inspection
                     )
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "candidate_diff_quarantined",
+                            "message": "independent diff inspection quarantined the exact candidate commit",
+                        }
+                    )
+                elif diff_inspection["disposition"] == "REVIEW_REQUIRED":
+                    findings.append(
+                        {
+                            "severity": "review",
+                            "code": "candidate_diff_independent_review_required",
+                            "message": "candidate risk signals require independent review before promotion",
+                        }
+                    )
             except (GitError, OSError, ValueError) as exc:
                 findings.append(
                     {

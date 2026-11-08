@@ -43,6 +43,9 @@ contract or approve its own expansion.
 Validation evidence records task ID, baseline SHA, candidate SHA, effective scope policy, policy hash, normalized name-status entries,
 line counts, special modes, binary paths, gate-configuration paths, worktree state, risk flags and disposition. An out-of-scope or dirty
 candidate is marked `QUARANTINED`; StageMesh preserves its exact commit under a quarantine ref and integration remains blocked.
+Atomic violations use the typed `OUT_OF_SCOPE_EDIT` finding with `SCOPE_EXPANSION_REQUIRED` as the next action. Symlink and submodule
+mode changes also quarantine rather than being treated as ordinary text edits. Proportionate change-inflation signals set
+`promotion_blocked` and require independent review; they do not independently prove that the implementation is wrong.
 
 Changing an already active atomic policy uses the existing audited `rebind-contract` operator path. A reason is mandatory, prior evidence
 is invalidated when the contract digest changes, and `task.scope_policy_revised` preserves the old/new policies and hashes. Hand-editing
