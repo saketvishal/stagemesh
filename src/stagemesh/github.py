@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 class GitHubTransport(Protocol):
@@ -146,6 +146,31 @@ class GitHubClient:
     def close_issue(self, number: str) -> GitHubResult:
         code, headers, payload = self.transport.request(
             "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{number}", {"state": "closed"}
+        )
+        return self._result(code, headers, payload)
+
+    def ensure_label(self, name: str, color: str, description: str) -> GitHubResult:
+        """Return an existing repository label or create it without replacing operator metadata."""
+        path = f"/repos/{self.owner}/{self.repo}/labels/{quote(name, safe='')}"
+        code, headers, payload = self.transport.request("GET", path)
+        if code == 200:
+            return GitHubResult("OK", payload)
+        if code != 404:
+            return self._result(code, headers, payload)
+        code, headers, payload = self.transport.request(
+            "POST",
+            f"/repos/{self.owner}/{self.repo}/labels",
+            {"name": name, "color": color, "description": description},
+        )
+        if code == 422:  # Another initializer may have created the label concurrently.
+            code, headers, payload = self.transport.request("GET", path)
+        return self._result(code, headers, payload)
+
+    def add_issue_labels(self, number: str, labels: tuple[str, ...]) -> GitHubResult:
+        code, headers, payload = self.transport.request(
+            "POST",
+            f"/repos/{self.owner}/{self.repo}/issues/{number}/labels",
+            {"labels": list(labels)},
         )
         return self._result(code, headers, payload)
 

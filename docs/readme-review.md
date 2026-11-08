@@ -2,6 +2,12 @@
 
 Reviewed on 2026-11-04 for issue #651. Length is evidence about maintenance and findability, not an acceptance target by itself.
 
+## Follow-up on 2026-11-08
+
+The current README has 138 physical lines, 1,417 whitespace-delimited words, and 12,651 on-disk bytes. It remains about 75% shorter by word count than the 5,719-word pre-review version. The added `Validation, CI, and operator access` entry point covers the repository-quality gate, exact-scope quarantine, current development-readiness boundary, CI optimization planning, loopback operator UI, and remote-hosting non-implementation boundary. Detailed procedures remain in linked documents; the README does not duplicate their schemas, test matrices, or security checklists.
+
+The current outline has nine headings because validation and operator access now have a dedicated entry point. The original eight information-architecture topics remain intact, and objective-governance guidance was added inside the existing operating-model section.
+
 ## Before
 
 The prior README contained 520 lines, 5,719 whitespace-delimited words, and 42,367 on-disk bytes. It mixed installation, first-run guidance, provider configuration, capability security, queue internals, ownership guarantees, repair procedures, and merge-policy reference material.

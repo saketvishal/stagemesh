@@ -41,6 +41,8 @@ stagemesh status
 
 `stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without launching them. The registry is a snapshot: rerunning init does not replace operator edits, arbitrary command providers can be added under `providers`, and an explicitly empty registry stays empty. Detection or registration does **not** authenticate, authorize, or invoke a provider; unattended use still requires the separate `authorization.unattended_providers` opt-in.
 
+For a fresh GitHub checkout, `stagemesh init` also detects `origin`, configures the GitHub task source, and reads open issues. When `STAGEMESH_GITHUB_TOKEN` has Issues write permission, it classifies only issues that have no labels: issues with a valid explicit contract or a deterministic auto-plan become `stagemesh:ready`; issues missing safe scope or validation information become `stagemesh:needs-triage`. Existing labels and explicit task-source policy are never replaced. The classification and any failure are recorded in the audit ledger, and the command resyncs successful labels before returning. Initialization still makes zero provider calls and does not start coding; use `stagemesh run-window` after authorizing the intended providers.
+
 For StageMesh development, bootstrap the project-owned provider pool and run the fast synthetic stabilization gate before broader acceptance:
 
 ```bash
@@ -69,6 +71,16 @@ stagemesh doctor
 See [operator flow](docs/operator-flow.md) for queue reconciliation, blocked work, provider cooldowns, survivor waves, and interrupted runs. See [run-window](docs/run-window.md) and [run-window budgets](docs/run-window-budgets.md) for options, stop rules, restart behavior, delivery, and merge policy.
 
 Founder hands-off operation is opt-in per project. Its deterministic policy, capability boundaries, incident scenarios, evidence requirements, and remaining acceptance gaps are tracked in [founder hands-off](docs/founder-hands-off.md). The reversible Windows scheduler wrapper is documented in [continuous driver](docs/continuous-driver.md) and is never installed implicitly.
+
+For larger programs, provider-neutral [objective governance](docs/objective-governance.md) can freeze an append-only plan, dependency graph, independent challenge, revision reconciliation, and outcome evaluation as workspace-isolated evidence. These artifacts govern decomposition and review; they do not make an objective runnable or prove that its work was executed.
+
+## Validation, CI, and operator access
+
+StageMesh applies a versioned repository-quality policy to changed Python and fails closed on newly introduced lint, complexity, strict-typing, dead-code, or type-escape violations. Candidate promotion independently inspects the exact baseline-to-candidate diff against the frozen task contract; blocking scope or policy violations preserve the commit under a quarantine ref instead of discarding it. See [code quality](docs/code-quality-gate.md) and [atomic scope and quarantine](docs/atomic-scope-and-quarantine.md).
+
+Pull requests remain the authoritative Windows and Linux merge-readiness gate. Local focused checks support development, while `python scripts/run_regression.py --report .stagemesh/regression-report.json` produces the complete local regression artifact. Mixed Python/TypeScript policy enforcement has bounded synthetic qualification, not general production-readiness proof. `stagemesh ci-optimize-plan` can make a bounded, read-only batch-size recommendation from explicit queue and failure measurements; distributed cache service, live hosted-runner telemetry, and speculative execution are not yet implemented. See [development readiness](docs/development-readiness-qualification.md) and [CI optimization](docs/ci-optimization.md).
+
+`stagemesh ui` and `stagemesh serve` expose the operator surface on loopback with a per-launch credential and read-only defaults; bounded control actions require explicit enablement. Remote hosting remains disabled. The reviewed direction is a single-tenant TLS reverse proxy with OIDC/PKCE and separate project-scoped read/control permissions, but implementation still requires operator-selected infrastructure, identity, secret storage, backup ownership, and independent security review. See the [operator UI contract](docs/operator-ui-contract.md) and [remote-hosting security plan](docs/remote-hosting-security.md).
 
 ## Providers, skills, MCP, and plugins
 
@@ -116,6 +128,13 @@ Projects remain PR-only unless they explicitly configure hosted or StageMesh-con
 - [Capabilities, skills, MCP, and plugin safety](docs/capabilities.md)
 - [Bundled skills and proof of use](docs/agent-skills.md)
 - [Provider readiness](docs/provider-readiness.md)
+- [Objective governance](docs/objective-governance.md)
+- [Development-readiness qualification](docs/development-readiness-qualification.md)
+- [Repository quality policy](docs/code-quality-gate.md)
+- [Atomic scope and quarantine](docs/atomic-scope-and-quarantine.md)
+- [CI optimization boundaries](docs/ci-optimization.md)
+- [Operator UI contract](docs/operator-ui-contract.md)
+- [Remote-hosting security plan](docs/remote-hosting-security.md)
 - [Workspace and task recovery](docs/workspace-and-task-recovery.md)
 - [Reliable delivery](docs/reliable-delivery.md)
 - [README information-architecture review](docs/readme-review.md)

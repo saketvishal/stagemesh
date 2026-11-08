@@ -10,6 +10,7 @@ import pytest
 import stagemesh.cli as cli_module
 import stagemesh.github as github_module
 from stagemesh.github import detect_github_repository
+from stagemesh.persistence import Store
 from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource
 
 
@@ -82,16 +83,21 @@ def test_repository_detection_invalidates_when_remote_changes(tmp_path: Path) ->
 
 
 def test_init_persists_detected_github_origin_as_the_ready_issue_source(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = _github_project(tmp_path)
+    monkeypatch.setattr(GitHubApiIssueSource, "discover", lambda self: ([], "OK", None))
 
     assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["task_source_sync"] == {"status": "synced"}
     data = json.loads((project / ".stagemesh" / "config.json").read_text(encoding="utf-8"))
-    assert data["github"] == {"owner": "acme", "repo": "widgets"}
+    assert data["github"] == {
+        "owner": "acme",
+        "repo": "widgets",
+        "auto_label_unlabeled": True,
+    }
     assert data["task_sources"] == [
         {
             "name": "github",
@@ -105,6 +111,98 @@ def test_init_persists_detected_github_origin_as_the_ready_issue_source(
             ],
         }
     ]
+
+
+def test_init_classifies_only_unlabeled_issues_and_resyncs_ready_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from stagemesh.github import GitHubClient, GitHubResult
+
+    project = _github_project(tmp_path)
+    (project / ".stagemesh").mkdir()
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    contracts = project / ".stagemesh/contracts"
+    contracts.mkdir()
+    (contracts / "19.json").write_text("{}\n", encoding="utf-8")
+    labels: dict[str, tuple[str, ...]] = {"17": (), "18": ("team:owned",), "19": ()}
+
+    def discover(self: GitHubApiIssueSource):
+        return (
+            [
+                DiscoveredTask("github", issue, f"Issue {issue}", labels=issue_labels)
+                for issue, issue_labels in labels.items()
+            ],
+            "OK",
+            None,
+        )
+
+    writes: list[tuple[str, str]] = []
+
+    def ensure_label(self: GitHubClient, name: str, color: str, description: str) -> GitHubResult:
+        assert color and description
+        return GitHubResult("OK", {"name": name})
+
+    def add_issue_labels(self: GitHubClient, number: str, added: tuple[str, ...]) -> GitHubResult:
+        assert labels[number] == ()
+        labels[number] = added
+        writes.append((number, added[0]))
+        return GitHubResult("OK", {})
+
+    monkeypatch.setattr(GitHubApiIssueSource, "discover", discover)
+    monkeypatch.setattr(GitHubClient, "ensure_label", ensure_label)
+    monkeypatch.setattr(GitHubClient, "add_issue_labels", add_issue_labels)
+    monkeypatch.setenv("STAGEMESH_GITHUB_TOKEN", "TEST_ONLY_NOT_A_CREDENTIAL")
+
+    assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["github_issue_classification"] == {
+        "status": "labeled",
+        "scanned": 2,
+        "ready_labeled": 1,
+        "triage_labeled": 1,
+        "failed": 0,
+    }
+    assert writes == [("17", "stagemesh:ready"), ("19", "stagemesh:needs-triage")]
+    store = Store(project / ".stagemesh/stagemesh.sqlite3")
+    assert store.source_state("github", "17")["eligible"] is True
+    assert store.source_state("github", "19")["eligible"] is False
+    events = [json.loads(row["payload"]) for row in store.audit_events() if row["event_type"] == "github.init_issue_classified"]
+    assert {(event["source_id"], event["outcome"]) for event in events} == {("17", "LABELED"), ("19", "LABELED")}
+    store.close()
+
+
+def test_init_defers_unlabeled_issue_writes_without_github_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = _github_project(tmp_path)
+    monkeypatch.delenv("STAGEMESH_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        GitHubApiIssueSource,
+        "discover",
+        lambda self: ([DiscoveredTask("github", "21", "Unlabeled issue")], "OK", None),
+    )
+
+    assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["github_issue_classification"] == {
+        "status": "write_authorization_required",
+        "scanned": 1,
+        "ready_labeled": 0,
+        "triage_labeled": 0,
+        "failed": 0,
+        "reason": "set STAGEMESH_GITHUB_TOKEN with Issues write permission",
+    }
+
+
+def test_config_rejects_non_boolean_unlabeled_issue_policy(tmp_path: Path) -> None:
+    project = _github_project(tmp_path)
+    path = project / ".stagemesh/config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"github": {"auto_label_unlabeled": "yes"}}), encoding="utf-8")
+
+    assert cli_module.main(["--project", str(project), "init"]) == 2
 
 
 def test_init_reports_deferred_source_sync_without_leaking_exception_text(
