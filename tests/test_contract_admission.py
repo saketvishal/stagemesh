@@ -73,6 +73,23 @@ def test_explicit_only_policy_keeps_prepared_work_and_skips_unknown_work(tmp_pat
         store.close()
 
 
+def test_strict_spec_admission_rejects_a_missing_spec_before_runtime(tmp_path):
+    from stagemesh.contract_check import check_contract
+
+    project = tmp_path / "project"
+    contract_path = project / ".stagemesh" / "contracts" / "1.json"
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_text(
+        json.dumps({**FAKE_CONTRACT, "spec_refs": ["requirements.md"]}),
+        encoding="utf-8",
+    )
+
+    report = check_contract(project, path=contract_path, require_spec=True)
+
+    assert not report["ok"]
+    assert report["errors"] == ["spec ref is missing or empty: requirements.md"]
+
+
 @pytest.mark.parametrize("frozen", [False, True])
 def test_old_placeholder_contracts_cannot_bypass_admission(tmp_path, frozen):
     project = _project(tmp_path, ["1", "2"])

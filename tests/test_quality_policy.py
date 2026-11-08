@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
-from stagemesh.contracts import ChangeContract, GateCommand
+from stagemesh.contracts import ChangeContract, GateCommand, evaluate_contract
+from stagemesh.git import GitWorkspace
 from stagemesh.quality_policy import (
     POLICY_PATH,
     QualityPolicyError,
@@ -165,3 +167,65 @@ def test_missing_policy_is_opt_in_for_non_python_managed_repositories(tmp_path: 
     )
     assert updated == contract
     assert applied is None
+
+
+def test_mixed_python_typescript_policy_blocks_a_failing_language_gate(tmp_path: Path) -> None:
+    project = tmp_path / "mixed"
+    project.mkdir()
+    workspace = GitWorkspace(project)
+    workspace.run("init", "-b", "main")
+    workspace.run("config", "user.name", "Test")
+    workspace.run("config", "user.email", "test@example.com")
+    (project / "src").mkdir()
+    (project / "web").mkdir()
+    (project / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (project / "web" / "app.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    payload = _payload()
+    payload["gates"] = [
+        {
+            "name": "python-lint",
+            "category": "lint",
+            "command": [sys.executable, "-c", "pass"],
+            "applies_to": ["**/*.py"],
+        },
+        {
+            "name": "python-types",
+            "category": "typecheck",
+            "command": [sys.executable, "-c", "pass"],
+            "applies_to": ["**/*.py"],
+        },
+        {
+            "name": "typescript-lint",
+            "category": "lint",
+            "command": [sys.executable, "-c", "raise SystemExit(7)"],
+            "applies_to": ["**/*.ts"],
+        },
+        {
+            "name": "typescript-types",
+            "category": "typecheck",
+            "command": [sys.executable, "-c", "pass"],
+            "applies_to": ["**/*.ts"],
+        },
+    ]
+    _write_policy(project, payload)
+    workspace.run("add", "-A")
+    workspace.run("commit", "-m", "mixed baseline")
+    baseline = workspace.head()
+    (project / "src" / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (project / "web" / "app.ts").write_text("export const value = 2;\n", encoding="utf-8")
+    workspace.run("add", "-A")
+    workspace.run("commit", "-m", "mixed candidate")
+    candidate = workspace.head()
+    contract = ChangeContract(
+        "mixed change",
+        explicit=True,
+        allowed_files=("src/app.py", "web/app.ts"),
+    )
+
+    result = evaluate_contract(project, candidate, contract, baseline_sha=baseline)
+
+    gates = {gate.name: gate for gate in result.gates}
+    assert set(gates) == {"python-lint", "python-types", "typescript-lint", "typescript-types"}
+    assert gates["typescript-lint"].status == "FAILED"
+    assert gates["typescript-lint"].returncode == 7
+    assert result.status == "FAILED"
