@@ -14,6 +14,13 @@ from .contracts import (
     declarative_invariants,
     evaluate_contract,
     scope_classification,
+    scope_policy_hash,
+    scope_policy_payload,
+)
+from .candidate_inspection import (
+    inspect_candidate_diff,
+    quarantine_candidate,
+    record_candidate_inspection,
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .e2e_evidence import (
@@ -33,6 +40,7 @@ from .validation_plan import (
     derive_validation_plan,
     with_required_checks,
 )
+from .workspaces import task_workspace
 from .validation_reuse import (
     GATE_REUSE_POLICY_VERSION,
     GateReuse,
@@ -134,6 +142,30 @@ class Validator:
                 gate_reuse=gate_reuse,
             )
             findings = list(evaluation.findings)
+            diff_inspection: dict[str, Any] | None = None
+            try:
+                if bound.baseline_sha is None:
+                    raise ValueError("candidate has no pinned baseline SHA")
+                diff_inspection = inspect_candidate_diff(
+                    project,
+                    bound.baseline_sha,
+                    candidate_sha,
+                    contract,
+                    workspace=task_workspace(project, task_id),
+                )
+                record_candidate_inspection(store, task_id, diff_inspection)
+                if diff_inspection["disposition"] == "QUARANTINED":
+                    diff_inspection["quarantine_ref"] = quarantine_candidate(
+                        store, project, task_id, diff_inspection
+                    )
+            except (GitError, OSError, ValueError) as exc:
+                findings.append(
+                    {
+                        "severity": "error",
+                        "code": "candidate_diff_inspection_failed",
+                        "message": f"independent candidate diff inspection failed: {exc}",
+                    }
+                )
             executed = tuple(gate.name for gate in evaluation.gates)
             missing: tuple[str, ...] = ()
             if contract.explicit:
@@ -296,6 +328,7 @@ class Validator:
                 "review_invariants": list(declarative_invariants(contract)),
                 "changed_files": list(evaluation.changed_files),
                 "scope": scope_classification(contract, evaluation.changed_files),
+                "diff_inspection": diff_inspection,
                 "findings": findings,
                 "validation_checks": {
                     "planned": list(plan.planned_checks),
@@ -330,6 +363,14 @@ class Validator:
                     for gate in evaluation.gates
                 ],
             }
+            if contract.scope_mode is not None:
+                payload["scope_policy"] = {
+                    "task_id": task_id,
+                    "baseline_sha": bound.baseline_sha,
+                    "candidate_sha": candidate_sha,
+                    "policy_hash": scope_policy_hash(contract),
+                    **scope_policy_payload(contract),
+                }
             if spec_verdict is not None:
                 payload["spec_governance"] = spec_verdict.to_dict()
 

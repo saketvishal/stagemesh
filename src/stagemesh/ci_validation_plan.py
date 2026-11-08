@@ -53,7 +53,9 @@ _FULL_EXACT_PATHS = frozenset(
         "agents.md",
         "build_backend.py",
         "pyproject.toml",
+        "src/stagemesh/agent_policy.py",
         "src/stagemesh/ci_validation_plan.py",
+        "src/stagemesh/candidate_inspection.py",
         "src/stagemesh/cli.py",
         "src/stagemesh/config.py",
         "src/stagemesh/contracts.py",
@@ -83,6 +85,8 @@ _FULL_EXACT_PATHS = frozenset(
         "tests/test_regression_architecture_acceptance.py",
         "tests/test_validation_component_catalog.py",
         "docs/focused-validation.md",
+        "docs/agent-coding-policy.md",
+        "docs/atomic-scope-and-quarantine.md",
         "docs/validation-components.md",
     }
 )

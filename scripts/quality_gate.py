@@ -212,6 +212,7 @@ def _type_checks(changes: ChangeSet, strict_modules: tuple[str, ...]) -> list[di
                 "-m",
                 "mypy",
                 "--strict",
+                "--follow-imports=skip",
                 "--warn-unreachable",
                 "--show-error-codes",
                 *targets,

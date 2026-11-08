@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Protocol
 
 from .agent_skills import SkillPackError, is_frontend_task, skill_prompt
+from .agent_policy import (
+    AgentPolicyError,
+    EffectiveAgentPolicy,
+    agent_policy_prompt,
+    load_effective_agent_policy,
+)
 from .attribution import attribution_for_worker
 from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
@@ -348,6 +354,7 @@ class RuntimeCommandAdapter:
                 failure_reason=f"capability_unavailable: {exc}",
             )
         try:
+            effective_agent_policy = load_effective_agent_policy(project, bound.contract, baseline_sha)
             task_prompt = _build_task_prompt(
                 task_id, task, run_path, contract=bound.contract, remediation=remediation,
                 planning_project=project,
@@ -355,11 +362,36 @@ class RuntimeCommandAdapter:
                 research_findings=research_text,
                 provider_name=self.name,
                 capability_audit=capability_audit,
+                effective_agent_policy=effective_agent_policy,
             )
         except SkillPackError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
         except CapabilityRegistryError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"capability_unavailable: {exc}")
+        except AgentPolicyError as exc:
+            store.add_audit_event(
+                "agent_policy.refused",
+                {
+                    "task_id": task_id,
+                    "provider": self.name,
+                    "provider_invoked": False,
+                    "reason": str(exc)[:500],
+                },
+            )
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"agent_policy_unavailable: {exc}")
+        store.add_audit_event(
+            "agent_policy.attached",
+            {
+                "task_id": task_id,
+                "provider": self.name,
+                "stage": "IMPLEMENT",
+                "policy_id": effective_agent_policy.policy_id,
+                "policy_hash": effective_agent_policy.digest,
+                "source": effective_agent_policy.source,
+                "exceptions": list(effective_agent_policy.exceptions),
+                "provider_invoked": False,
+            },
+        )
         configured_command = self.command_for("code")
         evidence_mode = skill_evidence_mode(run_path)
         mcp_requested = any(item.get("kind") == "mcp" for item in capability_audit)
@@ -431,6 +463,18 @@ class RuntimeCommandAdapter:
                 task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION, actor=self.name,
                 pid=identity.pid, process_create_time=identity.create_time, boot_id=identity.boot_id,
                 executable=identity.executable,
+            )
+            store.add_audit_event(
+                "agent_policy.activated",
+                {
+                    "task_id": task_id,
+                    "provider": self.name,
+                    "stage": "IMPLEMENT",
+                    "policy_id": effective_agent_policy.policy_id,
+                    "policy_hash": effective_agent_policy.digest,
+                    "execution_id": attempt_execution_id,
+                    "activation_evidence": "provider-process-started-with-policy-prompt",
+                },
             )
             _record_capability_activations(
                 store, task_id, self.name, "IMPLEMENT", capability_audit
@@ -1447,6 +1491,7 @@ def _build_task_prompt(
     research_findings: str = "",
     provider_name: str | None = None,
     capability_audit: list[dict[str, object]] | None = None,
+    effective_agent_policy: EffectiveAgentPolicy | None = None,
 ) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
@@ -1499,6 +1544,13 @@ def _build_task_prompt(
         provider_name=provider_name,
         capability_audit=capability_audit,
     )
+    policy_text = ""
+    policy_project = planning_project or project
+    if effective_contract is not None and policy_project is not None:
+        policy = effective_agent_policy or load_effective_agent_policy(
+            policy_project, effective_contract, planning_baseline_sha
+        )
+        policy_text = agent_policy_prompt(policy)
     return (
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
@@ -1510,6 +1562,7 @@ def _build_task_prompt(
         "Please implement the changes described above.\n\n"
         f"{SPEC_PLANNING_DISCIPLINE}"
         f"{IMPLEMENTATION_DISCIPLINE}"
+        f"{policy_text}"
         f"{frontend_text}"
         f"{skill_text}"
         f"{focused_test_prompt(project, effective_contract)}"
@@ -1691,7 +1744,7 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
         if finding.get("stderr"):
             lines.append(f"  stderr: {str(finding['stderr']).strip()[:500]}")
         if finding.get("stdout"):
-            stdout_lines = [l for l in str(finding["stdout"]).splitlines() if l.strip()]
+            stdout_lines = [line for line in str(finding["stdout"]).splitlines() if line.strip()]
             if stdout_lines:
                 lines.append("  stdout excerpt:\n    " + "\n    ".join(stdout_lines[-15:]))
     failed_gates = remediation.get("failed_gates")
@@ -1704,7 +1757,7 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
             if gate.get("stderr"):
                 lines.append(f"  stderr: {str(gate['stderr']).strip()[:500]}")
             if gate.get("stdout"):
-                out_lines = [l for l in str(gate["stdout"]).splitlines() if l.strip()]
+                out_lines = [line for line in str(gate["stdout"]).splitlines() if line.strip()]
                 if out_lines:
                     lines.append("  stdout excerpt:\n    " + "\n    ".join(out_lines[-15:]))
     failure_details = remediation.get("failure_details")

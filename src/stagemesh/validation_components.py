@@ -166,6 +166,26 @@ AUDITED_ROOTS = (
         ),
     ),
     AuditedRoot(
+        "src/stagemesh/agent_policy.py",
+        "agent_coding_policy",
+        "validation-core",
+        ("tests/test_change_contracts.py",),
+        (
+            "tests/test_agent_skills.py",
+            "tests/test_provider_pool.py",
+        ),
+    ),
+    AuditedRoot(
+        "src/stagemesh/candidate_inspection.py",
+        "candidate_diff_inspection",
+        "validation-core",
+        ("tests/test_change_contracts.py",),
+        (
+            "tests/test_candidate_binding_hardening.py",
+            "tests/test_workspace_ownership.py",
+        ),
+    ),
+    AuditedRoot(
         "src/stagemesh/validation.py",
         "validation_execution",
         "validation-core",

@@ -48,6 +48,24 @@ def test_new_type_escape_hatches_are_rejected(source: str, tmp_path: Path, monke
     assert quality_gate._type_escape_findings(("unsafe.py",))
 
 
+def test_strict_type_check_is_bounded_to_declared_targets(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(quality_gate, "ROOT", tmp_path)
+    (tmp_path / "strict.py").write_text("value: int = 1\n", encoding="utf-8")
+    captured: list[str] = []
+
+    def fake_run(command: list[str], name: str) -> dict[str, object]:
+        captured.extend(command)
+        return {"name": name, "status": "passed"}
+
+    monkeypatch.setattr(quality_gate, "_run", fake_run)
+    changes = quality_gate.ChangeSet("a" * 40, "b" * 40, (), ())
+    quality_gate._type_checks(changes, ("strict.py",))
+
+    assert "--strict" in captured
+    assert "--follow-imports=skip" in captured
+    assert captured[-1] == "strict.py"
+
+
 def test_stale_or_candidate_modified_policy_hash_fails_closed(monkeypatch) -> None:
     monkeypatch.setenv("STAGEMESH_QUALITY_POLICY_SHA256", "0" * 64)
     with pytest.raises(quality_gate.QualityGateFailure, match="trusted validation plan"):

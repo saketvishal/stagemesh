@@ -3,20 +3,31 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from stagemesh.agent_policy import (
+    AgentPolicyError,
+    agent_policy_prompt,
+    load_effective_agent_policy,
+)
+from stagemesh.candidate_inspection import inspect_candidate_diff
 from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.contracts import (
     ChangeContract,
     ContractError,
     GateCommand,
     _gate_runtime_command,
+    canonical_contract_json,
+    contract_admission_problem,
+    contract_prompt,
     evaluate_contract,
     parse_contract,
     run_gate,
     scope_classification,
+    scope_policy_hash,
 )
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
@@ -24,6 +35,7 @@ from stagemesh.execution import ExecutionResult, Executor, SubprocessExecutor
 from stagemesh.git import GitWorkspace
 from stagemesh.integration import Integrator
 from stagemesh.persistence import Store
+from stagemesh.providers import _build_task_prompt
 from stagemesh.remediation import RemediationPolicy
 from stagemesh.review import Reviewer
 from stagemesh.validation import Validator
@@ -148,6 +160,292 @@ def test_contract_rejects_forbidden_and_out_of_scope_files(tmp_path: Path) -> No
     }
 
 
+def _atomic_scope_repo(path: Path) -> tuple[GitWorkspace, str]:
+    workspace = _repo(path)
+    (path / "src" / "app.py").write_text(
+        "VALUE = 1\n\ndef target(value: int) -> int:\n    return value + 1\n\ndef untouched() -> int:\n    return VALUE\n",
+        encoding="utf-8",
+    )
+    return workspace, workspace.commit_all("atomic scope baseline")
+
+
+def _strict_scope(**changes: object) -> ChangeContract:
+    base = ChangeContract(
+        objective="Change one function",
+        allowed_files=("src/app.py",),
+        scope_mode="STRICT",
+        allowed_read_files=("src/**", "tests/**"),
+        allowed_symbols=(("src/app.py", ("target",)),),
+        scope_owner="operator",
+        scope_revision=1,
+    )
+    return replace(base, **changes)
+
+
+def test_strict_atomic_scope_allows_only_the_authorized_python_symbol(tmp_path: Path) -> None:
+    workspace, baseline = _atomic_scope_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text(
+        "VALUE = 1\n\ndef target(value: int) -> int:\n    return value + 2\n\ndef untouched() -> int:\n    return VALUE\n",
+        encoding="utf-8",
+    )
+    candidate = workspace.commit_all("authorized symbol")
+    contract = _strict_scope()
+
+    result = evaluate_contract(project, candidate, contract, baseline_sha=baseline, run_gates=False)
+
+    assert result.passed
+    assert scope_policy_hash(contract) in contract_prompt(contract)
+    assert "Allowed read paths: src/**, tests/**" in contract_prompt(contract)
+
+
+def test_strict_atomic_scope_blocks_an_edit_outside_the_authorized_symbol(tmp_path: Path) -> None:
+    workspace, baseline = _atomic_scope_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text(
+        "VALUE = 9\n\ndef target(value: int) -> int:\n    return value + 2\n\ndef untouched() -> int:\n    return VALUE\n",
+        encoding="utf-8",
+    )
+    candidate = workspace.commit_all("scope bleed")
+
+    result = evaluate_contract(project, candidate, _strict_scope(), baseline_sha=baseline, run_gates=False)
+
+    assert result.status == "FAILED"
+    assert any(item["code"] == "scope_symbol_verification_required" for item in result.findings)
+
+
+def test_atomic_scope_classifies_generated_files_and_approved_expansion(tmp_path: Path) -> None:
+    contract = _strict_scope(
+        allowed_generated_files=("build/report.json",),
+        approved_scope_expansions=("tests/test_app.py",),
+        scope_exceptions=("revision 2 approved the focused regression test",),
+        scope_revision=2,
+    )
+
+    assert scope_classification(contract, ["src/app.py", "build/report.json", "tests/test_app.py", "README.md"]) == {
+        "approved_expansion": ["tests/test_app.py"],
+        "dependency_manifest_without_gate": [],
+        "excluded": [],
+        "forbidden": [],
+        "generated": ["build/report.json"],
+        "in_scope": ["build/report.json", "src/app.py", "tests/test_app.py"],
+        "noise": [],
+        "outside_allowed": ["README.md"],
+        "protected": [],
+    }
+
+
+def test_atomic_scope_can_explicitly_forbid_new_python_imports(tmp_path: Path) -> None:
+    workspace, baseline = _atomic_scope_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text(
+        "VALUE = 1\n\ndef target(value: int) -> int:\n    import math\n    return value + math.floor(2.2)\n\ndef untouched() -> int:\n    return VALUE\n",
+        encoding="utf-8",
+    )
+    candidate = workspace.commit_all("unapproved import")
+
+    result = evaluate_contract(
+        project,
+        candidate,
+        _strict_scope(forbid_new_imports=True),
+        baseline_sha=baseline,
+        run_gates=False,
+    )
+
+    assert result.status == "FAILED"
+    assert any(item["code"] == "scope_new_import_forbidden" for item in result.findings)
+
+
+def test_atomic_scope_read_only_mode_blocks_all_candidate_writes(tmp_path: Path) -> None:
+    workspace, baseline = _atomic_scope_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    candidate = workspace.commit_all("write in read-only scope")
+
+    result = evaluate_contract(
+        project,
+        candidate,
+        _strict_scope(scope_mode="EXPLORATORY", scope_write_enabled=False, allowed_symbols=()),
+        baseline_sha=baseline,
+        run_gates=False,
+    )
+
+    assert result.status == "FAILED"
+    assert any(item["code"] == "scope_write_not_authorized" for item in result.findings)
+
+
+def test_atomic_scope_schema_round_trips_without_changing_legacy_contracts() -> None:
+    legacy = ChangeContract(objective="legacy")
+    assert "scope_mode" not in json.loads(canonical_contract_json(legacy))
+    parsed = parse_contract(
+        {
+            "objective": "bounded",
+            "allowed_files": ["src/**"],
+            "scope_mode": "bounded",
+            "scope_owner": "operator",
+            "scope_revision": 1,
+            "allowed_symbols": {"src/app.py": ["target"]},
+        }
+    )
+    assert parsed.scope_mode == "BOUNDED"
+    assert parsed.allowed_symbols == (("src/app.py", ("target",)),)
+    assert contract_admission_problem(parsed) is None
+    assert "STRICT atomic scope requires explicit writable files" in str(
+        contract_admission_problem(_strict_scope(allowed_files=("src/**",)))
+    )
+
+
+def test_validation_evidence_binds_atomic_scope_to_task_baseline_and_candidate(tmp_path: Path) -> None:
+    workspace, baseline = _atomic_scope_repo(tmp_path / "repo")
+    project = workspace.path
+    contract = _strict_scope(explicit=True, required_tests=(GateCommand("smoke", [sys.executable, "-c", "pass"]),))
+    (project / "stagemesh.contract.json").write_text(canonical_contract_json(contract), encoding="utf-8")
+    baseline = workspace.commit_all("atomic scope contract")
+    (project / "src" / "app.py").write_text(
+        "VALUE = 1\n\ndef target(value: int) -> int:\n    return value + 2\n\ndef untouched() -> int:\n    return VALUE\n",
+        encoding="utf-8",
+    )
+    candidate = workspace.commit_all("atomic candidate")
+    store = _store(tmp_path)
+    task_id = store.upsert_task("atomic validation")
+    store.set_task_baseline(task_id, baseline)
+    store.add_candidate(task_id, candidate, "implementer", True)
+    try:
+        assert Validator().validate(store, task_id, candidate, project) is EvidenceStatus.PASSED
+        row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=?",
+            (task_id, candidate, EvidenceKind.VALIDATION),
+        ).fetchone()
+        policy = json.loads(row["payload"])["scope_policy"]
+        assert policy["task_id"] == task_id
+        assert policy["baseline_sha"] == baseline
+        assert policy["candidate_sha"] == candidate
+        assert policy["policy_hash"] == scope_policy_hash(contract)
+        assert policy["mode"] == "STRICT"
+    finally:
+        store.close()
+
+
+def _agent_policy_repo(path: Path) -> tuple[GitWorkspace, str]:
+    workspace = _repo(path)
+    policy_path = path / ".stagemesh" / "agent-policy.json"
+    policy_path.parent.mkdir()
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema": "stagemesh.agent-coding-policy/1",
+                "policy_id": "test-policy",
+                "approved_by": "test-owner",
+                "constraints": {
+                    "no_unrequested_abstractions": True,
+                    "no_speculative_code": True,
+                    "no_filler_comments": True,
+                    "no_unsolicited_documentation_churn": True,
+                    "no_policy_evasion": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return workspace, workspace.commit_all("agent policy baseline")
+
+
+def test_agent_policy_is_provider_neutral_and_hash_bound_in_every_prompt(tmp_path: Path) -> None:
+    workspace, baseline = _agent_policy_repo(tmp_path / "repo")
+    project = workspace.path
+    contract = ChangeContract(objective="small function", allowed_files=("src/app.py",))
+    policy = load_effective_agent_policy(project, contract, baseline)
+
+    prompts = [
+        _build_task_prompt(
+            "T-1",
+            object(),
+            project,
+            contract=contract,
+            planning_project=project,
+            planning_baseline_sha=baseline,
+            provider_name=provider,
+            effective_agent_policy=policy,
+        )
+        for provider in ("codex", "claude", "grok")
+    ]
+
+    assert all(agent_policy_prompt(policy) in prompt for prompt in prompts)
+    assert all(policy.digest in prompt for prompt in prompts)
+    assert policy.source == f"baseline:{baseline}:.stagemesh/agent-policy.json"
+
+
+def test_agent_policy_tampering_is_quarantined_without_owner_exception(tmp_path: Path) -> None:
+    workspace, baseline = _agent_policy_repo(tmp_path / "repo")
+    project = workspace.path
+    policy_path = project / ".stagemesh" / "agent-policy.json"
+    payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    payload["constraints"]["no_policy_evasion"] = False
+    policy_path.write_text(json.dumps(payload), encoding="utf-8")
+    candidate = workspace.commit_all("weaken policy")
+    contract = ChangeContract(objective="change policy", allowed_files=(".stagemesh/agent-policy.json",))
+
+    report = inspect_candidate_diff(project, baseline, candidate, contract)
+
+    assert report["disposition"] == "QUARANTINED"
+    assert any(item["code"] == "agent_policy_tampered" for item in report["agent_policy_findings"])
+    assert report["agent_policy"]["policy_hash"]
+
+
+def test_agent_policy_exception_is_frozen_owned_and_still_requires_review(tmp_path: Path) -> None:
+    workspace, baseline = _agent_policy_repo(tmp_path / "repo")
+    project = workspace.path
+    policy_path = project / ".stagemesh" / "agent-policy.json"
+    payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    payload["constraints"]["no_policy_evasion"] = False
+    policy_path.write_text(json.dumps(payload), encoding="utf-8")
+    candidate = workspace.commit_all("owner-approved policy change")
+    contract = ChangeContract(
+        objective="change policy",
+        allowed_files=(".stagemesh/agent-policy.json",),
+        agent_policy_exceptions=("allow_policy_change",),
+        agent_policy_owner="operator",
+    )
+
+    report = inspect_candidate_diff(project, baseline, candidate, contract)
+
+    assert report["disposition"] == "REVIEW_REQUIRED"
+    assert not any(item["severity"] == "error" for item in report["agent_policy_findings"])
+    assert report["agent_policy"]["exceptions"] == ["allow_policy_change"]
+    assert contract_admission_problem(contract) is None
+
+
+def test_agent_policy_escalates_gratuitous_abstraction_and_documentation_churn(tmp_path: Path) -> None:
+    workspace, baseline = _agent_policy_repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "helpers.py").write_text("class WidgetWrapper:\n    pass\n", encoding="utf-8")
+    (project / "README.md").write_text("unrequested narrative\n", encoding="utf-8")
+    candidate = workspace.commit_all("broad generated change")
+
+    report = inspect_candidate_diff(
+        project,
+        baseline,
+        candidate,
+        ChangeContract(objective="fix widget result", allowed_files=("**",)),
+    )
+
+    codes = {item["code"] for item in report["agent_policy_findings"]}
+    assert {"agent_policy_abstraction_review", "agent_policy_documentation_review"} <= codes
+    assert report["disposition"] == "REVIEW_REQUIRED"
+
+
+def test_invalid_baseline_agent_policy_fails_closed(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    path = project / ".stagemesh" / "agent-policy.json"
+    path.parent.mkdir()
+    path.write_text("{}", encoding="utf-8")
+    baseline = workspace.commit_all("invalid policy")
+
+    with pytest.raises(AgentPolicyError, match="schema"):
+        load_effective_agent_policy(project, ChangeContract(objective="task"), baseline)
+
+
 def test_validation_evidence_records_scope_classification_for_out_of_scope_paths(tmp_path: Path) -> None:
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
@@ -169,7 +467,52 @@ def test_validation_evidence_records_scope_classification_for_out_of_scope_paths
     assert payload["scope"]["outside_allowed"] == ["README.md"]
     assert payload["scope"]["forbidden"] == ["README.md"]
     assert payload["scope"]["in_scope"] == ["stagemesh.contract.json"]
+    assert payload["diff_inspection"]["disposition"] == "QUARANTINED"
+    quarantine_ref = payload["diff_inspection"]["quarantine_ref"]
+    assert workspace.run("rev-parse", quarantine_ref).stdout.strip() == sha
+    event = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type='candidate.diff_quarantined' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert json.loads(event["payload"])["inspection"]["candidate_sha"] == sha
     store.close()
+
+
+def test_diff_first_inspection_accounts_for_both_sides_of_a_rename(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    baseline = workspace.head()
+    workspace.run("mv", "src/app.py", "src/renamed.py")
+    candidate = workspace.commit_all("rename")
+    contract = ChangeContract(objective="rename target only", allowed_files=("src/renamed.py",))
+
+    report = inspect_candidate_diff(project, baseline, candidate, contract, workspace=project)
+
+    assert report["entries"] == [{"status": "R100", "paths": ["src/app.py", "src/renamed.py"]}]
+    assert report["scope"]["outside_allowed"] == ["src/app.py"]
+    assert report["disposition"] == "QUARANTINED"
+
+
+def test_diff_first_inspection_accounts_for_dirty_untracked_and_ignored_files(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / ".gitignore").write_text("debug.log\n", encoding="utf-8")
+    baseline = workspace.commit_all("ignore policy")
+    (project / "src/app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    candidate = workspace.commit_all("candidate")
+    (project / "scratch.txt").write_text("not committed\n", encoding="utf-8")
+    (project / "debug.log").write_text("ignored but accounted\n", encoding="utf-8")
+
+    report = inspect_candidate_diff(
+        project,
+        baseline,
+        candidate,
+        ChangeContract(objective="source only", allowed_files=("src/app.py",)),
+        workspace=project,
+    )
+
+    assert report["workspace_state"]["untracked"] == ["scratch.txt"]
+    assert report["workspace_state"]["ignored_not_in_candidate"] == ["debug.log"]
+    assert report["disposition"] == "QUARANTINED"
 
 
 def test_contract_runs_required_gates_and_blocks_failures(tmp_path: Path) -> None:

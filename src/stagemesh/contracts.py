@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import fnmatch
 import hashlib
 import json
@@ -36,6 +37,15 @@ DEPENDENCY_MANIFESTS = (
     "go.mod",
     "go.sum",
 )
+AGENT_POLICY_EXCEPTIONS = frozenset(
+    {
+        "allow_unrequested_abstraction",
+        "allow_speculative_code",
+        "allow_filler_comments",
+        "allow_documentation_churn",
+        "allow_policy_change",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,21 @@ class ChangeContract:
     exclusive_resources: tuple[str, ...] = ()  # named resources (a database, a port) two tasks must never use at once
     max_changed_files: int | None = None
     max_diff_lines: int | None = None
+    # Atomic Scope Mode is opt-in so historical frozen contract digests remain
+    # byte-for-byte stable.  The existing allowed/forbidden fields remain the
+    # write boundary for legacy contracts.
+    scope_mode: str | None = None  # STRICT | BOUNDED | EXPLORATORY
+    allowed_read_files: tuple[str, ...] = ()
+    allowed_generated_files: tuple[str, ...] = ()
+    approved_scope_expansions: tuple[str, ...] = ()
+    allowed_symbols: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    scope_owner: str | None = None
+    scope_revision: int | None = None
+    scope_exceptions: tuple[str, ...] = ()
+    scope_write_enabled: bool = True
+    forbid_new_imports: bool = False
+    agent_policy_exceptions: tuple[str, ...] = ()
+    agent_policy_owner: str | None = None
 
     @property
     def gates(self) -> tuple[GateCommand, ...]:
@@ -230,6 +255,35 @@ def contract_admission_problem(contract: ChangeContract) -> str | None:
         ):
             return f"contract scope conflict: allowed edit target {path} is protected or forbidden; correct the contract before implementation"
 
+    if contract.scope_mode is not None:
+        if contract.scope_owner is None:
+            return "atomic scope contract requires scope_owner"
+        if contract.scope_revision is None:
+            return "atomic scope contract requires a positive scope_revision"
+        writable = (*contract.allowed_files, *contract.allowed_generated_files, *contract.approved_scope_expansions)
+        for path in (*writable, *contract.allowed_read_files, *(path for path, _ in contract.allowed_symbols)):
+            normalized = path.replace("\\", "/")
+            if normalized.startswith("/") or ":" in normalized or ".." in normalized.split("/"):
+                return f"atomic scope path must stay inside the project: {path}"
+        if contract.scope_mode == "STRICT" and (
+            contract.allowed_files == ("**",)
+            or any(any(char in path for char in "*?[") for path in contract.allowed_files)
+        ):
+            return "STRICT atomic scope requires explicit writable files, not wildcard paths"
+        if contract.scope_mode in {"STRICT", "BOUNDED"} and contract.allowed_files == ("**",):
+            return f"{contract.scope_mode} atomic scope cannot authorize the entire repository"
+        symbol_paths = {path.replace("\\", "/").casefold() for path, _ in contract.allowed_symbols}
+        if any(not _matches(path, contract.allowed_files) for path in symbol_paths):
+            return "allowed_symbols may only target files already present in allowed_files"
+        if contract.approved_scope_expansions and not contract.scope_exceptions:
+            return "approved_scope_expansions require a recorded scope_exceptions justification"
+    if contract.agent_policy_exceptions:
+        if contract.agent_policy_owner is None:
+            return "agent policy exceptions require agent_policy_owner"
+        unknown = sorted(set(contract.agent_policy_exceptions) - AGENT_POLICY_EXCEPTIONS)
+        if unknown:
+            return "unknown agent policy exception(s): " + ", ".join(unknown)
+
     def whitespace_only(gate: GateCommand) -> bool:
         command = gate.command
         program = Path(command[0].replace("\\", "/")).name.casefold() if command else ""
@@ -340,6 +394,18 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
         exclusive_resources=_texts(payload.get("exclusive_resources", ()), "exclusive_resources"),
         max_changed_files=_optional_positive_int(payload.get("max_changed_files"), "max_changed_files"),
         max_diff_lines=_optional_positive_int(payload.get("max_diff_lines"), "max_diff_lines"),
+        scope_mode=_scope_mode(payload.get("scope_mode")),
+        allowed_read_files=_texts(payload.get("allowed_read_files", ()), "allowed_read_files"),
+        allowed_generated_files=_texts(payload.get("allowed_generated_files", ()), "allowed_generated_files"),
+        approved_scope_expansions=_texts(payload.get("approved_scope_expansions", ()), "approved_scope_expansions"),
+        allowed_symbols=_scope_symbols(payload.get("allowed_symbols")),
+        scope_owner=_optional_text(payload.get("scope_owner"), "scope_owner"),
+        scope_revision=_optional_positive_int(payload.get("scope_revision"), "scope_revision"),
+        scope_exceptions=_texts(payload.get("scope_exceptions", ()), "scope_exceptions"),
+        scope_write_enabled=_optional_bool(payload.get("scope_write_enabled"), "scope_write_enabled", default=True),
+        forbid_new_imports=_optional_bool(payload.get("forbid_new_imports"), "forbid_new_imports", default=False),
+        agent_policy_exceptions=_texts(payload.get("agent_policy_exceptions", ()), "agent_policy_exceptions"),
+        agent_policy_owner=_optional_text(payload.get("agent_policy_owner"), "agent_policy_owner"),
     )
 
 
@@ -409,6 +475,20 @@ def evaluate_contract(
         )
     gates: list[GateResult] = []
 
+    if contract.scope_mode is not None:
+        problem = contract_admission_problem(contract)
+        if problem:
+            findings.append({"severity": "error", "code": "atomic_scope_invalid", "message": problem})
+        if changed and not contract.scope_write_enabled:
+            findings.append(
+                {
+                    "severity": "error",
+                    "code": "scope_write_not_authorized",
+                    "message": f"{contract.scope_mode} scope is read-only; proposed edits require owner authorization",
+                }
+            )
+        findings.extend(_atomic_scope_findings(project, baseline_sha, candidate_sha, contract, changed))
+
     if contract.explicit and not changed:
         findings.append({"severity": "error", "code": "empty_diff", "message": "candidate has no changed files"})
 
@@ -443,7 +523,7 @@ def evaluate_contract(
                     "message": f"{path} is explicitly excluded from this change",
                 }
             )
-        if not _matches(path, contract.allowed_files):
+        if not _matches(path, _writable_patterns(contract)):
             findings.append(
                 {
                     "severity": "error",
@@ -892,6 +972,142 @@ def _gate_environment(run_dir: Path, gate: GateCommand) -> dict[str, str] | None
     return environment
 
 
+def scope_policy_payload(contract: ChangeContract) -> dict[str, Any]:
+    """Canonical provider-neutral write policy embedded in a bound task contract."""
+    return {
+        "mode": contract.scope_mode,
+        "allowed_write_files": list(contract.allowed_files),
+        "allowed_read_files": list(contract.allowed_read_files),
+        "allowed_generated_files": list(contract.allowed_generated_files),
+        "approved_scope_expansions": list(contract.approved_scope_expansions),
+        "allowed_symbols": {path: list(symbols) for path, symbols in contract.allowed_symbols},
+        "owner": contract.scope_owner,
+        "revision": contract.scope_revision,
+        "exceptions": list(contract.scope_exceptions),
+        "write_enabled": contract.scope_write_enabled,
+        "forbid_new_imports": contract.forbid_new_imports,
+    }
+
+
+def scope_policy_hash(contract: ChangeContract) -> str:
+    canonical = json.dumps(scope_policy_payload(contract), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _writable_patterns(contract: ChangeContract) -> tuple[str, ...]:
+    return (*contract.allowed_files, *contract.allowed_generated_files, *contract.approved_scope_expansions)
+
+
+def _atomic_scope_findings(
+    project: Path,
+    baseline_sha: str | None,
+    candidate_sha: str,
+    contract: ChangeContract,
+    changed: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    symbol_policy = dict(contract.allowed_symbols)
+    for path in changed:
+        symbols = symbol_policy.get(path.replace("\\", "/"))
+        if symbols:
+            reason = _python_symbol_scope_problem(project, baseline_sha, candidate_sha, path, symbols)
+            if reason:
+                findings.append(
+                    {
+                        "severity": "error",
+                        "code": "scope_symbol_verification_required",
+                        "path": path,
+                        "message": reason,
+                    }
+                )
+    if contract.forbid_new_imports:
+        for path in changed:
+            if not path.casefold().endswith(".py"):
+                continue
+            reason = _new_python_import_problem(project, baseline_sha, candidate_sha, path)
+            if reason:
+                findings.append(
+                    {
+                        "severity": "error",
+                        "code": "scope_new_import_forbidden",
+                        "path": path,
+                        "message": reason,
+                    }
+                )
+    return findings
+
+
+def _git_source(project: Path, sha: str | None, path: str) -> str | None:
+    if not sha:
+        return None
+    normalized = path.replace("\\", "/")
+    result = GitWorkspace(project).run("show", f"{sha}:{normalized}", check=False)
+    return result.stdout if result.returncode == 0 else None
+
+
+def _symbol_spans(source: str) -> dict[str, tuple[int, int]]:
+    tree = ast.parse(source)
+    spans: dict[str, tuple[int, int]] = {}
+
+    def visit(body: list[ast.stmt], prefix: str = "") -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = f"{prefix}.{node.name}" if prefix else node.name
+                decorators = getattr(node, "decorator_list", ())
+                start = min([node.lineno, *(item.lineno for item in decorators)])
+                spans[name] = (start, int(node.end_lineno or node.lineno))
+                visit(node.body, name)
+
+    visit(tree.body)
+    return spans
+
+
+def _without_spans(source: str, spans: list[tuple[int, int]]) -> str:
+    removed = {line for start, end in spans for line in range(start, end + 1)}
+    return "\n".join(text for line, text in enumerate(source.splitlines(), 1) if line not in removed).strip()
+
+
+def _python_symbol_scope_problem(
+    project: Path, baseline_sha: str | None, candidate_sha: str, path: str, symbols: tuple[str, ...]
+) -> str | None:
+    if not path.casefold().endswith(".py"):
+        return "function-level scope has no language-aware verifier for this file; independent approval is required"
+    before = _git_source(project, baseline_sha, path)
+    after = _git_source(project, candidate_sha, path)
+    if before is None or after is None:
+        return "function-level scope cannot verify an added, deleted, or baseline-less file"
+    try:
+        before_spans = _symbol_spans(before)
+        after_spans = _symbol_spans(after)
+    except (SyntaxError, ValueError):
+        return "function-level scope cannot parse both Python revisions"
+    missing = [name for name in symbols if name not in before_spans or name not in after_spans]
+    if missing:
+        return "function-level scope cannot locate the allowed symbol(s) in both revisions: " + ", ".join(missing)
+    old_outside = _without_spans(before, [before_spans[name] for name in symbols])
+    new_outside = _without_spans(after, [after_spans[name] for name in symbols])
+    if old_outside != new_outside:
+        return "candidate changes content outside the authorized symbol(s): " + ", ".join(symbols)
+    return None
+
+
+def _new_python_import_problem(project: Path, baseline_sha: str | None, candidate_sha: str, path: str) -> str | None:
+    before = _git_source(project, baseline_sha, path)
+    after = _git_source(project, candidate_sha, path)
+    if before is None or after is None:
+        return "new-import policy cannot verify an added, deleted, or baseline-less Python file"
+    try:
+        old_tree, new_tree = ast.parse(before), ast.parse(after)
+    except (SyntaxError, ValueError):
+        return "new-import policy cannot parse both Python revisions"
+
+    def imports(tree: ast.AST) -> set[str]:
+        return {ast.dump(node, include_attributes=False) for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))}
+
+    added = imports(new_tree) - imports(old_tree)
+    return f"candidate introduces {len(added)} new Python import statement(s)" if added else None
+
+
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
     normalized = path.replace("\\", "/")
     folded = normalized.casefold()
@@ -948,10 +1164,35 @@ def contract_prompt(contract: ChangeContract) -> str:
         lines.append(f"- Max changed files: {contract.max_changed_files}")
     if contract.max_diff_lines is not None:
         lines.append(f"- Max diff lines: {contract.max_diff_lines}")
+    if contract.scope_mode is not None:
+        lines.extend(
+            [
+                f"- Atomic scope mode: {contract.scope_mode}",
+                f"- Scope owner: {contract.scope_owner}",
+                f"- Scope revision: {contract.scope_revision}",
+                f"- Scope policy hash: {scope_policy_hash(contract)}",
+                f"- Writes authorized: {'yes' if contract.scope_write_enabled else 'no'}",
+            ]
+        )
+        if contract.allowed_read_files:
+            lines.append(f"- Allowed read paths: {', '.join(contract.allowed_read_files)}")
+        if contract.allowed_generated_files:
+            lines.append(f"- Allowed generated files: {', '.join(contract.allowed_generated_files)}")
+        if contract.approved_scope_expansions:
+            lines.append(f"- Owner-approved scope expansions: {', '.join(contract.approved_scope_expansions)}")
+        if contract.allowed_symbols:
+            lines.append("- Allowed symbols (all other content in these files is read-only):")
+            lines.extend(f"  - {path}: {', '.join(symbols)}" for path, symbols in contract.allowed_symbols)
+        if contract.scope_exceptions:
+            lines.append("- Recorded scope exceptions:")
+            lines.extend(f"  - {item}" for item in contract.scope_exceptions)
+        if contract.forbid_new_imports:
+            lines.append("- New imports/dependencies are forbidden by this task policy.")
     lines.extend(
         [
             "Scope discipline:",
             "- Allowed files constrain edits, not read-only investigation.",
+            "- When Allowed read paths are listed, keep investigation inside that explicit read boundary.",
             "- Read directly relevant project source, tests, configuration, and specifications to understand the task; respect project access rules and never read secrets or unrelated private data.",
             "- Do not edit unrelated files, broad refactors, generated noise, dependency manifests, or configuration outside this contract.",
             "- If the task truly needs to edit another path, stop and request an audited scope expansion instead of editing it.",
@@ -972,9 +1213,18 @@ def scope_classification(contract: ChangeContract, changed: tuple[str, ...] | li
         "dependency_manifest_without_gate": [],
         "noise": [],
     }
+    if contract.scope_mode is not None:
+        result["generated"] = []
+        result["approved_expansion"] = []
     for path in changed:
         if _matches(path, contract.allowed_files):
             result["in_scope"].append(path)
+        elif _matches(path, contract.allowed_generated_files):
+            result["in_scope"].append(path)
+            result["generated"].append(path)
+        elif _matches(path, contract.approved_scope_expansions):
+            result["in_scope"].append(path)
+            result["approved_expansion"].append(path)
         else:
             result["outside_allowed"].append(path)
         if _matches(path, contract.exclusions):
@@ -1018,6 +1268,35 @@ def _optional_text(value: Any, field: str) -> str | None:
     if value is None:
         return None
     return _required_text(value, field)
+
+
+def _scope_mode(value: Any) -> str | None:
+    if value is None:
+        return None
+    mode = _required_text(value, "scope_mode").upper()
+    if mode not in {"STRICT", "BOUNDED", "EXPLORATORY"}:
+        raise ContractError("scope_mode must be STRICT, BOUNDED, or EXPLORATORY")
+    return mode
+
+
+def _scope_symbols(value: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ContractError("allowed_symbols must be an object mapping paths to symbol lists")
+    rows = []
+    for path, symbols in value.items():
+        clean_path = _required_text(path, "allowed_symbols path").replace("\\", "/")
+        rows.append((clean_path, _texts(symbols, f"allowed_symbols[{clean_path}]")))
+    return tuple(sorted(rows, key=lambda row: row[0].casefold()))
+
+
+def _optional_bool(value: Any, field: str, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if type(value) is not bool:
+        raise ContractError(f"{field} must be a boolean")
+    return value
 
 
 def _commands(value: Any, field: str) -> tuple[GateCommand, ...]:
@@ -1110,6 +1389,24 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
         payload["max_changed_files"] = contract.max_changed_files
     if contract.max_diff_lines is not None:
         payload["max_diff_lines"] = contract.max_diff_lines
+    if contract.scope_mode is not None:
+        payload.update(
+            {
+                "scope_mode": contract.scope_mode,
+                "allowed_read_files": list(contract.allowed_read_files),
+                "allowed_generated_files": list(contract.allowed_generated_files),
+                "approved_scope_expansions": list(contract.approved_scope_expansions),
+                "allowed_symbols": {path: list(symbols) for path, symbols in contract.allowed_symbols},
+                "scope_owner": contract.scope_owner,
+                "scope_revision": contract.scope_revision,
+                "scope_exceptions": list(contract.scope_exceptions),
+                "scope_write_enabled": contract.scope_write_enabled,
+                "forbid_new_imports": contract.forbid_new_imports,
+            }
+        )
+    if contract.agent_policy_exceptions:
+        payload["agent_policy_exceptions"] = list(contract.agent_policy_exceptions)
+        payload["agent_policy_owner"] = contract.agent_policy_owner
     return payload
 
 

@@ -10,6 +10,7 @@
   "authorization_required": [
     ".github/**",
     ".gitignore",
+    ".stagemesh/agent-policy.json",
     ".stagemesh/quality-policy.json",
     "build_backend.py",
     "pyproject.toml",
@@ -19,6 +20,8 @@
     "pnpm-lock.yaml",
     "yarn.lock",
     "scripts/quality_gate.py",
+    "src/stagemesh/agent_policy.py",
+    "src/stagemesh/candidate_inspection.py",
     "src/stagemesh/quality_policy.py"
   ],
   "gates": [

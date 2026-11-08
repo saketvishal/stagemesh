@@ -22,7 +22,8 @@ their own language-appropriate direct commands. No Python tool is imposed when a
 
 The migration boundary is deliberate. The existing tree contains legacy complexity and typing debt, so this change does not claim
 that the entire repository already passes strict Mypy, Bugbear, or McCabe checks. New source files are held to the stronger policy;
-the explicit `strict_modules` list is expanded as legacy modules are repaired. Lowering thresholds, removing required lint/type
+Mypy follows neither imported legacy modules nor their transitive debt during this target-bounded check. The explicit
+`strict_modules` list is expanded as legacy modules are repaired. Lowering thresholds, removing required lint/type
 categories, using unsafe working directories, or supplying shell command strings makes the policy unreadable and validation fails.
 
 ## Trusted policy and evidence
