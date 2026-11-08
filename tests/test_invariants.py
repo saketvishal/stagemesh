@@ -102,7 +102,7 @@ def test_dead_validation_restarts_against_same_candidate(store: Store, tmp_path:
     execution_id = store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.VALIDATION, candidate_sha=sha)
     store.finish_execution(execution_id, ExecutionStatus.UNKNOWN, sha)
     Coordinator(store, tmp_path).tick()
-    assert store.has_evidence(task_id, sha, EvidenceKind.VALIDATION)
+    assert store.has_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED)
 
 
 def test_reviewer_provider_failure_does_not_restart_implementation(store: Store, tmp_path: Path) -> None:

@@ -650,6 +650,10 @@ def test_validator_records_bound_evidence(test_env, api_manifest, monkeypatch, d
     project, artifact_root, bound, _, api_log = test_env
     monkeypatch.setattr("stagemesh.validation.contract_for_candidate", lambda *args: bound)
     monkeypatch.setattr("stagemesh.validation.changed_files", lambda *args: ())
+    monkeypatch.setattr(
+        "stagemesh.validation.inspect_candidate_diff",
+        lambda *args, **kwargs: {"candidate_sha": bound.candidate_sha, "disposition": "ACCEPTABLE"},
+    )
     def evaluate(*args, **kwargs):
         if damage == "during_run":
             (project / "package.json").write_text('{"scripts":{"test:api":"changed"}}')

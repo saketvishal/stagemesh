@@ -34,6 +34,7 @@ from .persistence import Store
 from .process_identity import owner_execution_fields
 from .queue_control import OperatorStopRequested
 from .remediation import finding_identity
+from .review_identity import IMPLEMENTATION_DERIVATION, implementation_identity
 from .validation_plan import (
     DOCS_ONLY,
     contract_with_browser_e2e_gates,
@@ -84,6 +85,21 @@ def _integration_ref(project: Path) -> str | None:
         return resolve_integration_ref(project, load_config(project).integration_ref)
     except Exception:  # noqa: BLE001 - selection hygiene must never fail validation; without a ref nothing is excluded
         return None
+
+
+def _inspection_workspace(store: Store, project: Path, task_id: str, candidate_sha: str) -> Path | None:
+    """Return the agent worktree unless a trusted mechanical derivation produced this SHA."""
+    derived = store.conn.execute(
+        "SELECT 1 FROM audit_events WHERE event_type=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+        "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.candidate_sha')=? LIMIT 1",
+        (IMPLEMENTATION_DERIVATION, task_id, candidate_sha),
+    ).fetchone()
+    identity = implementation_identity(store, task_id, candidate_sha)
+    origins = identity.get("origins", []) if identity is not None else []
+    if derived is not None and origins and all(origin.get("candidate_sha") != candidate_sha for origin in origins):
+        return None
+    return task_workspace(project, task_id)
 
 
 class Validator:
@@ -151,7 +167,7 @@ class Validator:
                     bound.baseline_sha,
                     candidate_sha,
                     contract,
-                    workspace=task_workspace(project, task_id),
+                    workspace=_inspection_workspace(store, project, task_id, candidate_sha),
                 )
                 record_candidate_inspection(store, task_id, diff_inspection)
                 if diff_inspection["disposition"] == "QUARANTINED":
@@ -162,6 +178,7 @@ class Validator:
                         {
                             "severity": "error",
                             "code": "candidate_diff_quarantined",
+                            "path": ".",
                             "message": "independent diff inspection quarantined the exact candidate commit",
                         }
                     )
@@ -170,6 +187,7 @@ class Validator:
                         {
                             "severity": "review",
                             "code": "candidate_diff_independent_review_required",
+                            "path": ".",
                             "message": "candidate risk signals require independent review before promotion",
                         }
                     )
@@ -178,6 +196,7 @@ class Validator:
                     {
                         "severity": "error",
                         "code": "candidate_diff_inspection_failed",
+                        "path": ".",
                         "message": f"independent candidate diff inspection failed: {exc}",
                     }
                 )
