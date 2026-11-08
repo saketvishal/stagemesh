@@ -60,7 +60,7 @@ source-ineligible, done and already retired tasks are only reported.
 | --- | --- |
 | `runtime: STALE` | Use the printed source command now (`PYTHONPATH=src python -c "from stagemesh.cli import main; main()" <command>`) and refresh the install with the printed `python scripts/bootstrap_stagemesh.py`. Nothing reinstalls automatically. The section names the installed command, the source command and the commands the install lacks. |
 | `open wave PRs` | Merge them in order, oldest first (they are stacked). See step 3. |
-| `local main: ahead / behind / diverged` | Do not start a wave until local `main` matches `origin/main`. |
+| `local main: ahead / behind / diverged` | Do not start a wave until local `main` matches `origin/main`. Pull only fixes a behind branch; preserve ahead/diverged work on a feature branch/PR before restoring `main`. |
 | `running executions / active claims` | Work is in flight. Wait, or run `stagemesh recover-stale` if it is stale. |
 | `worktrees: cleanable / done but not in main yet / resumable / other` | Informational. `cleanable` ones can be removed with `stagemesh worktrees sweep` (preview with `--dry-run`); `done but not in main yet` are waiting on a PR; `resumable` belong to unfinished tasks; `other` is a leftover directory with no git worktree in it. |
 | `tasks needing a design decision` | These are blocked on review findings that were not resolved in the remediation budget. A person decides; the wave never retries them. |

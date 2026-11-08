@@ -103,7 +103,7 @@ Before any work begins, `stagemesh run-window` runs preflight checks and refuses
 - **Paused queue:** Queue admission is not running (e.g. paused via queue controls).
 - **Live or unknown-identity executions:** Active executions exist whose process is `LIVE` (operator must wait or terminate) or `UNKNOWN` (fails closed; requires operator verification via `stagemesh recover-stale`). Executions provably `DEAD` are recovered automatically.
 - **Active claims:** Active claims exist without running executions.
-- **Local main ahead of or diverged from origin:** In PR mode, local `main` must not be ahead of or diverged from `origin` (`behind` is permitted with a pull recommendation).
+- **Local main ahead of or diverged from origin:** In PR mode, local `main` must not be ahead of or diverged from `origin` (`behind` is permitted with a pull recommendation). `git pull` cannot remove a local-only commit. Preserve local commits and dirty work on a feature branch/PR, then restore local `main` to `origin/main`; StageMesh deliberately does not push or reset unreviewed work.
 - **Providers that cannot implement and independently review:** The configured provider setup cannot supply both implementation and independent review capabilities, or fails live acceptance when `--strict-live` is active.
 - **Unwritable report path:** The report file cannot be written to the designated `--report` location.
 

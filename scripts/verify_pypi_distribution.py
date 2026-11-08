@@ -61,6 +61,10 @@ def inspect_wheel(wheel: Path, expected_tag: str) -> str:
 def verify_install(wheel: Path, version: str) -> None:
     with tempfile.TemporaryDirectory(prefix="stagemesh-pypi-verify-") as raw:
         root = Path(raw)
+        if os.name == "nt":
+            # Exercise a realistic deep checkout/venv path while leaving room for standard venv files.
+            root = root / ("deep-project-environment-" + "x" * 72)
+            root.mkdir()
         environment = root / "venv"
         venv.EnvBuilder(with_pip=True, clear=True).create(environment)
         python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -74,6 +78,14 @@ def verify_install(wheel: Path, version: str) -> None:
         version_result = _run([str(command), "--version"], root, clean_env)
         if version not in version_result.stdout:
             raise DistributionVerificationError("installed console command reports the wrong version")
+        skills_result = _run([str(command), "skills", "--json"], root, clean_env)
+        try:
+            skills = json.loads(skills_result.stdout)
+        except json.JSONDecodeError as exc:
+            raise DistributionVerificationError("installed bundled-skill inventory did not return valid JSON") from exc
+        inventory = skills.get("skills") if isinstance(skills, dict) else None
+        if not isinstance(inventory, list) or len(inventory) != 5 or any(row.get("integrity") != "verified" for row in inventory):
+            raise DistributionVerificationError("installed bundled skills are missing or failed integrity verification")
         project = root / "new-project"
         project.mkdir()
         initialized = _run(

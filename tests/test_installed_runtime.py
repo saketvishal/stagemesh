@@ -54,6 +54,7 @@ def _run(venv: Path, project: Path, *args: str, env: dict[str, str] | None = Non
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
 
 
@@ -69,7 +70,7 @@ def project(tmp_path: Path, venv: Path) -> Path:
     proj = tmp_path / "host"
     proj.mkdir()
     subprocess.run(["git", "init", "-q", str(proj)], check=True)
-    assert _run(venv, proj, "init").returncode == 0
+    assert _run(venv, proj, "init", "--allow-incomplete").returncode == 0
     return proj
 
 
@@ -80,7 +81,14 @@ def _runtime_info(venv: Path, project: Path, env: dict[str, str] | None = None) 
 
 
 def test_installed_runtime_runs_without_source_on_pythonpath(venv: Path, project: Path) -> None:
-    proc = subprocess.run([str(_cli(venv)), "--version"], cwd=project, env=_env(), capture_output=True, text=True)
+    proc = subprocess.run(
+        [str(_cli(venv)), "--version"],
+        cwd=project,
+        env=_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.startswith("stagemesh ")
     assert "stagemesh runtime: installed" in proc.stdout
@@ -93,7 +101,7 @@ def test_runtime_survives_unavailable_source_checkout(venv: Path, project: Path,
     gone = tmp_path / "moved-away" / "src"  # where a source checkout used to be: nothing there now
     info = _runtime_info(venv, project, env=_env(PYTHONPATH=str(gone)))
     assert info["mode"] == "installed"
-    assert not str(SOURCE) in info["package_path"]
+    assert str(SOURCE) not in info["package_path"]
 
 
 def test_doctor_reports_independent_runtime_and_project_state(venv: Path, project: Path) -> None:
@@ -152,7 +160,12 @@ def test_project_shim_ignores_pythonpath(venv: Path, project: Path) -> None:
     shim = project / "shim.cmd"
     shim.write_text(boot._windows_shim(_cli(venv)), encoding="utf-8")
     proc = subprocess.run(
-        ["cmd", "/c", str(shim), "--version"], cwd=project, env=_env(PYTHONPATH=str(SOURCE / "src")), capture_output=True, text=True
+        ["cmd", "/c", str(shim), "--version"],
+        cwd=project,
+        env=_env(PYTHONPATH=str(SOURCE / "src")),
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert "stagemesh runtime: installed" in proc.stdout, proc.stdout + proc.stderr
 

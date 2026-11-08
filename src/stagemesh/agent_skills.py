@@ -17,7 +17,10 @@ from .capabilities import (
     resolve_attachments,
 )
 
-SKILL_ROOT = Path(__file__).resolve().parent / "skill_packs"
+_PACKAGE_ROOT = Path(__file__).resolve().parent
+_SOURCE_SKILL_ROOT = _PACKAGE_ROOT / "skill_packs"
+_COMPACT_SKILL_ROOT = _PACKAGE_ROOT / "_sp"
+SKILL_ROOT = _SOURCE_SKILL_ROOT if _SOURCE_SKILL_ROOT.is_dir() else _COMPACT_SKILL_ROOT
 _SKILL_FILES = {
     "frontend-design": "frontend-design/SKILL.md",
     "receiving-code-review": "superpowers/receiving-code-review/SKILL.md",
@@ -173,6 +176,16 @@ class SkillPackError(RuntimeError):
     """A selected, bundled skill is unavailable or differs from its source snapshot."""
 
 
+def _resource_path(relative: str) -> Path:
+    if SKILL_ROOT.name != "_sp":
+        return SKILL_ROOT / relative
+    if relative == "manifest.json":
+        return SKILL_ROOT / relative
+    logical = Path(relative)
+    digest = hashlib.sha256(logical.as_posix().encode("utf-8")).hexdigest()[:16]
+    return SKILL_ROOT / f"{digest}{logical.suffix.casefold()}"
+
+
 def _task_text(title: str, contract: object | None) -> str:
     fields = [title, str(getattr(contract, "objective", ""))]
     for attr in ("acceptance_criteria", "public_api", "spec_refs", "skill_refs", "capability_refs"):
@@ -264,7 +277,7 @@ def select_skills(
 def _resolve_resources(skills: tuple[str, ...]) -> dict[str, Path]:
     root = SKILL_ROOT.resolve()
     try:
-        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads(_resource_path("manifest.json").read_text(encoding="utf-8"))
         if manifest.get("format_version") != 1 or not isinstance(manifest.get("resources"), dict):
             raise ValueError("unsupported manifest format")
     except (OSError, ValueError, AttributeError) as exc:
@@ -276,7 +289,7 @@ def _resolve_resources(skills: tuple[str, ...]) -> dict[str, Path]:
         for relative in (main, *_SUPPORT_FILES[skill]):
             if relative in checked:
                 continue
-            path = (root / relative).resolve()
+            path = _resource_path(relative).resolve()
             try:
                 if not path.is_relative_to(root):
                     raise ValueError("resource escapes installed skill pack")
@@ -289,7 +302,7 @@ def _resolve_resources(skills: tuple[str, ...]) -> dict[str, Path]:
             except (OSError, KeyError, TypeError, ValueError) as exc:
                 raise SkillPackError(f"unavailable skill resource {relative}: {exc}") from exc
             checked.add(relative)
-        resolved[skill] = root / main
+        resolved[skill] = _resource_path(main)
     return resolved
 
 
@@ -298,7 +311,7 @@ def builtin_skill_inventory() -> list[dict[str, object]]:
     names = tuple(_SKILL_FILES)
     files = _resolve_resources(names)
     try:
-        manifest = json.loads((SKILL_ROOT / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads(_resource_path("manifest.json").read_text(encoding="utf-8"))
         resources = manifest["resources"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise SkillPackError(f"cannot load bundled skill manifest: {exc}") from exc
@@ -441,6 +454,12 @@ def skill_prompt(
         f"- Skill {name}: {json.dumps(str(path), ensure_ascii=False)}"
         for name, path in files.items()
     )
+    for name in selected:
+        lines.extend(
+            f"- Companion for {name} ({relative}): "
+            f"{json.dumps(str(_resource_path(relative)), ensure_ascii=False)}"
+            for relative in _SUPPORT_FILES[name]
+        )
     lines.extend(
         f"- Project skill {name}: {json.dumps(str(path), ensure_ascii=False)}"
         for name, path in project_files.items()

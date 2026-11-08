@@ -30,6 +30,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-stagemesh.
 
 The installer never enables a schedule implicitly. Its source-pin, plan, uninstall, and wheel-integrity behavior is documented in [project-local runtime](docs/project-local-runtime.md). See [versioning](docs/versioning.md) for the stable-tag workflow.
 
+### Upgrade, reinitialize, or uninstall
+
+Upgrade a pip-installed copy in the active Python environment, verify the selected version, and rerun initialization so the project can apply compatible runtime migrations and readiness checks:
+
+```bash
+python -m pip install --upgrade --no-cache-dir stagemesh
+stagemesh --version
+stagemesh init
+```
+
+`stagemesh init` is safe to rerun in the same project. It reuses `.stagemesh`, applies idempotent setup and database migrations, and preserves existing profile and provider-registry edits. It does not create, replace, or delete the project's application source directories.
+
+StageMesh does not provide a `stagemesh uninstall` subcommand. Remove a pip-installed copy from the active environment with:
+
+```bash
+python -m pip uninstall stagemesh
+```
+
+Package removal deliberately preserves the project's `.stagemesh` directory, including configuration, audit history, and runtime data. Delete that directory separately only when intentionally discarding the project's StageMesh state. A copy installed by the reviewed Windows per-user installer can instead be removed with `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-stagemesh.ps1 -Action Uninstall`; that operation also leaves project-local `.stagemesh` directories untouched.
+
 Initialize a project and run one bounded task loop:
 
 ```bash
@@ -40,6 +60,8 @@ stagemesh status
 ```
 
 `stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without launching them. It returns success and says the project is ready only when it can see real validation gates, enough available and explicitly authorized providers for the selected review policy, and synchronized task sources. Otherwise it creates the safe setup files, reports every known blocker with a concrete fix, and exits with status 2; rerun it after fixing those items. `--allow-incomplete` exists for bounded packaging and synthetic harnesses and never claims readiness. The registry is a snapshot: rerunning init does not replace operator edits, arbitrary command providers can be added under `providers`, and an explicitly empty registry stays empty. Detection or registration does **not** authenticate, authorize, or invoke a provider; unattended use still requires the separate `authorization.unattended_providers` opt-in.
+
+`stagemesh --help` shows the small everyday operator interface rather than every maintenance and internal command. Existing advanced commands remain compatible and are listed by category with `stagemesh --help-all`; machine integrations use the stable hidden command-catalog JSON interface instead of scraping human help text.
 
 For a fresh GitHub checkout, `stagemesh init` also detects `origin`, configures the GitHub task source, and reads open issues. When `STAGEMESH_GITHUB_TOKEN` has Issues write permission, it classifies only issues that have no labels: issues with a valid explicit contract or a deterministic auto-plan become `stagemesh:ready`; issues missing safe scope or validation information become `stagemesh:needs-triage`. Existing labels and explicit task-source policy are never replaced. The classification and any failure are recorded in the audit ledger, and the command resyncs successful labels before returning. Initialization still makes zero provider calls and does not start coding; use `stagemesh run-window` after authorizing the intended providers.
 

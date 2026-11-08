@@ -6,6 +6,11 @@ the installed `stagemesh` command creates a new project's safe setup without pro
 project still needs validation and provider configuration. The verified artifact is passed unchanged to a
 separate `pypi` environment job.
 
+Bundled skill resources retain their logical source names, upstream URLs, and blob-integrity checks, but the wheel stores their physical
+members under a compact logical-path-derived layout. This avoids default Windows path-length failures in deep virtual environments. Package
+acceptance installs into a deliberately deep Windows path and loads the complete five-skill inventory from the installed wheel; source
+and editable checkouts continue to use the readable `src/stagemesh/skill_packs` layout.
+
 Publishing uses PyPI Trusted Publishing with GitHub OIDC. No long-lived PyPI token belongs in GitHub. The first `v0.6.0` upload created
 the public PyPI project through this publisher identity, which remains the required release identity:
 

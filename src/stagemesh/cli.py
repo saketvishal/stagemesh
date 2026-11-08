@@ -5273,12 +5273,174 @@ def command_queue_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+_PRIMARY_COMMAND_HELP = {
+    "init": "Initialize or safely refresh project-local StageMesh setup",
+    "doctor": "Explain project readiness, blockers, and the next safe action",
+    "run-window": "Run a bounded, supervised development window",
+    "status": "Show the current task ledger status",
+    "queue": "Inspect or reconcile the task queue",
+    "task-doctor": "Explain one task's state and next action",
+    "provider-auth": "Check provider installation and login state without a model call",
+    "capabilities": "Inspect and manage project-local skills, MCP servers, and plugins",
+    "config": "Inspect the effective project configuration",
+    "ui": "Open the local read-only-by-default operator UI",
+    "audit": "Read or export the durable audit trail",
+}
+
+_COMMAND_GROUPS = (
+    (
+        "everyday",
+        "Everyday project operation",
+        tuple(_PRIMARY_COMMAND_HELP),
+    ),
+    (
+        "task",
+        "Task planning, inspection, repair, and recovery",
+        (
+            "diagnose",
+            "rebind-contract",
+            "contract-check",
+            "spec-audit",
+            "rebaseline-task",
+            "finding-disposition",
+            "delivery-unblock",
+            "advance-baseline",
+            "survivor-wave",
+            "follow-up",
+            "activity",
+            "activity-periods",
+            "efficiency",
+            "task-timing",
+            "queue-run",
+            "queue-control",
+            "handoff",
+            "continue",
+            "worktrees",
+            "plan",
+            "retry-task",
+            "run-ready",
+            "project-smoke",
+            "profile",
+            "recover-stale",
+            "recover-implementation-identity",
+            "adopt-candidate",
+            "health",
+            "validation-plan",
+        ),
+    ),
+    (
+        "provider",
+        "Provider and capability diagnostics",
+        (
+            "cooldown",
+            "provider-profile",
+            "capacity",
+            "skills",
+            "provider-authorization",
+            "provider-acceptance",
+            "provider-smoke",
+            "github-acceptance",
+        ),
+    ),
+    (
+        "automation",
+        "Automation, distributed-worker, and local service internals",
+        (
+            "driver",
+            "test-observation",
+            "backend",
+            "worker",
+            "operator",
+            "serve",
+            "dashboard",
+            "demo",
+            "work",
+            "registry",
+            "retries",
+            "evidence",
+            "ci-wait",
+            "autonomy",
+        ),
+    ),
+    (
+        "release",
+        "Release, acceptance, CI, and deployment planning",
+        (
+            "release-readiness",
+            "release",
+            "report",
+            "acceptance-report",
+            "acceptance-matrix",
+            "end-to-end-acceptance",
+            "completion-audit",
+            "ci",
+            "ci-optimize-plan",
+            "remote-hosting-plan",
+        ),
+    ),
+)
+
+
+def _top_level_commands(parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return tuple(sorted(action.choices))
+    return ()
+
+
+def _command_catalog(parser: argparse.ArgumentParser) -> dict[str, object]:
+    commands = _top_level_commands(parser)
+    available = set(commands)
+    groups = {
+        key: [name for name in names if name in available]
+        for key, _description, names in _COMMAND_GROUPS
+    }
+    grouped = {name for names in groups.values() for name in names}
+    if ungrouped := sorted(available - grouped):
+        groups["uncategorized"] = ungrouped
+    return {
+        "schema": "stagemesh.command-catalog/1",
+        "commands": list(commands),
+        "default_help": [name for name in _PRIMARY_COMMAND_HELP if name in available],
+        "groups": groups,
+    }
+
+
+def _format_command_catalog(parser: argparse.ArgumentParser) -> str:
+    catalog = _command_catalog(parser)
+    groups = catalog["groups"]
+    assert isinstance(groups, dict)
+    descriptions = {key: description for key, description, _names in _COMMAND_GROUPS}
+    lines = [
+        "StageMesh command catalog",
+        "",
+        "Normal `stagemesh --help` shows the everyday interface. Existing advanced commands remain compatible.",
+    ]
+    for key, names in groups.items():
+        assert isinstance(key, str) and isinstance(names, list)
+        lines.extend(("", f"{descriptions.get(key, key.title())}:", "  " + "  ".join(names)))
+    lines.extend(("", "Use `stagemesh COMMAND --help` for command-specific options."))
+    return "\n".join(lines)
+
+
+def _curate_default_command_help(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    visible = []
+    for choice in sub._choices_actions:
+        if choice.dest not in _PRIMARY_COMMAND_HELP:
+            continue
+        choice.help = _PRIMARY_COMMAND_HELP[choice.dest]
+        visible.append(choice)
+    sub._choices_actions[:] = visible
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stagemesh")
     parser.add_argument("--project", default=".")
     parser.add_argument("--version", action="store_true", help="Print the StageMesh version, install path and provenance, then exit")
-    sub = parser.add_subparsers(dest="command", required=False)
-    init = sub.add_parser("init")
+    parser.add_argument("--help-all", action="store_true", help="Show the complete categorized command catalog, including advanced commands")
+    parser.add_argument("--command-catalog-json", action="store_true", help=argparse.SUPPRESS)
+    sub = parser.add_subparsers(dest="command", required=False, metavar="COMMAND")
+    init = sub.add_parser("init", help=_PRIMARY_COMMAND_HELP["init"])
     init.add_argument("--task")
     init.add_argument("--register", action="store_true")
     init.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
@@ -5289,7 +5451,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=command_init)
-    doctor = sub.add_parser("doctor")
+    doctor = sub.add_parser("doctor", help=_PRIMARY_COMMAND_HELP["doctor"])
     doctor.add_argument("--json", action="store_true")
     doctor.add_argument("--no-network", action="store_true", help="Do not ask GitHub for open wave PRs")
     doctor.add_argument(
@@ -5745,7 +5907,7 @@ def build_parser() -> argparse.ArgumentParser:
     cont.set_defaults(func=command_continue)
     cont.add_argument("--resume-scope", help="Resume a saved scope without widening its label")
     cont.add_argument("--clear-label", action="store_true", help="Explicitly clear --resume-scope's label")
-    status = sub.add_parser("status")
+    status = sub.add_parser("status", help=_PRIMARY_COMMAND_HELP["status"])
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
     worktrees = sub.add_parser("worktrees", help="Inspect or reconcile StageMesh-owned task worktrees")
@@ -5992,7 +6154,7 @@ def build_parser() -> argparse.ArgumentParser:
     capability_preflight.add_argument("--task", required=True)
     capability_preflight.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     capability_preflight.set_defaults(func=command_capabilities)
-    config = sub.add_parser("config")
+    config = sub.add_parser("config", help=_PRIMARY_COMMAND_HELP["config"])
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")
     config.set_defaults(func=command_config)
@@ -6157,7 +6319,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--output", default=".stagemesh/completion-audit.json")
     audit.add_argument("--json", action="store_true")
     audit.set_defaults(func=command_completion_audit)
-    audit_log = sub.add_parser("audit")
+    audit_log = sub.add_parser("audit", help=_PRIMARY_COMMAND_HELP["audit"])
     audit_log.add_argument("--output")
     audit_log.add_argument("--limit", type=int, default=500)
     audit_log.add_argument("--json", action="store_true")
@@ -6220,12 +6382,19 @@ def build_parser() -> argparse.ArgumentParser:
     remote_hosting.add_argument("--json", action="store_true")
     remote_hosting.set_defaults(func=command_remote_hosting_plan)
     register_autonomy_commands(sub)
+    _curate_default_command_help(sub)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command_catalog_json:
+        print(json.dumps(_command_catalog(parser), indent=2, sort_keys=True))
+        return 0
+    if args.help_all:
+        print(_format_command_catalog(parser))
+        return 0
     if args.version:
         print(f"stagemesh {__version__}")
         for line in format_runtime(runtime_info()):

@@ -481,6 +481,12 @@ def test_built_wheel_delivers_all_resources_without_source_checkout(tmp_path: Pa
     wheel = tmp_path / backend.build_wheel(str(tmp_path))
     installed = tmp_path / "installed"
     with zipfile.ZipFile(wheel) as archive:
+        skill_members = [name for name in archive.namelist() if name.startswith("stagemesh/_sp/")]
+        manifest = json.loads((SOURCE / "src/stagemesh/skill_packs/manifest.json").read_text(encoding="utf-8"))
+        assert len(skill_members) == len(manifest["resources"]) + 1
+        assert len(skill_members) == len(set(skill_members))
+        assert max(map(len, skill_members)) < 50
+        assert not any("/skill_packs/" in name for name in archive.namelist())
         archive.extractall(installed)
     consumer = """
 import json, sys
@@ -489,10 +495,13 @@ sys.path.insert(0, sys.argv[1])
 from stagemesh.agent_skills import skill_prompt
 from stagemesh.contracts import ChangeContract
 prompt = skill_prompt('Fix UI regression', ChangeContract(objective='Fix UI regression', allowed_files=('web/Page.tsx',)), remediation=True)
-paths = [Path(json.loads(line.split(': ', 1)[1])) for line in prompt.splitlines() if line.startswith('- Skill ')]
-assert len(paths) == 5
-assert all(p.is_relative_to(Path(sys.argv[1])) and p.read_text(encoding='utf-8') for p in paths)
-print(json.dumps([p.parent.name for p in paths]))
+rows = [(line.split(': ', 1)[0].removeprefix('- Skill '), Path(json.loads(line.split(': ', 1)[1]))) for line in prompt.splitlines() if line.startswith('- Skill ')]
+companions = [Path(json.loads(line.split(': ', 1)[1])) for line in prompt.splitlines() if line.startswith('- Companion ')]
+assert len(rows) == 5 and companions
+assert all(p.is_relative_to(Path(sys.argv[1])) and p.read_bytes() for _, p in rows)
+assert all(p.is_relative_to(Path(sys.argv[1])) and p.read_bytes() for p in companions)
+assert all('_sp' in p.parts and len(p.relative_to(Path(sys.argv[1])).as_posix()) < 60 for _, p in rows)
+print(json.dumps([name for name, _ in rows]))
 """
     result = subprocess.run(
         [sys.executable, "-I", "-c", consumer, str(installed)],

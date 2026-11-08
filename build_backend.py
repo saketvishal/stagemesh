@@ -18,6 +18,14 @@ def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
 
 
+def _compact_skill_arcname(relative: Path) -> str:
+    """Keep immutable logical skill paths while avoiding Windows MAX_PATH failures at install time."""
+    if relative.as_posix() == "manifest.json":
+        return "stagemesh/_sp/manifest.json"
+    digest = hashlib.sha256(relative.as_posix().encode("utf-8")).hexdigest()[:16]
+    return f"stagemesh/_sp/{digest}{relative.suffix.casefold()}"
+
+
 def _metadata() -> str:
     headers = [
         "Metadata-Version: 2.3",
@@ -114,13 +122,15 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         if missing_ui:
             raise FileNotFoundError(f"operator UI assets missing from the source tree: {', '.join(missing_ui)}")
         # The operator UI is exactly these static assets served by `stagemesh serve`; nothing else in ui/ ships.
-        asset_paths = [
-            *sorted((root / "src" / "stagemesh" / "skill_packs").rglob("*")),
-            *(root / "src" / "stagemesh" / "ui" / name for name in UI_ASSETS),
-        ]
-        for path in asset_paths:
+        skill_root = root / "src" / "stagemesh" / "skill_packs"
+        for path in sorted(skill_root.rglob("*")):
             if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".py":
                 continue
+            arcname = _compact_skill_arcname(path.relative_to(skill_root))
+            data = path.read_bytes()
+            zf.writestr(arcname, data)
+            records.append((arcname, data))
+        for path in (root / "src" / "stagemesh" / "ui" / name for name in UI_ASSETS):
             arcname = path.relative_to(root / "src").as_posix()
             data = path.read_bytes()
             zf.writestr(arcname, data)
