@@ -16,7 +16,13 @@ Install the development checkout:
 python -m pip install -e ".[dev]"
 ```
 
-Or install the known-good stable package tag:
+After the first trusted PyPI release, a new user installs StageMesh without a source checkout:
+
+```bash
+python -m pip install stagemesh
+```
+
+Until that publication is verified, install the known-good stable package tag:
 
 ```bash
 python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.5.0"
@@ -137,4 +143,5 @@ Projects remain PR-only unless they explicitly configure hosted or StageMesh-con
 - [Remote-hosting security plan](docs/remote-hosting-security.md)
 - [Workspace and task recovery](docs/workspace-and-task-recovery.md)
 - [Reliable delivery](docs/reliable-delivery.md)
+- [PyPI publishing and public installation](docs/pypi-publishing.md)
 - [README information-architecture review](docs/readme-review.md)
