@@ -1,0 +1,12 @@
+{
+  "schema": "stagemesh.agent-coding-policy/1",
+  "policy_id": "stagemesh-default-coding-policy",
+  "approved_by": "repository-owner",
+  "constraints": {
+    "no_unrequested_abstractions": true,
+    "no_speculative_code": true,
+    "no_filler_comments": true,
+    "no_unsolicited_documentation_churn": true,
+    "no_policy_evasion": true
+  }
+}

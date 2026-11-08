@@ -33,6 +33,8 @@ from .contracts import (
     changed_files,
     contract_admission_problem,
     parse_contract,
+    scope_policy_hash,
+    scope_policy_payload,
     task_contract_path,
 )
 from .diagnosis import (
@@ -228,6 +230,20 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         raise RecoveryRefusal("invalid_contract", f"contract file is invalid: {exc}") from exc
     if not contract.explicit:
         raise RecoveryRefusal("invalid_contract", "change contract must be explicit")
+    try:
+        previous_contract = parse_contract(json.loads(str(old["canonical_json"]))) if old is not None else None
+    except (ContractError, ValueError):
+        previous_contract = None  # legacy repair still proceeds; an unreadable old policy cannot authorize a widening
+    scope_revised = bool(
+        previous_contract is not None
+        and previous_contract.scope_mode is not None
+        and scope_policy_payload(previous_contract) != scope_policy_payload(contract)
+    )
+    if scope_revised and not (reason or "").strip():
+        raise RecoveryRefusal(
+            "scope_revision_reason_required",
+            "changing an active Atomic Scope policy requires --reason from the scope owner",
+        )
     if old is None and store.task_baseline(task_id) is None:
         raise RecoveryRefusal("missing_baseline", "task has no recorded baseline; establish its baseline before rebinding rather than guessing from the checkout")
     classification = []
@@ -344,6 +360,22 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         **changes,
     }
     record_audit(store, REBIND_EVENT, payload)
+    if scope_revised and previous_contract is not None:
+        record_audit(
+            store,
+            "task.scope_policy_revised",
+            {
+                "task_id": task_id,
+                "old_policy_hash": scope_policy_hash(previous_contract),
+                "new_policy_hash": scope_policy_hash(contract),
+                "old_policy": scope_policy_payload(previous_contract),
+                "new_policy": scope_policy_payload(contract),
+                "reason": (reason or "").strip(),
+                "operator": _operator(),
+                "candidate_sha": candidate_sha,
+                "invalidated_evidence": [str(r["id"]) for r in at_risk],
+            },
+        )
     report = {k: v for k, v in payload.items() if k != "old_canonical_json"}
     report.update(contract_path=str(path), digest_changed=old_digest != digest, version_repaired=old_version not in (None, CONTRACT_VERSION), validation=None)
     if validate:

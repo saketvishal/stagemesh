@@ -27,7 +27,7 @@ From each operational clone, run:
 python scripts/install_attribution_hooks.py
 ```
 
-This installs `commit-msg` and `pre-push` checks. It refuses to overwrite existing hooks or an existing `core.hooksPath`; incorporate the printed checker commands into those hooks instead. Hooks resolve the active worktree at execution time. The Python executable used for installation must remain available. Local hooks can be bypassed and do not replace GitHub protection.
+This installs a fast quality `pre-commit` check plus `commit-msg` and `pre-push` attribution/commit-quality checks. It refuses to overwrite existing hooks or an existing `core.hooksPath`; incorporate the printed checker commands into those hooks instead. Hooks resolve the active worktree at execution time. The Python executable used for installation must remain available. Local hooks can be bypassed and do not replace GitHub protection.
 
 For automation, validate an incoming range before publication:
 

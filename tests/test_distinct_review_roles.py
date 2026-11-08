@@ -15,12 +15,16 @@ from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Execut
 from stagemesh.provider_pool import IMPLEMENT, REVIEW, ProviderLog, ProviderPool
 from stagemesh.review import Reviewer, adverse_gate
 from stagemesh.review_identity import (
+    IMPLEMENTATION_DERIVATION,
     IMPLEMENTATION_IDENTITY,
     command_snapshot,
     implementation_identity,
     note_review_identity,
+    record_implementation_derivation,
     record_implementation_identity,
 )
+from stagemesh.validation import _inspection_workspace
+from stagemesh.workspaces import task_workspace
 
 
 def test_one_executed_adverse_review_is_not_a_distinct_normal_adverse_pair(tmp_path):
@@ -87,6 +91,27 @@ def _run(rig):
 def _gate(rig):
     _, store, candidate, policy, _, _, bound = rig
     return adverse_gate(store, TASK, candidate, bound.digest, policy)
+
+
+def test_only_trusted_mechanical_derivation_skips_stale_task_workspace(role_rig):
+    project, store, original, *_ = role_rig
+    trusted = "a" * 40
+    untrusted = "b" * 40
+    store.add_candidate(TASK, trusted, "codex", durable_handoff=True)
+    store.add_candidate(TASK, untrusted, "codex", durable_handoff=True)
+
+    assert record_implementation_derivation(store, TASK, original, trusted, "rebase")
+    assert _inspection_workspace(store, project, TASK, trusted) is None
+    assert _inspection_workspace(store, project, TASK, untrusted) == task_workspace(project, TASK)
+
+    store.add_audit_event(IMPLEMENTATION_DERIVATION, {
+        "task_id": TASK,
+        "from_candidate": "c" * 40,
+        "candidate_sha": original,
+        "kind": "rebase",
+        "command_digest": "d" * 64,
+    })
+    assert _inspection_workspace(store, project, TASK, original) == task_workspace(project, TASK)
 
 
 def _research_event(bound, summary, *, baseline=None, malformed=False, scoped=False):

@@ -224,6 +224,53 @@ def _legacy_contract(tmp_path, *, frozen=True):
     return project, store, path, canonical
 
 
+def test_atomic_scope_revision_requires_reason_and_records_old_and_new_policy(tmp_path):
+    import hashlib
+
+    from stagemesh.contracts import scope_policy_hash
+    from stagemesh.git import GitWorkspace
+    from stagemesh.recovery import RecoveryRefusal, rebind_contract
+
+    project = _project(tmp_path, ["1"])
+    path = project / ".stagemesh/contracts/1.json"
+    initial = dict(
+        FAKE_CONTRACT,
+        allowed_files=["src/feature.py"],
+        scope_mode="STRICT",
+        scope_owner="operator",
+        scope_revision=1,
+    )
+    path.write_text(json.dumps(initial), encoding="utf-8")
+    store = _synced(project)
+    baseline = GitWorkspace(project).head()
+    store.set_task_baseline("1", baseline)
+    old_contract = parse_contract(initial)
+    canonical = canonical_contract_json(old_contract)
+    store.bind_task_contract("1", baseline, 1, hashlib.sha256(canonical.encode()).hexdigest(), canonical)
+    expanded = dict(
+        initial,
+        scope_revision=2,
+        approved_scope_expansions=["tests/test_feature.py"],
+        scope_exceptions=["operator approved one focused test"],
+    )
+    path.write_text(json.dumps(expanded), encoding="utf-8")
+    try:
+        with pytest.raises(RecoveryRefusal, match="requires --reason"):
+            rebind_contract(store, project, "1")
+        report = rebind_contract(store, project, "1", reason="Approve the focused regression test")
+        row = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='task.scope_policy_revised' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        audit = json.loads(row["payload"])
+        assert audit["old_policy_hash"] == scope_policy_hash(old_contract)
+        assert audit["new_policy_hash"] != audit["old_policy_hash"]
+        assert audit["new_policy"]["approved_scope_expansions"] == ["tests/test_feature.py"]
+        assert audit["reason"] == "Approve the focused regression test"
+        assert report["digest_changed"]
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("frozen", [False, True])
 def test_invalid_invariants_refused_by_selection_binding_and_runner(tmp_path, frozen):
     from stagemesh.contract_binding import ContractRejected, bind_task_contract

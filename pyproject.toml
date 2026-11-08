@@ -14,7 +14,12 @@ authors = [{ name = "StageMesh Contributors" }]
 dependencies = ['tzdata>=2025.2; platform_system == "Windows"']
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.13,<2",
+    "vulture>=2.14,<3",
+]
 
 [project.scripts]
 stagemesh = "stagemesh.cli:main"
@@ -26,3 +31,16 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+files = [
+    "src/stagemesh/quality_policy.py",
+    "scripts/quality_gate.py",
+]

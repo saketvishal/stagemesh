@@ -1,4 +1,4 @@
-"""Install optional local attribution hooks without replacing existing hooks."""
+"""Install local attribution and quality feedback hooks without replacing existing hooks."""
 from __future__ import annotations
 
 import shlex
@@ -17,10 +17,16 @@ def install(repo: Path) -> None:
         raise ValueError("core.hooksPath is already configured; integrate the checker with your existing hooks")
     hooks = Path(git("rev-parse", "--path-format=absolute", "--git-path", "hooks"))
     # Resolve the active worktree at hook execution, rather than baking in a checkout path.
-    prefix = "#!/bin/sh\nset -eu\nroot=$(git rev-parse --show-toplevel)\nexec " + shlex.quote(Path(sys.executable).as_posix())
+    python = shlex.quote(Path(sys.executable).as_posix())
+    prefix = "#!/bin/sh\nset -eu\nroot=$(git rev-parse --show-toplevel)\n"
     scripts = {
-        "commit-msg": prefix + ' "$root/scripts/check_attribution.py" --repo "$root" --message-file "$1"\n',
-        "pre-push": prefix + ' "$root/scripts/check_attribution.py" --repo "$root" --pre-push "$1"\n',
+        "pre-commit": prefix + f'exec {python} "$root/scripts/quality_gate.py" --mode fast\n',
+        "commit-msg": prefix + f'exec {python} "$root/scripts/check_attribution.py" --repo "$root" --message-file "$1"\n',
+        "pre-push": (
+            prefix
+            + f'{python} "$root/scripts/check_attribution.py" --repo "$root" --pre-push "$1"\n'
+            + f'exec {python} "$root/scripts/quality_gate.py" --mode commit\n'
+        ),
     }
     for name, content in scripts.items():
         path = hooks / name
@@ -31,7 +37,7 @@ def install(repo: Path) -> None:
         path = hooks / name
         path.write_text(content, encoding="utf-8", newline="\n")
         path.chmod(path.stat().st_mode | 0o111)
-    print("Installed commit-msg and pre-push attribution checks. GitHub enforcement is still required.")
+    print("Installed pre-commit quality plus commit-msg/pre-push attribution and quality checks. CI enforcement is still required.")
 
 
 if __name__ == "__main__":

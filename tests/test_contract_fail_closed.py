@@ -135,6 +135,71 @@ def test_acceptance_criteria_without_executable_validation_fails(tmp_path: Path)
     store.close()
 
 
+def test_repository_quality_policy_gates_execute_and_are_recorded(tmp_path: Path) -> None:
+    policy = {
+        "schema_version": 1,
+        "policy_id": "fixture/1",
+        "complexity_max": 12,
+        "dead_code_min_confidence": 100,
+        "strict_modules": ["src/app.py"],
+        "authorization_required": [],
+        "gates": [
+            {"name": "quality-lint", "category": "lint", "command": PASS_CMD, "applies_to": ["src/**"]},
+            {"name": "quality-types", "category": "typecheck", "command": PASS_CMD, "applies_to": ["src/**"]},
+        ],
+    }
+    project, workspace = _repo(
+        tmp_path,
+        {"src/app.py": "X = 1\n", ".stagemesh/quality-policy.json": json.dumps(policy)},
+    )
+    store, _, status, payload = _validate(
+        tmp_path,
+        project,
+        workspace,
+        {
+            "objective": "localized",
+            "allowed_files": ["src/app.py", ".stagemesh/contracts/TASK-1.json"],
+            "required_tests": [{"name": "behavior", "command": PASS_CMD}],
+        },
+        "src/app.py",
+    )
+    assert status is EvidenceStatus.PASSED, payload["findings"]
+    assert {gate["name"] for gate in payload["gates"]}.issuperset(
+        {"behavior", "quality-lint", "quality-types"}
+    )
+    policy_hashes = {
+        gate["policy_hash"]
+        for gate in payload["gates"]
+        if gate["name"] in {"quality-lint", "quality-types"}
+    }
+    assert len(policy_hashes) == 1
+    assert len(policy_hashes.pop()) == 64
+    store.close()
+
+
+def test_malformed_repository_quality_policy_fails_closed_without_running_task_gates(tmp_path: Path) -> None:
+    project, workspace = _repo(
+        tmp_path,
+        {"src/app.py": "X = 1\n", ".stagemesh/quality-policy.json": "{}"},
+    )
+    store, _, status, payload = _validate(
+        tmp_path,
+        project,
+        workspace,
+        {
+            "objective": "localized",
+            "allowed_files": ["src/app.py"],
+            "required_tests": [{"name": "must-not-run", "command": PASS_CMD}],
+        },
+        "src/app.py",
+    )
+    assert status is EvidenceStatus.FAILED
+    assert payload["findings"][0]["code"] == "quality_policy_invalid"
+    assert "schema_version" in payload["findings"][0]["message"]
+    assert payload["gates"] == []
+    store.close()
+
+
 def test_declared_docs_only_cannot_hide_core_change() -> None:
     contract = ChangeContract(
         objective="docs", explicit=True, validation_classification=DOCS_ONLY, allowed_files=("**",)

@@ -30,6 +30,8 @@ def _metadata() -> str:
             "Provides-Extra: dev",
             'Requires-Dist: pytest>=8.0; extra == "dev"',
             'Requires-Dist: ruff>=0.6; extra == "dev"',
+            'Requires-Dist: mypy>=1.13,<2; extra == "dev"',
+            'Requires-Dist: vulture>=2.14,<3; extra == "dev"',
             "",
         ]
     )

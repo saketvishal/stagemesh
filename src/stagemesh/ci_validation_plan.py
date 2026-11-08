@@ -39,6 +39,7 @@ Mode = Literal["full", "operator", "component", "docs", "smoke"]
 
 MANDATORY_CHECKS = (
     "attribution-and-static-range-policy",
+    "fail-closed-repository-quality-gate",
     "focused-validation-policy",
     "declarative-and-executable-contract-invariants",
 )
@@ -52,7 +53,9 @@ _FULL_EXACT_PATHS = frozenset(
         "agents.md",
         "build_backend.py",
         "pyproject.toml",
+        "src/stagemesh/agent_policy.py",
         "src/stagemesh/ci_validation_plan.py",
+        "src/stagemesh/candidate_inspection.py",
         "src/stagemesh/cli.py",
         "src/stagemesh/config.py",
         "src/stagemesh/contracts.py",
@@ -61,6 +64,7 @@ _FULL_EXACT_PATHS = frozenset(
         "src/stagemesh/persistence.py",
         "src/stagemesh/postgres_store.py",
         "src/stagemesh/profile.py",
+        "src/stagemesh/quality_policy.py",
         "src/stagemesh/regression_orchestrator.py",
         "src/stagemesh/security.py",
         "src/stagemesh/test_isolation.py",
@@ -73,6 +77,7 @@ _FULL_EXACT_PATHS = frozenset(
         "scripts/run_ci_component_tests.py",
         "scripts/check_ci_range.py",
         "scripts/install-stagemesh.ps1",
+        "scripts/quality_gate.py",
         "scripts/run_regression.py",
         "tests/test_ci_validation_plan.py",
         "tests/test_ci_component_runner.py",
@@ -80,6 +85,8 @@ _FULL_EXACT_PATHS = frozenset(
         "tests/test_regression_architecture_acceptance.py",
         "tests/test_validation_component_catalog.py",
         "docs/focused-validation.md",
+        "docs/agent-coding-policy.md",
+        "docs/atomic-scope-and-quarantine.md",
         "docs/validation-components.md",
     }
 )

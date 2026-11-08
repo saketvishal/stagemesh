@@ -1,0 +1,13 @@
+# Quality and promotion controls require explicit owner review. Branch protection
+# must require Code Owner approval; this file does not enforce that setting by itself.
+/.github/ @saketvishal
+/.gitignore @saketvishal
+/.stagemesh/agent-policy.json @saketvishal
+/.stagemesh/quality-policy.json @saketvishal
+/pyproject.toml @saketvishal
+/build_backend.py @saketvishal
+/scripts/quality_gate.py @saketvishal
+/scripts/install_attribution_hooks.py @saketvishal
+/src/stagemesh/quality_policy.py @saketvishal
+/src/stagemesh/agent_policy.py @saketvishal
+/src/stagemesh/candidate_inspection.py @saketvishal
