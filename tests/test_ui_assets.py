@@ -183,6 +183,8 @@ def test_wheel_build_excludes_files_that_are_not_declared_assets(tmp_path: Path)
     tree = tmp_path / "tree"
     shutil.copytree(root / "src", tree / "src", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copyfile(root / "build_backend.py", tree / "build_backend.py")
+    shutil.copyfile(root / "README.md", tree / "README.md")
+    shutil.copyfile(root / "LICENSE", tree / "LICENSE")
     for name in CANARIES:
         target = tree / "src" / "stagemesh" / "ui" / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -217,6 +219,8 @@ def test_build_fails_if_a_declared_asset_is_missing(tmp_path: Path):
     tree = tmp_path / "tree"
     shutil.copytree(root / "src", tree / "src", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copyfile(root / "build_backend.py", tree / "build_backend.py")
+    shutil.copyfile(root / "README.md", tree / "README.md")
+    shutil.copyfile(root / "LICENSE", tree / "LICENSE")
     (tree / "src" / "stagemesh" / "ui" / "app.css").unlink()
     spec = importlib.util.spec_from_file_location("missing_build_backend", tree / "build_backend.py")
     module = importlib.util.module_from_spec(spec)

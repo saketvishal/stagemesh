@@ -1,0 +1,52 @@
+name: Publish StageMesh to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build the exact tagged wheel
+        run: python -m pip wheel . --no-deps --no-build-isolation --wheel-dir dist
+      - name: Verify metadata, provenance, clean installation, and new-project initialization
+        env:
+          STAGEMESH_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/verify_pypi_distribution.py --dist dist --tag "$STAGEMESH_RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pypi-distribution
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pypi-distribution
+          path: dist
+      - name: Publish once with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: false
+          attestations: true

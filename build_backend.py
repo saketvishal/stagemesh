@@ -10,7 +10,7 @@ from pathlib import Path
 
 NAME = "stagemesh"
 UI_ASSETS = ("index.html", "app.js", "app.css")  # keep equal to stagemesh.api_server.UI_ASSETS (tested)
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 DIST_INFO = f"{NAME}-{VERSION}.dist-info"
 
 
@@ -19,22 +19,35 @@ def _b64(data: bytes) -> str:
 
 
 def _metadata() -> str:
-    return "\n".join(
-        [
-            "Metadata-Version: 2.3",
-            f"Name: {NAME}",
-            f"Version: {VERSION}",
-            "Summary: Provider-neutral control plane for autonomous software engineering lifecycles",
-            "Requires-Python: >=3.11",
-            'Requires-Dist: tzdata>=2025.2; platform_system == "Windows"',
-            "Provides-Extra: dev",
-            'Requires-Dist: pytest>=8.0; extra == "dev"',
-            'Requires-Dist: ruff>=0.6; extra == "dev"',
-            'Requires-Dist: mypy>=1.13,<2; extra == "dev"',
-            'Requires-Dist: vulture>=2.14,<3; extra == "dev"',
-            "",
-        ]
-    )
+    headers = [
+        "Metadata-Version: 2.3",
+        f"Name: {NAME}",
+        f"Version: {VERSION}",
+        "Summary: Provider-neutral control plane for autonomous software engineering lifecycles",
+        "License: MIT",
+        "Requires-Python: >=3.11",
+        "Description-Content-Type: text/markdown",
+        "Project-URL: Homepage, https://github.com/saketvishal/stagemesh",
+        "Project-URL: Repository, https://github.com/saketvishal/stagemesh",
+        "Project-URL: Issues, https://github.com/saketvishal/stagemesh/issues",
+        "Keywords: software-engineering,automation,agents,github",
+        "Classifier: Development Status :: 4 - Beta",
+        "Classifier: Environment :: Console",
+        "Classifier: License :: OSI Approved :: MIT License",
+        "Classifier: Programming Language :: Python :: 3",
+        "Classifier: Programming Language :: Python :: 3.11",
+        "Classifier: Programming Language :: Python :: 3.12",
+        "Classifier: Programming Language :: Python :: 3.13",
+        'Requires-Dist: tzdata>=2025.2; platform_system == "Windows"',
+        "Provides-Extra: dev",
+        'Requires-Dist: pytest>=8.0; extra == "dev"',
+        'Requires-Dist: ruff>=0.6; extra == "dev"',
+        'Requires-Dist: mypy>=1.13,<2; extra == "dev"',
+        'Requires-Dist: vulture>=2.14,<3; extra == "dev"',
+        "",
+    ]
+    description = (Path(__file__).resolve().parent / "README.md").read_text(encoding="utf-8")
+    return "\n".join(headers) + "\n" + description
 
 
 def _wheel() -> str:
@@ -117,6 +130,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
             f"{DIST_INFO}/METADATA": _metadata().encode("utf-8"),
             f"{DIST_INFO}/WHEEL": _wheel().encode("utf-8"),
             f"{DIST_INFO}/entry_points.txt": b"[console_scripts]\nstagemesh=stagemesh.cli:main\n",
+            f"{DIST_INFO}/LICENSE": (root / "LICENSE").read_bytes(),
         }
         for arcname, data in generated.items():
             zf.writestr(arcname, data)

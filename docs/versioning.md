@@ -1,13 +1,20 @@
 # Versioning and stable installs
 
-StageMesh uses annotated Git tags and published GitHub releases as reinstallable
-package points. Version 0.5.0 introduces the operator activity API/dashboard and
-label-scoped execution, alongside ownership, recovery and admission fixes since
-0.4.0. See [the 0.5.0 release notes](releases/0.5.0.md) for scope and limits.
+StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
+files as reinstallable package points. Version 0.6.0 adds the source-free public
+installation path and safe zero-config GitHub issue intake. See the
+[0.6.0 release notes](releases/0.6.0.md) and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.5.0` release is published, verify the attached wheel against its
-`SHA256SUMS` and provenance manifest. Alternatively, pin the annotated tag:
+After the `v0.6.0` trusted-publishing workflow succeeds, install the exact public
+version in a fresh environment:
+
+```powershell
+python -m pip install --no-cache-dir stagemesh==0.6.0
+```
+
+Until then, verify the 0.5.0 GitHub release wheel against its `SHA256SUMS` and
+provenance manifest, or pin that annotated tag:
 
 ```powershell
 python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.5.0"
@@ -15,12 +22,13 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.0`: first PyPI release line and zero-config GitHub intake.
 - `0.5.0`: release line for operator visibility, scoped selection and reliability.
 - `v0.4.0`: previous published release and retained rollback package.
 - `v0.3.0`: focused-reading and relevant-test defaults.
 - `v0.2.2` and `v0.2.1`: historical rollback releases.
 - `v0.1.0`: historical fallback at the post-task-266 baseline.
-- After publishing 0.5.0, start the next development change at `0.5.1.dev0`.
+- After publishing 0.6.0, start the next development change at `0.6.1.dev0`.
 
 Release rule:
 
