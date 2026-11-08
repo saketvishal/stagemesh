@@ -114,7 +114,7 @@ from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
-from .profile import load_profile
+from .profile import ProfileError, load_profile
 from .profile_default import ensure_profile, is_placeholder
 from .provider_acceptance import (
     _latest_live_acceptance_payload,
@@ -291,6 +291,115 @@ def _missing_github_task_source_check(config, project: Path) -> dict[str, object
     }
 
 
+def _init_readiness(
+    project: Path,
+    config: StageMeshConfig,
+    profile_status: str,
+    profile_detail: str,
+    registered_providers: tuple[str, ...],
+    source_sync: dict[str, str],
+    github_classification: GitHubBootstrapResult,
+) -> dict[str, object]:
+    """Report every init-time condition that would predictably block later work."""
+    checks: list[dict[str, str]] = []
+
+    def add(name: str, ok: bool, detail: str, fix: str = "") -> None:
+        checks.append(
+            {
+                "name": name,
+                "status": "ready" if ok else "blocked",
+                "detail": detail,
+                **({"fix": fix} if not ok and fix else {}),
+            }
+        )
+
+    profile = None
+    if profile_status != "invalid":
+        try:
+            profile = load_profile(project)
+        except (OSError, ProfileError):  # The detailed parser error is already captured by ensure_profile.
+            profile = None
+    add(
+        "project_profile",
+        profile is not None,
+        f"usable profile at {profile_detail}" if profile is not None else profile_detail,
+        "repair or remove .stagemesh/profile.json, then rerun `stagemesh init`",
+    )
+    real_gates = profile is not None and not is_placeholder(profile)
+    gate_detail = (
+        f"{len(profile.gates)} project validation gate(s) configured"
+        if profile is not None and real_gates
+        else "no project test configuration was detected; `git diff --check` alone cannot validate development work"
+    )
+    add(
+        "validation_gates",
+        real_gates,
+        gate_detail,
+        "add a conventional test configuration or explicit gates to .stagemesh/profile.json, then rerun `stagemesh init`",
+    )
+    add(
+        "provider_registry",
+        bool(registered_providers),
+        (
+            f"registered providers: {', '.join(registered_providers)}"
+            if registered_providers
+            else "no supported or project-defined provider is registered"
+        ),
+        "install or configure at least one provider, remove the empty providers snapshot if present, then rerun `stagemesh init`",
+    )
+    authorized = tuple(config.authorized_providers or ())
+    adapters = {adapter.name: adapter for adapter in adapters_from_config(config)}
+    available_implementation = tuple(
+        name
+        for name in authorized
+        if name in adapters
+        and "code" in adapters[name].capabilities
+        and adapters[name].check_stage_capacity("code") == CapacityKind.AVAILABLE
+    )
+    available_review = tuple(
+        name
+        for name in authorized
+        if name in adapters
+        and "review" in adapters[name].capabilities
+        and adapters[name].check_stage_capacity("review") == CapacityKind.AVAILABLE
+    )
+    provider_routing_ready = bool(available_implementation) and (
+        not config.require_independent_review
+        or any(implementer != reviewer for implementer in available_implementation for reviewer in available_review)
+    )
+    add(
+        "provider_authorization",
+        provider_routing_ready,
+        (
+            f"available implementation providers: {', '.join(available_implementation)}; "
+            f"available review providers: {', '.join(available_review) or 'not required'}"
+            if provider_routing_ready
+            else (
+                "no distinct available implementation/review provider pair satisfies the independent-review policy"
+                if config.require_independent_review and authorized
+                else "no available provider is explicitly authorized for implementation"
+            )
+        ),
+        "install and authorize enough distinct providers in authorization.unattended_providers, or explicitly change the review policy",
+    )
+    synced = source_sync.get("status") == "synced"
+    add(
+        "task_source_sync",
+        synced,
+        "task sources synchronized" if synced else f"task-source sync was deferred ({source_sync.get('error_type', 'unknown')})",
+        "fix the task-source configuration or credentials, then rerun `stagemesh init`",
+    )
+    classification_ok = github_classification.status not in {"failed", "partial", "write_authorization_required"}
+    add(
+        "github_issue_classification",
+        classification_ok,
+        github_classification.reason or github_classification.status,
+        "provide explicit GitHub Issues write authorization or label the affected issues, then rerun `stagemesh init`",
+    )
+    blockers = [check for check in checks if check["status"] == "blocked"]
+    return {"status": "ready" if not blockers else "needs_attention", "checks": checks, "blockers": blockers}
+
+
 def command_init(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
@@ -336,6 +445,16 @@ def command_init(args: argparse.Namespace) -> int:
             "check the source configuration or retry initialization",
             file=sys.stderr,
         )
+    readiness = _init_readiness(
+        project,
+        config,
+        profile_status,
+        profile_detail,
+        registered_providers,
+        source_sync,
+        github_classification,
+    )
+    exit_code = 0 if readiness["status"] == "ready" or args.allow_incomplete else 2
     if args.json:
         print(
             json.dumps(
@@ -355,13 +474,18 @@ def command_init(args: argparse.Namespace) -> int:
                     },
                     "task_source_sync": source_sync,
                     "github_issue_classification": github_classification.to_dict(),
+                    "readiness": readiness,
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
-        return 0
-    print(f"initialized StageMesh at {runtime_dir(project)}")
+        return exit_code
+    if readiness["status"] == "ready":
+        print(f"StageMesh is ready at {runtime_dir(project)}")
+    else:
+        qualifier = " (allowed by --allow-incomplete)" if args.allow_incomplete else ""
+        print(f"StageMesh setup needs attention at {runtime_dir(project)}{qualifier}")
     if configured_github_source:
         print("configured GitHub task source with safe unlabeled-issue classification")
     if github_classification.status == "write_authorization_required":
@@ -378,9 +502,14 @@ def command_init(args: argparse.Namespace) -> int:
         print(f"initialized provider registry (registered: {names}; authorized: {authorized}; provider calls: 0)")
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
-        if is_placeholder(load_profile(project)):
-            print("warning: no test gate was detected; the default profile only runs `git diff --check`. Add real gates to .stagemesh/profile.json.")
-    return 0
+    if readiness["status"] != "ready":
+        print("readiness blockers:")
+        for blocker in readiness["blockers"]:
+            print(f"- {blocker['name']}: {blocker['detail']}")
+            print(f"  fix: {blocker['fix']}")
+        if not args.allow_incomplete:
+            print("StageMesh did not claim readiness; fix the blockers and rerun `stagemesh init`.")
+    return exit_code
 
 
 def stale_runtime_warning(project: Path, installed_version: str = __version__) -> str | None:
@@ -5153,6 +5282,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--task")
     init.add_argument("--register", action="store_true")
     init.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
+    init.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Create setup files but return success even when readiness blockers remain; never claims the project is ready",
+    )
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=command_init)
     doctor = sub.add_parser("doctor")

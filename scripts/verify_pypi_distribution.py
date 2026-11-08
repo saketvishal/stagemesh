@@ -76,7 +76,11 @@ def verify_install(wheel: Path, version: str) -> None:
             raise DistributionVerificationError("installed console command reports the wrong version")
         project = root / "new-project"
         project.mkdir()
-        initialized = _run([str(command), "--project", str(project), "init", "--json"], project, clean_env)
+        initialized = _run(
+            [str(command), "--project", str(project), "init", "--json", "--allow-incomplete"],
+            project,
+            clean_env,
+        )
         try:
             report = json.loads(initialized.stdout)
         except json.JSONDecodeError as exc:
@@ -88,6 +92,9 @@ def verify_install(wheel: Path, version: str) -> None:
             raise DistributionVerificationError("new-project initialization must make zero provider calls")
         if not (project / ".stagemesh/config.json").is_file() or not (project / ".stagemesh/profile.json").is_file():
             raise DistributionVerificationError("new-project initialization did not create project-local configuration")
+        readiness = report.get("readiness")
+        if not isinstance(readiness, dict) or readiness.get("status") != "needs_attention":
+            raise DistributionVerificationError("empty-project setup must report its readiness blockers truthfully")
 
 
 def verify_distribution(directory: Path, expected_tag: str, *, install: bool = True) -> Path:

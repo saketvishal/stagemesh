@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,8 +13,11 @@ from stagemesh.cli import main
 from stagemesh.profile import load_profile, profile_path
 
 
-def _init(project: Path, capsys) -> tuple[int, str, str]:
-    code = main(["--project", str(project), "init"])
+def _init(project: Path, capsys, *, strict: bool = False) -> tuple[int, str, str]:
+    argv = ["--project", str(project), "init"]
+    if not strict:
+        argv.append("--allow-incomplete")
+    code = main(argv)
     out = capsys.readouterr()
     return code, out.out, out.err
 
@@ -48,7 +52,7 @@ def test_existing_project_without_profile_gets_one_and_keeps_state(tmp_path: Pat
     (tmp_path / ".stagemesh" / "config.json").write_text('{"providers": {"codex": {"command": "codex exec"}}}\n', encoding="utf-8")
     (tmp_path / ".stagemesh" / "contracts").mkdir()
     (tmp_path / ".stagemesh" / "contracts" / "7.json").write_text('{"objective": "x"}\n', encoding="utf-8")
-    assert main(["--project", str(tmp_path), "init", "--task", "7"]) == 0
+    assert main(["--project", str(tmp_path), "init", "--task", "7", "--allow-incomplete"]) == 0
     capsys.readouterr()
     profile_path(tmp_path).unlink()
     before = {k: v for k, v in _state(tmp_path).items() if k != ".stagemesh/profile.json"}
@@ -98,7 +102,7 @@ def test_malformed_profile_is_not_overwritten(tmp_path: Path, capsys, content: s
     code, _, err = _init(tmp_path, capsys)
     assert code == 0 and "left unchanged" in err
     assert profile_path(tmp_path).read_text(encoding="utf-8") == content
-    assert main(["--project", str(tmp_path), "init", "--json"]) == 0
+    assert main(["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]) == 0
     assert json.loads(capsys.readouterr().out)["profile"] == "invalid"
 
 
@@ -124,10 +128,90 @@ def test_project_smoke_passes_for_every_detected_gate_kind(tmp_path: Path, capsy
 
 def test_placeholder_gate_is_called_out(tmp_path: Path, capsys) -> None:
     _, out, _ = _init(tmp_path, capsys)
-    assert "no test gate was detected" in out
+    assert "validation_gates: no project test configuration was detected" in out
     main(["--project", str(tmp_path), "project-smoke", "--json"])
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
     assert checks["validation gates are real"]["status"] == "warn"
+
+
+def test_init_does_not_claim_success_when_readiness_blockers_remain(tmp_path: Path, capsys) -> None:
+    code, out, _ = _init(tmp_path, capsys, strict=True)
+
+    assert code == 2
+    assert "StageMesh setup needs attention" in out
+    assert "StageMesh did not claim readiness" in out
+    assert "StageMesh is ready" not in out
+
+    assert main(["--project", str(tmp_path), "init", "--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["readiness"]["status"] == "needs_attention"
+    assert {item["name"] for item in report["readiness"]["blockers"]} >= {
+        "validation_gates",
+        "provider_authorization",
+    }
+
+
+def test_init_claims_ready_only_with_real_gates_and_provider_opt_in(tmp_path: Path, capsys) -> None:
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {"local-agent": {"command": f'"{sys.executable}"', "capabilities": ["IMPLEMENT", "REVIEW"]}},
+                "authorization": {"unattended_providers": ["local-agent"]},
+                "routing": {"require_independent_review": False},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    code, out, err = _init(tmp_path, capsys, strict=True)
+
+    assert code == 0, out + err
+    assert "StageMesh is ready" in out
+    assert "readiness blockers" not in out
+
+
+def test_tests_directory_without_safe_test_configuration_is_reported_during_init(tmp_path: Path, capsys) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_database_pipeline.py").write_text("raise SystemExit('requires a live database')\n", encoding="utf-8")
+
+    code, _, _ = _init(tmp_path, capsys, strict=True)
+    assert code == 2
+
+    assert main(["--project", str(tmp_path), "init", "--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    validation = next(item for item in report["readiness"]["blockers"] if item["name"] == "validation_gates")
+    assert "no project test configuration was detected" in validation["detail"]
+    assert "test_database_pipeline.py" not in str(report)  # init never guesses or runs an unsafe standalone test
+
+
+def test_init_accepts_distinct_available_implementation_and_review_providers(tmp_path: Path, capsys) -> None:
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    executable = f'"{sys.executable}"'
+    (runtime / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "implementer": {"command": executable, "capabilities": ["IMPLEMENT"]},
+                    "reviewer": {"command": executable, "capabilities": ["REVIEW"]},
+                },
+                "authorization": {"unattended_providers": ["implementer", "reviewer"]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    code, out, err = _init(tmp_path, capsys, strict=True)
+
+    assert code == 0, out + err
+    assert "StageMesh is ready" in out
 
 
 def test_default_profile_keeps_planner_forbidden_set(tmp_path: Path, capsys) -> None:

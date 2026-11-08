@@ -22,13 +22,13 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.1.dev0`: current development line; not a published release.
 - `0.6.0`: first PyPI release line and zero-config GitHub intake.
 - `0.5.0`: release line for operator visibility, scoped selection and reliability.
 - `v0.4.0`: previous published release and retained rollback package.
 - `v0.3.0`: focused-reading and relevant-test defaults.
 - `v0.2.2` and `v0.2.1`: historical rollback releases.
 - `v0.1.0`: historical fallback at the post-task-266 baseline.
-- After publishing 0.6.0, start the next development change at `0.6.1.dev0`.
 
 Release rule:
 

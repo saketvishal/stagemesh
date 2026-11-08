@@ -12,10 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from stagemesh.domain import ExecutionStatus
-from stagemesh.persistence import SCHEMA_VERSION, Store
-from stagemesh.providers import RuntimeCommandAdapter
-from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
+from stagemesh.domain import ExecutionStatus  # noqa: E402 - source checkout is deliberately added above
+from stagemesh.persistence import SCHEMA_VERSION, Store  # noqa: E402
+from stagemesh.providers import RuntimeCommandAdapter  # noqa: E402
+from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE  # noqa: E402
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -41,8 +41,8 @@ def main() -> int:
         project = Path(raw) / "project"
         project.mkdir()
         env = {"PYTHONPATH": str(ROOT / "src")}
-        run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init"], ROOT, env)
-        init_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init", "--json"], ROOT, env)
+        run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init", "--allow-incomplete"], ROOT, env)
+        init_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init", "--json", "--allow-incomplete"], ROOT, env)
         init_data = json.loads(init_json)
         if (
             init_data["project"] != str(project.resolve())
@@ -61,6 +61,7 @@ def main() -> int:
                 "--project",
                 str(project),
                 "init",
+                "--allow-incomplete",
                 "--register",
                 "--registry",
                 str(registry),
@@ -76,6 +77,7 @@ def main() -> int:
                 "--project",
                 str(project),
                 "init",
+                "--allow-incomplete",
                 "--register",
                 "--registry",
                 str(registry),
@@ -1189,7 +1191,7 @@ def main() -> int:
             or not Path(demo_json_data["readme"]).exists()
         ):
             raise AssertionError(demo_json)
-        run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "init"], ROOT, env)
+        run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "init", "--allow-incomplete"], ROOT, env)
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "plan", str(demo_objective)], ROOT, env)
         for _ in range(10):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "continue", "--once", "--dry-run"], ROOT, env)

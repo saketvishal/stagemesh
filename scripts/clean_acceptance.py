@@ -62,8 +62,8 @@ def main() -> int:
         stagemesh = venv_stagemesh(venv)
         if not stagemesh.exists():
             raise AssertionError(f"missing installed stagemesh entry point: {stagemesh}")
-        init = run([str(stagemesh), "--project", str(project), "init"], clean_root)
-        if "initialized StageMesh" not in init:
+        init = run([str(stagemesh), "--project", str(project), "init", "--allow-incomplete"], clean_root)
+        if "StageMesh setup needs attention" not in init:
             raise AssertionError(init)
         doctor = run([str(stagemesh), "--project", str(project), "doctor"], clean_root)
         required = [
@@ -81,7 +81,7 @@ def main() -> int:
         if str(clean_root / "src") in doctor:
             raise AssertionError(f"doctor used source checkout instead of installed runtime\n{doctor}")
         backend = run([str(stagemesh), "--project", str(project), "backend"], clean_root)
-        if "name: sqlite" not in backend or "postgres schema contract: 18 tables" not in backend:
+        if "name: sqlite" not in backend or "postgres schema contract: 20 tables" not in backend:
             raise AssertionError(backend)
         report = project / ".stagemesh" / "final-report.md"
         report_output = run(

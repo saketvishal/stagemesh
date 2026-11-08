@@ -88,7 +88,7 @@ def test_init_persists_detected_github_origin_as_the_ready_issue_source(
     project = _github_project(tmp_path)
     monkeypatch.setattr(GitHubApiIssueSource, "discover", lambda self: ([], "OK", None))
 
-    assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--json", "--allow-incomplete"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["task_source_sync"] == {"status": "synced"}
@@ -153,7 +153,7 @@ def test_init_classifies_only_unlabeled_issues_and_resyncs_ready_work(
     monkeypatch.setattr(GitHubClient, "add_issue_labels", add_issue_labels)
     monkeypatch.setenv("STAGEMESH_GITHUB_TOKEN", "TEST_ONLY_NOT_A_CREDENTIAL")
 
-    assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--json", "--allow-incomplete"]) == 0
 
     report = json.loads(capsys.readouterr().out)
     assert report["github_issue_classification"] == {
@@ -183,7 +183,7 @@ def test_init_defers_unlabeled_issue_writes_without_github_authorization(
         lambda self: ([DiscoveredTask("github", "21", "Unlabeled issue")], "OK", None),
     )
 
-    assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--json", "--allow-incomplete"]) == 0
 
     report = json.loads(capsys.readouterr().out)
     assert report["github_issue_classification"] == {
@@ -194,6 +194,7 @@ def test_init_defers_unlabeled_issue_writes_without_github_authorization(
         "failed": 0,
         "reason": "set STAGEMESH_GITHUB_TOKEN with Issues write permission",
     }
+    assert "github_issue_classification" in {item["name"] for item in report["readiness"]["blockers"]}
 
 
 def test_config_rejects_non_boolean_unlabeled_issue_policy(tmp_path: Path) -> None:
@@ -215,20 +216,21 @@ def test_init_reports_deferred_source_sync_without_leaking_exception_text(
 
     monkeypatch.setattr(cli_module, "_sync_all_sources", unavailable)
 
-    assert cli_module.main(["--project", str(project), "init", "--json"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--json", "--allow-incomplete"]) == 0
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["task_source_sync"] == {"status": "deferred", "error_type": "RuntimeError"}
+    assert "task_source_sync" in {item["name"] for item in payload["readiness"]["blockers"]}
     assert "task-source sync deferred (RuntimeError)" in captured.err
     assert "SECRET_VALUE" not in captured.out + captured.err
 
     text_root = tmp_path / "text-mode"
     text_root.mkdir()
     text_project = _github_project(text_root)
-    assert cli_module.main(["--project", str(text_project), "init"]) == 0
+    assert cli_module.main(["--project", str(text_project), "init", "--allow-incomplete"]) == 0
     captured = capsys.readouterr()
-    assert "initialized StageMesh" in captured.out
+    assert "StageMesh setup needs attention" in captured.out
     assert "task-source sync deferred (RuntimeError)" in captured.err
     assert "SECRET_VALUE" not in captured.out + captured.err
 
@@ -238,7 +240,7 @@ def test_run_window_plan_previews_ready_issues_without_persisting_them(
 ) -> None:
     monkeypatch.setenv("STAGEMESH_CODEX_CMD", sys.executable)
     project = _github_project(tmp_path)
-    assert cli_module.main(["--project", str(project), "init"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
     _disable_independent_review_for_plan(project)
     _prepared_contract(project, "17")
     capsys.readouterr()
@@ -295,7 +297,7 @@ def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, mo
         encoding="utf-8",
     )
     monkeypatch.setattr(GitHubApiIssueSource, "discover", lambda self: ([DiscoveredTask("github", "3", "T", labels=("stagemesh:ready",))], "OK", None))
-    assert cli_module.main(["--project", str(project), "init"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
     capsys.readouterr()
     before = config_path.read_bytes()
     _prepared_contract(project, "3")
@@ -356,7 +358,7 @@ def test_init_preserves_explicit_github_source_policy(
     source = {"name": "github", "type": "github", "labels": list(labels), "excluded_labels": ["x"]}
     config_path.write_text(json.dumps({"github": {"owner": "acme", "repo": "widgets"}, "task_sources": [source]}), encoding="utf-8")
 
-    assert cli_module.main(["--project", str(project), "init"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
 
     source["labels"] = expected
     assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"] == [source]
@@ -388,7 +390,7 @@ def test_init_preserves_explicit_disabled_or_local_sources(tmp_path: Path, sourc
     path = project / ".stagemesh/config.json"
     path.parent.mkdir()
     path.write_text(json.dumps({"task_sources": sources}), encoding="utf-8")
-    assert cli_module.main(["--project", str(project), "init"]) == 0
+    assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
     initialized = json.loads(path.read_text(encoding="utf-8"))
     assert initialized["task_sources"] == sources
     assert "providers" in initialized  # provider initialization is independent of task-source policy
