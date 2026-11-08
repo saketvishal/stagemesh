@@ -41,6 +41,8 @@ stagemesh status
 
 `stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without launching them. The registry is a snapshot: rerunning init does not replace operator edits, arbitrary command providers can be added under `providers`, and an explicitly empty registry stays empty. Detection or registration does **not** authenticate, authorize, or invoke a provider; unattended use still requires the separate `authorization.unattended_providers` opt-in.
 
+For a fresh GitHub checkout, `stagemesh init` also detects `origin`, configures the GitHub task source, and reads open issues. When `STAGEMESH_GITHUB_TOKEN` has Issues write permission, it classifies only issues that have no labels: issues with a valid explicit contract or a deterministic auto-plan become `stagemesh:ready`; issues missing safe scope or validation information become `stagemesh:needs-triage`. Existing labels and explicit task-source policy are never replaced. The classification and any failure are recorded in the audit ledger, and the command resyncs successful labels before returning. Initialization still makes zero provider calls and does not start coding; use `stagemesh run-window` after authorizing the intended providers.
+
 For StageMesh development, bootstrap the project-owned provider pool and run the fast synthetic stabilization gate before broader acceptance:
 
 ```bash

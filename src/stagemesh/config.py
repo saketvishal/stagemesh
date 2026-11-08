@@ -107,6 +107,7 @@ class GitHubConfig:
     owner: str | None = None
     repo: str | None = None
     token: str | None = None
+    auto_label_unlabeled: bool = False
 
     @property
     def configured(self) -> bool:
@@ -509,10 +510,14 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     routing_data = _optional_mapping(data, "routing")
     stage_routes_data = _optional_mapping(routing_data, "stage_routes")
     detected_github = detect_github_repository(project)
+    auto_label_unlabeled = github_data.get("auto_label_unlabeled", False)
+    if not isinstance(auto_label_unlabeled, bool):
+        raise ConfigValidationError("github.auto_label_unlabeled must be a boolean")
     github = GitHubConfig(
         owner=os.environ.get("STAGEMESH_GITHUB_OWNER") or _string(github_data.get("owner")) or (detected_github.owner if detected_github else None),
         repo=os.environ.get("STAGEMESH_GITHUB_REPO") or _string(github_data.get("repo")) or (detected_github.repo if detected_github else None),
         token=os.environ.get("STAGEMESH_GITHUB_TOKEN") or _string(github_data.get("token")),
+        auto_label_unlabeled=auto_label_unlabeled,
     )
     provider_commands, provider_specs = _parse_providers(providers)
     environment_provider_names = set(provider_commands)

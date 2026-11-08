@@ -90,6 +90,7 @@ from .git import GitError, GitWorkspace
 from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport, detect_github_repository
 from .github_acceptance import run_github_acceptance
+from .github_bootstrap import GitHubBootstrapResult, classify_unlabeled_github_issues
 from .handoff import HandoffError, build_handoff, write_handoff
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
@@ -241,6 +242,7 @@ def _ensure_default_github_task_source(project: Path) -> bool:
         "labels": list(DEFAULT_GITHUB_SOURCE_LABELS),
         "excluded_labels": list(DEFAULT_GITHUB_EXCLUDED_LABELS),
     }]
+    github.setdefault("auto_label_unlabeled", True)
     changed = True
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,14 +301,24 @@ def command_init(args: argparse.Namespace) -> int:
     if args.task:
         store.upsert_task(args.task)
     source_sync: dict[str, str] = {"status": "synced"}
+    config = load_config(project)
     try:
-        config = load_config(project)
         _sync_all_sources(store, project, config, getattr(args, "task", None))
     except Exception as exc:  # noqa: BLE001 - initialization remains usable while an external task source is unavailable.
         source_sync = {"status": "deferred", "error_type": type(exc).__name__[:80]}
     schema_version = store.schema_version()
     store.close()
     profile_status, profile_detail = ensure_profile(project)
+    github_classification = GitHubBootstrapResult("source_sync_deferred")
+    if source_sync["status"] == "synced":
+        store = Store(db_path(project))
+        github_classification = classify_unlabeled_github_issues(store, project, config)
+        if github_classification.changed:
+            try:
+                _sync_all_sources(store, project, config, getattr(args, "task", None))
+            except Exception as exc:  # noqa: BLE001 - labels are durable remotely; a later sync can recover local state.
+                source_sync = {"status": "deferred", "error_type": type(exc).__name__[:80]}
+        store.close()
     if profile_status == "invalid":
         print(f"warning: {profile_detail}", file=sys.stderr)
     registered = False
@@ -342,6 +354,7 @@ def command_init(args: argparse.Namespace) -> int:
                         "provider_calls": 0,
                     },
                     "task_source_sync": source_sync,
+                    "github_issue_classification": github_classification.to_dict(),
                 },
                 indent=2,
                 sort_keys=True,
@@ -350,7 +363,15 @@ def command_init(args: argparse.Namespace) -> int:
         return 0
     print(f"initialized StageMesh at {runtime_dir(project)}")
     if configured_github_source:
-        print("configured GitHub task source for stagemesh:ready issues")
+        print("configured GitHub task source with safe unlabeled-issue classification")
+    if github_classification.status == "write_authorization_required":
+        print(f"GitHub issue classification deferred: {github_classification.reason}")
+    elif github_classification.changed:
+        print(
+            "classified unlabeled GitHub issues "
+            f"(ready: {github_classification.ready_labeled}; needs triage: {github_classification.triage_labeled}; "
+            f"failed: {github_classification.failed})"
+        )
     if initialized_providers:
         names = ", ".join(registered_providers) or "none"
         authorized = ", ".join(config.authorized_providers or ()) or "none"
