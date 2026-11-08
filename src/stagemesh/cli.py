@@ -56,6 +56,7 @@ from .capability_discovery import discover_capabilities, plan_discovered_registr
 from .capability_vendor import plan_capability_vendor, vendor_capability
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
+from .ci_optimization import CIOptimizationError, recommend_batch_size
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
@@ -155,6 +156,7 @@ from .registry import (
 )
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
+from .remote_hosting import RemoteHostingPlanError, validate_remote_hosting_plan
 from .retry import RetryRegistry, RetryValidationError
 from .review import Reviewer
 from .routing import RoutingMode
@@ -570,7 +572,7 @@ def _build_coordinator(
         autonomy = load_settings(runtime_dir(project))
     except (OSError, ValueError) as exc:
         print(f"autonomy config error: {exc}", file=sys.stderr)  # fail closed: never silently run unsupervised
-        raise _SetupError(2)
+        raise _SetupError(2) from exc
     if autonomy.enabled:  # supervised runs fail closed if any runtime path resolves into another StageMesh checkout
         isolation = check_isolation(project, check_running_code=True, expected_code_checkout=autonomy.code_checkout)
         if not isolation.isolated:
@@ -583,7 +585,7 @@ def _build_coordinator(
             adapters = adapters_from_config(config)
         except ProviderValidationError as exc:
             print(f"provider config error: {exc}", file=sys.stderr)
-            raise _SetupError(2)
+            raise _SetupError(2) from exc
         adapter_by_name = {adapter.name: adapter for adapter in adapters}
         chosen_name = getattr(args, "provider", None)
         if chosen_name and chosen_name not in adapter_by_name:
@@ -5031,6 +5033,52 @@ def command_ci_wait(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_ci_optimize_plan(args: argparse.Namespace) -> int:
+    recommendation = recommend_batch_size(
+        current_size=args.current_size,
+        minimum_size=args.min_size,
+        maximum_size=args.max_size,
+        queue_delay_seconds=args.queue_delay_seconds,
+        runner_utilization=args.runner_utilization,
+        recent_failure_rate=args.recent_failure_rate,
+    )
+    payload = {
+        "mutation_performed": False,
+        "recommendation": recommendation.to_dict(),
+        "schema": "stagemesh.ci-optimization-plan/1",
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"recommended_size: {recommendation.recommended_size}")
+    print(f"action: {recommendation.action}")
+    print(f"reason: {recommendation.reason}")
+    print("mutation_performed: False")
+    return 0
+
+
+def command_remote_hosting_plan(args: argparse.Namespace) -> int:
+    path = Path(args.file).resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RemoteHostingPlanError("plan file must be readable UTF-8 JSON") from exc
+    if not isinstance(payload, dict):
+        raise RemoteHostingPlanError("plan root must be an object")
+    plan = validate_remote_hosting_plan(payload)
+    result = plan.to_dict()
+    result["listener_changed"] = False
+    result["remote_server_started"] = False
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"status: {result['status']}")
+    print(f"digest: {plan.digest}")
+    print("listener_changed: False")
+    print("remote_server_started: False")
+    return 0
+
+
 def command_queue_reconcile(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -5997,6 +6045,25 @@ def build_parser() -> argparse.ArgumentParser:
     ci_wait.add_argument("--max-seconds", type=float, default=1800)
     ci_wait.add_argument("--json", action="store_true")
     ci_wait.set_defaults(func=command_ci_wait)
+    ci_optimize = sub.add_parser(
+        "ci-optimize-plan",
+        help="Recommend a bounded CI batch size from explicit measurements without mutating a run",
+    )
+    ci_optimize.add_argument("--current-size", type=int, required=True)
+    ci_optimize.add_argument("--min-size", type=int, default=1)
+    ci_optimize.add_argument("--max-size", type=int, required=True)
+    ci_optimize.add_argument("--queue-delay-seconds", type=float, required=True)
+    ci_optimize.add_argument("--runner-utilization", type=float, required=True)
+    ci_optimize.add_argument("--recent-failure-rate", type=float, required=True)
+    ci_optimize.add_argument("--json", action="store_true")
+    ci_optimize.set_defaults(func=command_ci_optimize_plan)
+    remote_hosting = sub.add_parser(
+        "remote-hosting-plan",
+        help="Validate an operator-selected remote-hosting plan without starting a server",
+    )
+    remote_hosting.add_argument("--file", required=True, help="UTF-8 JSON security plan")
+    remote_hosting.add_argument("--json", action="store_true")
+    remote_hosting.set_defaults(func=command_remote_hosting_plan)
     register_autonomy_commands(sub)
     return parser
 
@@ -6051,6 +6118,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except CIValidationError as exc:
         print(f"ci error: {exc}", file=sys.stderr)
+        return 2
+    except CIOptimizationError as exc:
+        print(f"ci optimization error: {exc}", file=sys.stderr)
+        return 2
+    except RemoteHostingPlanError as exc:
+        print(f"remote hosting plan error: {exc}", file=sys.stderr)
         return 2
     except ReleaseReadinessValidationError as exc:
         print(f"release readiness error: {exc}", file=sys.stderr)

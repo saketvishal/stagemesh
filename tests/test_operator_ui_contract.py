@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,9 +11,93 @@ import pytest
 
 from stagemesh import activity
 from stagemesh.activity import ActivityEntry, ActivityQuery, ActivityQueryError, validate_query
+from stagemesh.cli import build_parser, main
 from stagemesh.domain import Stage
+from stagemesh.remote_hosting import RemoteHostingPlanError, validate_remote_hosting_plan
 
 DOC = (Path(__file__).resolve().parents[1] / "docs" / "operator-ui-contract.md").read_text(encoding="utf-8")
+
+
+def _remote_plan() -> dict[str, object]:
+    return {
+        "schema": "stagemesh.remote-hosting-plan/1",
+        "deployment": {
+            "target": "single_tenant_reverse_proxy",
+            "tls_owner": "reverse_proxy",
+            "public_origin": "https://stagemesh.example.test",
+        },
+        "identity": {
+            "strategy": "oidc_authorization_code_pkce",
+            "issuer": "https://identity.example.test",
+            "client_id": "stagemesh-operator",
+            "session_ttl_seconds": 3600,
+            "browser_storage": "http_only_secure_same_site_cookie",
+        },
+        "authorization": {
+            "default_role": "read_only",
+            "read_permission": "project.read",
+            "control_permission": "project.control",
+            "project_scope_required": True,
+        },
+        "secrets": {"store": "operator-selected-secret-store", "rotation_days": 30},
+        "audit": {
+            "record_reads": True,
+            "record_controls": True,
+            "record_failures": True,
+            "retention_days": 90,
+        },
+        "limits": {
+            "requests_per_minute": 120,
+            "max_payload_bytes": 1_000_000,
+            "log_body_policy": "never",
+        },
+        "recovery": {
+            "backup_target": "operator-selected-encrypted-backup",
+            "restore_test_days": 30,
+            "rollback_strategy": "versioned_atomic_rollback",
+        },
+    }
+
+
+def test_remote_hosting_plan_is_stable_and_contains_no_secret_material() -> None:
+    first = validate_remote_hosting_plan(_remote_plan())
+    second = validate_remote_hosting_plan(json.loads(json.dumps(_remote_plan())))
+    assert first.digest == second.digest
+    assert first.to_dict()["status"] == "PLAN_VALIDATED"
+
+
+def test_remote_hosting_plan_fails_closed_on_unsafe_or_secret_bearing_input() -> None:
+    unsafe = _remote_plan()
+    assert isinstance(unsafe["deployment"], dict)
+    unsafe["deployment"]["public_origin"] = "http://public.example.test"
+    with pytest.raises(RemoteHostingPlanError, match="HTTPS"):
+        validate_remote_hosting_plan(unsafe)
+
+    secret = _remote_plan()
+    assert isinstance(secret["identity"], dict)
+    secret["identity"]["client_secret"] = "must-not-be-here"
+    with pytest.raises(RemoteHostingPlanError, match="never contain secrets"):
+        validate_remote_hosting_plan(secret)
+
+
+def test_remote_plan_command_does_not_add_a_remote_bind_option() -> None:
+    parser = build_parser()
+    serve = parser.parse_args(["serve", "--port", "0"])
+    assert not hasattr(serve, "host")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["serve", "--host", "0.0.0.0"])
+
+
+def test_remote_plan_cli_validates_without_starting_server(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan_path = tmp_path / "remote-plan.json"
+    plan_path.write_text(json.dumps(_remote_plan()), encoding="utf-8")
+    assert main(["remote-hosting-plan", "--file", str(plan_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "PLAN_VALIDATED"
+    assert payload["listener_changed"] is False
+    assert payload["remote_server_started"] is False
 
 
 def test_documents_every_projection_field_and_bound():

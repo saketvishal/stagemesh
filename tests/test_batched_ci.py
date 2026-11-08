@@ -15,13 +15,22 @@ Validates:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from test_survivor_wave import Rig, make_store
 
 import stagemesh.cli as cli_module
 import stagemesh.run_window as rw
+from stagemesh.ci_optimization import (
+    CIOptimizationError,
+    bisect_failing_batch,
+    parse_cache_manifest,
+    recommend_batch_size,
+    verify_cache_artifact,
+)
 from stagemesh.concurrency import contract_conflict
 from stagemesh.domain import EvidenceKind
 from stagemesh.runtime_freshness import RuntimeFreshness
@@ -120,7 +129,115 @@ def test_batch_merge_permission_denial_preserves_blocker_for_every_constituent(t
 
 FRESH = RuntimeFreshness(running_from="src", running_from_source=True, installed_cli="x", source_cli="y")
 IN_SYNC = RepoState(main_ref="main", main_sha="a" * 40, origin_sha="a" * 40, relation="in_sync")
-OK_PROVIDERS = lambda store, config, strict_live: rw.Check("providers", True, "fake providers")
+
+
+def _ok_providers(store, config, strict_live):
+    del store, config, strict_live
+    return rw.Check("providers", True, "fake providers")
+
+
+OK_PROVIDERS = _ok_providers
+
+
+def test_dynamic_batch_recommendation_is_bounded_and_failure_first() -> None:
+    pressured = recommend_batch_size(
+        current_size=4,
+        minimum_size=2,
+        maximum_size=8,
+        queue_delay_seconds=900,
+        runner_utilization=0.9,
+        recent_failure_rate=0.0,
+    )
+    assert pressured.action == "grow" and pressured.recommended_size == 5
+
+    failing = recommend_batch_size(
+        current_size=7,
+        minimum_size=2,
+        maximum_size=8,
+        queue_delay_seconds=900,
+        runner_utilization=0.9,
+        recent_failure_rate=0.3,
+    )
+    assert failing.action == "shrink" and failing.recommended_size == 4
+    with pytest.raises(CIOptimizationError):
+        recommend_batch_size(
+            current_size=4,
+            minimum_size=1,
+            maximum_size=8,
+            queue_delay_seconds=0,
+            runner_utilization=1.1,
+            recent_failure_rate=0,
+        )
+
+
+def test_ci_optimization_cli_is_read_only(capsys: pytest.CaptureFixture[str]) -> None:
+    result = cli_module.main(
+        [
+            "ci-optimize-plan",
+            "--current-size",
+            "4",
+            "--max-size",
+            "8",
+            "--queue-delay-seconds",
+            "900",
+            "--runner-utilization",
+            "0.9",
+            "--recent-failure-rate",
+            "0",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["mutation_performed"] is False
+    assert payload["recommendation"]["recommended_size"] == 5
+
+
+def test_semantic_bisect_is_deterministic_and_probe_bounded() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def probe(items: tuple[str, ...]) -> bool:
+        calls.append(items)
+        return "384" in items
+
+    result = bisect_failing_batch(("100", "384", "725", "900"), probe, max_probes=5)
+    assert result.status == "isolated"
+    assert result.suspected_task_ids == ("384",)
+    assert len(result.probes) <= 5
+    assert calls == [item.task_ids for item in result.probes]
+
+    exhausted = bisect_failing_batch(("1", "2", "3", "4"), lambda _items: True, max_probes=1)
+    assert exhausted.status == "probe_budget_exhausted"
+    assert len(exhausted.probes) == 1
+
+
+def test_cache_manifest_requires_exact_identity_safe_paths_and_digest() -> None:
+    content = b"focused-test-evidence"
+    manifest = parse_cache_manifest(
+        {
+            "schema": "stagemesh.ci-cache-manifest/1",
+            "candidate_sha": "a" * 40,
+            "policy_fingerprint": "b" * 64,
+            "platform": "windows-py311",
+            "targets": ["tests/test_batched_ci.py"],
+            "artifacts": [
+                {
+                    "path": "evidence/focused.json",
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                }
+            ],
+        }
+    )
+    assert verify_cache_artifact(manifest.artifacts[0], content)
+    assert not verify_cache_artifact(manifest.artifacts[0], content + b"changed")
+
+    unsafe = manifest.to_dict()
+    unsafe["artifacts"] = [
+        {"path": "../outside", "sha256": "c" * 64, "size_bytes": 1}
+    ]
+    with pytest.raises(CIOptimizationError, match="project-relative"):
+        parse_cache_manifest(unsafe)
 
 
 class MockClock:
