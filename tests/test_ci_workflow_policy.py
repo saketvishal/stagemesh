@@ -9,6 +9,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 MANDATORY_STEPS = (
     "Compute audited validation plan",
     "Attribution and static range policy",
+    "Fail-closed repository quality gate",
     "Focused validation policy",
     "Declarative and executable contract invariants",
 )
@@ -55,7 +56,26 @@ def test_mandatory_steps_never_depend_on_focused_mode() -> None:
         assert "python scripts/check_ci_range.py" in _step(
             job, "Attribution and static range policy"
         )
+        quality = _step(job, "Fail-closed repository quality gate")
+        assert "scripts/quality_gate.py --mode ci" in quality.replace("\\", "/")
+        assert "STAGEMESH_CI_BASE_SHA:" in quality
+        assert "STAGEMESH_CI_HEAD_SHA:" in quality
+        assert "ci-quality-report.json" in quality
         assert "tests/test_docs_links.py" in _step(job, "Focused validation policy")
+
+
+def test_quality_control_files_have_code_owner_review_boundaries() -> None:
+    owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    for path in (
+        "/.github/",
+        "/.gitignore",
+        "/.stagemesh/quality-policy.json",
+        "/pyproject.toml",
+        "/build_backend.py",
+        "/scripts/quality_gate.py",
+        "/src/stagemesh/quality_policy.py",
+    ):
+        assert f"{path} @saketvishal" in owners
 
 
 def test_component_mode_uses_validated_plan_file_on_each_required_os() -> None:

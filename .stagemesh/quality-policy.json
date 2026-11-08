@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "policy_id": "stagemesh-repository-quality/1",
+  "complexity_max": 12,
+  "dead_code_min_confidence": 100,
+  "strict_modules": [
+    "src/stagemesh/quality_policy.py",
+    "scripts/quality_gate.py"
+  ],
+  "authorization_required": [
+    ".github/**",
+    ".gitignore",
+    ".stagemesh/quality-policy.json",
+    "build_backend.py",
+    "pyproject.toml",
+    "requirements*.txt",
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "scripts/quality_gate.py",
+    "src/stagemesh/quality_policy.py"
+  ],
+  "gates": [
+    {
+      "name": "repository-static-quality",
+      "category": "lint",
+      "tier": "commit",
+      "command": ["python", "scripts/quality_gate.py", "--mode", "static"],
+      "applies_to": ["**/*.py", "pyproject.toml", ".stagemesh/quality-policy.json"],
+      "timeout_seconds": 300
+    },
+    {
+      "name": "repository-strict-types",
+      "category": "typecheck",
+      "tier": "commit",
+      "command": ["python", "scripts/quality_gate.py", "--mode", "types"],
+      "applies_to": ["src/**/*.py", "scripts/**/*.py", "pyproject.toml", ".stagemesh/quality-policy.json"],
+      "timeout_seconds": 300
+    },
+    {
+      "name": "repository-dead-code",
+      "category": "lint",
+      "tier": "commit",
+      "command": ["python", "scripts/quality_gate.py", "--mode", "dead-code"],
+      "applies_to": ["src/**/*.py", "scripts/**/*.py", "pyproject.toml", ".stagemesh/quality-policy.json"],
+      "timeout_seconds": 300
+    },
+    {
+      "name": "repository-quality-contract-tests",
+      "category": "test",
+      "tier": "commit",
+      "command": ["python", "-m", "pytest", "-q", "tests/test_quality_policy.py", "tests/test_quality_gate.py"],
+      "applies_to": [
+        ".stagemesh/quality-policy.json",
+        "src/stagemesh/quality_policy.py",
+        "scripts/quality_gate.py",
+        "tests/test_quality_policy.py",
+        "tests/test_quality_gate.py"
+      ],
+      "timeout_seconds": 300
+    }
+  ]
+}

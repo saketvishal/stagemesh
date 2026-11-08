@@ -101,8 +101,10 @@ def test_hook_install_is_idempotent_and_preserves_existing_hooks(repo):
     existing.unlink()
     hooks.install(repo)
     hooks.install(repo)
+    assert "quality_gate.py\" --mode fast" in (hook_dir / "pre-commit").read_text()
     assert "--message-file" in (hook_dir / "commit-msg").read_text()
     assert "--pre-push" in existing.read_text()
+    assert "quality_gate.py\" --mode commit" in existing.read_text()
     git(repo, "config", "core.hooksPath", "custom-hooks")
     with pytest.raises(ValueError, match="already configured"):
         hooks.install(repo)

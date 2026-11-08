@@ -39,6 +39,7 @@ Mode = Literal["full", "operator", "component", "docs", "smoke"]
 
 MANDATORY_CHECKS = (
     "attribution-and-static-range-policy",
+    "fail-closed-repository-quality-gate",
     "focused-validation-policy",
     "declarative-and-executable-contract-invariants",
 )
@@ -61,6 +62,7 @@ _FULL_EXACT_PATHS = frozenset(
         "src/stagemesh/persistence.py",
         "src/stagemesh/postgres_store.py",
         "src/stagemesh/profile.py",
+        "src/stagemesh/quality_policy.py",
         "src/stagemesh/regression_orchestrator.py",
         "src/stagemesh/security.py",
         "src/stagemesh/test_isolation.py",
@@ -73,6 +75,7 @@ _FULL_EXACT_PATHS = frozenset(
         "scripts/run_ci_component_tests.py",
         "scripts/check_ci_range.py",
         "scripts/install-stagemesh.ps1",
+        "scripts/quality_gate.py",
         "scripts/run_regression.py",
         "tests/test_ci_validation_plan.py",
         "tests/test_ci_component_runner.py",

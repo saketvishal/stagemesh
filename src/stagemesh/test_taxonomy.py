@@ -155,7 +155,7 @@ TIER_ISOLATION_CONTRACTS: dict[TestTier, IsolationContract] = {
 # Filenames are stored with forward slashes, relative to repo root.
 FILE_TIER_MAP: dict[str, TestTier] = {
     # -------------------------------------------------------------------------
-    # 1. Deterministic Unit (54 files)
+    # 1. Deterministic Unit (55 files)
     # -------------------------------------------------------------------------
     "tests/test_attribution_guards.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_attribution_tool.py": TestTier.DETERMINISTIC_UNIT,
@@ -169,6 +169,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_invariant_semantics.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_invariants.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_profile.py": TestTier.DETERMINISTIC_UNIT,
+    "tests/test_quality_policy.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_project_smoke.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_readiness.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_runtime_info.py": TestTier.DETERMINISTIC_UNIT,
@@ -263,7 +264,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_validation_recovery_ownership.py": TestTier.COMPONENT_CONTRACT,
 
     # -------------------------------------------------------------------------
-    # 3. Integration and Process (85 files)
+    # 3. Integration and Process (86 files)
     # -------------------------------------------------------------------------
     "tests/test_auto_plan.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_autonomy_delivery.py": TestTier.INTEGRATION_PROCESS,
@@ -325,6 +326,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_provider_cleanup_confirmation.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_provider_cooldown.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_provider_pool.py": TestTier.INTEGRATION_PROCESS,
+    "tests/test_quality_gate.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_quota_live_retry.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_reattribution.py": TestTier.INTEGRATION_PROCESS,
     "tests/test_research_cleanup_ownership.py": TestTier.INTEGRATION_PROCESS,
@@ -452,7 +454,7 @@ FILE_TEST_COUNTS: dict[str, int] = {
     "tests/test_check_attribution.py": 11,
     "tests/test_ci_component_runner.py": 11,
     "tests/test_ci_validation_plan.py": 62,
-    "tests/test_ci_workflow_policy.py": 5,
+    "tests/test_ci_workflow_policy.py": 6,
     "tests/test_codex_executable.py": 7,
     "tests/test_codex_mcp_authorization.py": 1,
     "tests/test_completion_integrity.py": 12,
@@ -461,7 +463,7 @@ FILE_TEST_COUNTS: dict[str, int] = {
     "tests/test_continuous_driver.py": 57,
     "tests/test_contract_admission.py": 42,
     "tests/test_contract_check.py": 6,
-    "tests/test_contract_fail_closed.py": 7,
+    "tests/test_contract_fail_closed.py": 9,
     "tests/test_contract_feasibility.py": 17,
     "tests/test_controlled_merge.py": 31,
     "tests/test_deferred_tail_recovery.py": 13,
@@ -522,6 +524,8 @@ FILE_TEST_COUNTS: dict[str, int] = {
     "tests/test_pid_cleanup_proof.py": 23,
     "tests/test_planning_execution.py": 10,
     "tests/test_profile.py": 41,
+    "tests/test_quality_gate.py": 7,
+    "tests/test_quality_policy.py": 11,
     "tests/test_project_smoke.py": 9,
     "tests/test_provider_acceptance.py": 22,
     "tests/test_provider_auth.py": 19,
@@ -673,7 +677,7 @@ FILE_RUNTIME_SECONDS: dict[str, float] = {
     'tests/test_check_attribution.py': 51.010,
     'tests/test_ci_component_runner.py': 0.110,
     'tests/test_ci_validation_plan.py': 23.170,
-    'tests/test_ci_workflow_policy.py': 0.001,
+    'tests/test_ci_workflow_policy.py': 0.010,
     'tests/test_codex_executable.py': 0.080,
     'tests/test_codex_mcp_authorization.py': 0.070,
     'tests/test_completion_integrity.py': 367.780,
@@ -743,6 +747,8 @@ FILE_RUNTIME_SECONDS: dict[str, float] = {
     'tests/test_pid_cleanup_proof.py': 26.520,
     'tests/test_planning_execution.py': 198.280,
     'tests/test_profile.py': 122.770,
+    'tests/test_quality_gate.py': 2.000,
+    'tests/test_quality_policy.py': 0.100,
     'tests/test_project_smoke.py': 10.520,
     'tests/test_provider_acceptance.py': 125.380,
     'tests/test_provider_auth.py': 4.250,

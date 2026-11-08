@@ -41,6 +41,11 @@ jobs:
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: python scripts/check_ci_range.py
       - run: python scripts/bootstrap_stagemesh.py --editable
+      - name: Fail-closed repository quality gate
+        env:
+          STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha }}
+          STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: .stagemesh\tooling\venv\Scripts\python.exe scripts\quality_gate.py --mode ci --report .stagemesh\ci-quality-report.json
       - name: Focused validation policy
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_stagemesh_validation_profile.py tests/test_focused_validation.py tests/test_docs_links.py
       - run: .stagemesh\tooling\venv\Scripts\python.exe -c "import stagemesh; print(stagemesh.__version__)"
@@ -98,6 +103,11 @@ jobs:
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: python scripts/check_ci_range.py
       - run: python scripts/bootstrap_stagemesh.py --editable
+      - name: Fail-closed repository quality gate
+        env:
+          STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha }}
+          STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: .stagemesh/tooling/venv/bin/python scripts/quality_gate.py --mode ci --report .stagemesh/ci-quality-report.json
       - run: .stagemesh/tooling/venv/bin/python -c "import stagemesh; print(stagemesh.__version__)"
       - name: Focused validation policy
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_stagemesh_validation_profile.py tests/test_focused_validation.py tests/test_docs_links.py

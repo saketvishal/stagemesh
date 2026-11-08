@@ -153,6 +153,7 @@ class GateResult:
     output_truncated: bool = False
     input_fingerprint: str | None = None  # complete-input fingerprint (see validation_reuse); None when it could not be computed
     reused_from: str | None = None  # "evidence:<id>:<gate>" for a prior PASSED result, "attempt:<gate>" for a duplicate in this attempt
+    policy_hash: str | None = None  # trusted repository policy digest; never inferred from candidate output
 
     wait_seconds: float = 0.0
     execution_seconds: float = 0.0
@@ -177,6 +178,7 @@ class GateResult:
             "output_truncated": cut_out or cut_err or self.output_truncated,
             "input_fingerprint": self.input_fingerprint,
             "reused_from": self.reused_from,
+            "policy_hash": self.policy_hash,
         }
 
 
@@ -372,7 +374,39 @@ def evaluate_contract(
             ),
             gates=(),
         )
+    task_contract = contract
+    try:
+        from .quality_policy import (
+            QualityPolicyError,
+            apply_quality_policy,
+            quality_scope_findings,
+        )
+
+        contract, applied_quality = apply_quality_policy(
+            project,
+            contract,
+            changed,
+            baseline_sha=baseline_sha,
+            candidate_sha=candidate_sha,
+        )
+    except QualityPolicyError as exc:
+        return ContractEvaluation(
+            status="FAILED",
+            changed_files=changed,
+            findings=(
+                {
+                    "severity": "error",
+                    "code": "quality_policy_invalid",
+                    "message": str(exc),
+                },
+            ),
+            gates=(),
+        )
     findings: list[dict[str, Any]] = []
+    if applied_quality is not None:
+        findings.extend(
+            quality_scope_findings(applied_quality.policy, task_contract, changed)
+        )
     gates: list[GateResult] = []
 
     if contract.explicit and not changed:
@@ -513,7 +547,7 @@ def _run_planned_gates(project: Path, candidate_sha: str, contract: ChangeContra
             source = f"evidence:{prior['evidence_id']}:{prior['gate']}"
             reused = GateResult(
                 gate.name, "PASSED", tuple(gate.command), 0, "", "", None, input_fingerprint=fingerprint, reused_from=source,
-                cwd=gate.cwd,
+                cwd=gate.cwd, policy_hash=dict(gate.env).get("STAGEMESH_QUALITY_POLICY_SHA256"),
             )
             gate_reuse.reused.append({"gate": gate.name, "from": source, "candidate_sha": prior["candidate_sha"], "fingerprint": fingerprint})
             slots.append(reused)
@@ -768,6 +802,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
         "resolution": None if resolution is None else resolution.to_dict(),
         "cwd": str(run_dir),
     }
+    policy_hash = dict(gate.env).get("STAGEMESH_QUALITY_POLICY_SHA256")
     if resolution is not None and not resolution.launchable:
         # An explicit executable that is missing is a launch failure. Substituting a same-named PATH program would run something
         # the gate never declared, so the gate fails with the exact path that was looked for.
@@ -775,6 +810,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             gate.name, "FAILED", declared, None, "", resolution.detail, "environment",
             **{**provenance, "executed_command": ()},
             diagnosis={"timeout_class": None, "attribution": "environment", "explanation": resolution.detail, "progress": []},
+            policy_hash=policy_hash,
         )
     started = time.monotonic()
     waited = 0.0
@@ -800,6 +836,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
         return GateResult(
             gate.name, "FAILED", declared, None, "", str(exc), "environment",
             duration_seconds=round(time.monotonic() - started, 3), **provenance,
+            policy_hash=policy_hash,
         )
     except subprocess.TimeoutExpired as exc:
         out, err = _gate_output_text(exc.stdout), _gate_output_text(exc.stderr)
@@ -818,6 +855,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             output_truncated=len(out) > 4000 or len(err) > 4000,
             wait_seconds=waited, execution_seconds=ran,
             **provenance,
+            policy_hash=policy_hash,
         )
     return GateResult(
         gate.name,
@@ -829,6 +867,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
         duration_seconds=round(time.monotonic() - started, 3),
         wait_seconds=waited, execution_seconds=ran,
         **provenance,
+        policy_hash=policy_hash,
     )
 
 
