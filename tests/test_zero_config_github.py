@@ -40,10 +40,35 @@ def _prepared_contract(project: Path, task: str) -> None:
     (directory / f"{task}.json").write_text(json.dumps(FAKE_CONTRACT), encoding="utf-8")
 
 
+def _prepare_pr_repository(project: Path) -> None:
+    """Give read-only PR-plan fixtures matching local/origin branch tips without network access."""
+    (project / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git(project, "add", "seed.txt")
+    _git(
+        project,
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "user.name=StageMesh Test",
+        "commit",
+        "-q",
+        "-m",
+        "seed",
+    )
+    _git(project, "update-ref", "refs/remotes/origin/main", _git(project, "rev-parse", "HEAD"))
+
+
 def _disable_independent_review_for_plan(project: Path) -> None:
     """Keep read-only plan tests scoped to planning instead of host provider inventory."""
     config_path = project / ".stagemesh" / "config.json"
     data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["providers"] = {
+        "local-agent": {
+            "command": f'"{sys.executable}"',
+            "capabilities": ["IMPLEMENT", "REVIEW"],
+        }
+    }
+    data["authorization"] = {"unattended_providers": ["local-agent"]}
     data["routing"] = {
         **data.get("routing", {}),
         "require_independent_review": False,
@@ -242,6 +267,7 @@ def test_run_window_plan_previews_ready_issues_without_persisting_them(
     project = _github_project(tmp_path)
     assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
     _disable_independent_review_for_plan(project)
+    _prepare_pr_repository(project)
     _prepared_contract(project, "17")
     capsys.readouterr()
 
@@ -291,6 +317,13 @@ def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, mo
         json.dumps(
             {
                 "github": {"owner": "acme", "repo": "widgets"},
+                "providers": {
+                    "local-agent": {
+                        "command": f'"{sys.executable}"',
+                        "capabilities": ["IMPLEMENT", "REVIEW"],
+                    }
+                },
+                "authorization": {"unattended_providers": ["local-agent"]},
                 "routing": {"require_independent_review": False},
             }
         ),
@@ -300,6 +333,7 @@ def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, mo
     assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
     capsys.readouterr()
     before = config_path.read_bytes()
+    _prepare_pr_repository(project)
     _prepared_contract(project, "3")
 
     code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
@@ -322,6 +356,13 @@ def test_run_window_plan_preserves_explicit_legacy_source_policy(
             {
                 "github": {"owner": "acme", "repo": "widgets"},
                 "task_sources": [{"name": "github", "type": "github", "labels": ["status:QUEUED"]}],
+                "providers": {
+                    "local-agent": {
+                        "command": f'"{sys.executable}"',
+                        "capabilities": ["IMPLEMENT", "REVIEW"],
+                    }
+                },
+                "authorization": {"unattended_providers": ["local-agent"]},
                 "routing": {"require_independent_review": False},
             }
         ),
@@ -332,6 +373,7 @@ def test_run_window_plan_preserves_explicit_legacy_source_policy(
         "discover",
         lambda self: ([DiscoveredTask("github", "4", "T", labels=("stagemesh:ready",))], "OK", None),
     )
+    _prepare_pr_repository(project)
 
     code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
 

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_survivor_wave import _git, _with_origin
 
 from stagemesh.cli import main
 from stagemesh.profile import load_profile, profile_path
@@ -28,6 +29,19 @@ def _state(project: Path) -> dict[str, str]:
         for p in sorted((project / ".stagemesh").rglob("*"))
         if p.is_file() and p.name != "stagemesh.sqlite3"
     }
+
+
+def _ready_repository(root: Path) -> Path:
+    project = root / "project"
+    project.mkdir()
+    _git(project, "init", "-q")
+    _git(project, "config", "user.email", "test@example.invalid")
+    _git(project, "config", "user.name", "StageMesh Test")
+    (project / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git(project, "add", "seed.txt")
+    _git(project, "commit", "-q", "-m", "seed")
+    _with_origin(root, project)
+    return project
 
 
 def test_fresh_project_gets_default_profile(tmp_path: Path, capsys) -> None:
@@ -139,7 +153,7 @@ def test_init_does_not_claim_success_when_readiness_blockers_remain(tmp_path: Pa
 
     assert code == 2
     assert "StageMesh setup needs attention" in out
-    assert "StageMesh did not claim readiness" in out
+    assert "StageMesh initialization is incomplete" in out
     assert "StageMesh is ready" not in out
 
     assert main(["--project", str(tmp_path), "init", "--json"]) == 2
@@ -152,8 +166,9 @@ def test_init_does_not_claim_success_when_readiness_blockers_remain(tmp_path: Pa
 
 
 def test_init_claims_ready_only_with_real_gates_and_provider_opt_in(tmp_path: Path, capsys) -> None:
-    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    runtime = tmp_path / ".stagemesh"
+    project = _ready_repository(tmp_path)
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    runtime = project / ".stagemesh"
     runtime.mkdir()
     (runtime / "config.json").write_text(
         json.dumps(
@@ -167,11 +182,44 @@ def test_init_claims_ready_only_with_real_gates_and_provider_opt_in(tmp_path: Pa
         encoding="utf-8",
     )
 
-    code, out, err = _init(tmp_path, capsys, strict=True)
+    code, out, err = _init(project, capsys, strict=True)
 
     assert code == 0, out + err
     assert "StageMesh is ready" in out
     assert "readiness blockers" not in out
+
+
+def test_init_refuses_ready_when_default_pr_window_would_refuse_repository(tmp_path: Path, capsys) -> None:
+    project = _ready_repository(tmp_path)
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    runtime = project / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {"local-agent": {"command": f'"{sys.executable}"', "capabilities": ["IMPLEMENT", "REVIEW"]}},
+                "authorization": {"unattended_providers": ["local-agent"]},
+                "routing": {"require_independent_review": False},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (project / "local-only.txt").write_text("local only\n", encoding="utf-8")
+    _git(project, "add", "local-only.txt")
+    _git(project, "commit", "-q", "-m", "local only")
+
+    code, out, _ = _init(project, capsys, strict=True)
+
+    assert code == 2
+    assert "repo: local" in out and "is ahead origin" in out
+    assert "run-window` will refuse" in out
+    assert "StageMesh is ready" not in out
+
+    assert main(["--project", str(project), "init", "--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    repo = next(item for item in report["readiness"]["blockers"] if item["name"] == "repo")
+    assert "git pull cannot remove local-only commits" in repo["detail"]
 
 
 def test_tests_directory_without_safe_test_configuration_is_reported_during_init(tmp_path: Path, capsys) -> None:
@@ -190,8 +238,9 @@ def test_tests_directory_without_safe_test_configuration_is_reported_during_init
 
 
 def test_init_accepts_distinct_available_implementation_and_review_providers(tmp_path: Path, capsys) -> None:
-    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    runtime = tmp_path / ".stagemesh"
+    project = _ready_repository(tmp_path)
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    runtime = project / ".stagemesh"
     runtime.mkdir()
     executable = f'"{sys.executable}"'
     (runtime / "config.json").write_text(
@@ -208,7 +257,7 @@ def test_init_accepts_distinct_available_implementation_and_review_providers(tmp
         encoding="utf-8",
     )
 
-    code, out, err = _init(tmp_path, capsys, strict=True)
+    code, out, err = _init(project, capsys, strict=True)
 
     assert code == 0, out + err
     assert "StageMesh is ready" in out
