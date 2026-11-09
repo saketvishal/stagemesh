@@ -208,8 +208,10 @@ def validate_profile(profile: Profile) -> None:
         if len(set(names)) != len(names):
             raise ProfileError(f"task type {type_id} has duplicate gate names")
         commands = [expand_gate(profile, gate_id)["command"] for gate_id in task_type.gates]
-        broad = [_is_broad_gate(n) or _is_broad_command(tuple(c)) for n, c in zip(names, commands)]
-        if task_type.level == "light" and not all(any(t in n.casefold() for t in DOC_GATE_TOKENS) and not b for n, b in zip(names, broad)):
+        broad = [_is_broad_gate(n) or _is_broad_command(tuple(c)) for n, c in zip(names, commands, strict=True)]
+        if task_type.level == "light" and not all(
+            any(t in n.casefold() for t in DOC_GATE_TOKENS) and not b for n, b in zip(names, broad, strict=True)
+        ):
             raise ProfileError(
                 f"light task type {type_id}: every gate name must contain one of {', '.join(DOC_GATE_TOKENS)} and not be broad, "
                 "otherwise validation planning would skip it"
