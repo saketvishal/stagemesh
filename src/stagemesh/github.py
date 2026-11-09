@@ -194,6 +194,16 @@ class GitHubClient:
         )
         return self._result(code, headers, payload)
 
+    def remove_issue_label(self, number: str, label: str) -> GitHubResult:
+        """Remove one StageMesh-owned label; an already-absent label is an idempotent success."""
+        code, headers, payload = self.transport.request(
+            "DELETE",
+            f"/repos/{self.owner}/{self.repo}/issues/{number}/labels/{quote(label, safe='')}",
+        )
+        if code in {200, 204, 404}:
+            return GitHubResult("OK", payload)
+        return self._result(code, headers, payload)
+
     @staticmethod
     def _result(code: int, headers: dict[str, str], payload: object) -> GitHubResult:
         if code in {200, 201}:

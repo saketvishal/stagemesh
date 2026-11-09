@@ -22,7 +22,7 @@ from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
 from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
 from .agent_skills import SkillPackError, builtin_skill_inventory, skill_selection_preview
-from .audit import AuditValidationError, export_audit_jsonl
+from .audit import AuditValidationError, export_audit_jsonl, record_audit
 from .autonomy.cli import register_autonomy_commands
 from .autonomy.github_adapter import GitHubHostedCI
 from .autonomy.integration import SupervisedIntegrator
@@ -252,8 +252,8 @@ def _ensure_default_github_task_source(project: Path) -> bool:
     return changed
 
 
-def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...]]:
-    """Create the project-local provider registry once, without provider calls."""
+def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
+    """Merge newly installed provider plugins into the project registry without provider calls."""
     config_path = runtime_dir(project) / "config.json"
     data: dict[str, object] = {}
     if config_path.exists():
@@ -264,16 +264,22 @@ def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...]]:
         if not isinstance(loaded, dict):
             raise ConfigValidationError("config root must be an object")
         data = loaded
-    if "providers" in data:
-        providers = data["providers"]
-        if not isinstance(providers, dict):
-            raise ConfigValidationError("providers must be an object")
-        return False, tuple(sorted(str(name) for name in providers))
-    providers = discovered_provider_entries()
-    data["providers"] = providers
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return True, tuple(sorted(providers))
+    providers = data.get("providers", {})
+    if not isinstance(providers, dict):
+        raise ConfigValidationError("providers must be an object")
+    available = discovered_provider_entries()
+    changed = False
+    for name, entry in available.items():
+        if name not in providers:
+            providers[name] = entry
+            changed = True
+    if "providers" not in data:
+        data["providers"] = providers
+        changed = True
+    if changed:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return changed, tuple(sorted(str(name) for name in providers)), tuple(sorted(available))
 
 
 def _split_setup_command(raw: str) -> tuple[str, ...]:
@@ -337,53 +343,38 @@ def _interactive_init(args: argparse.Namespace) -> bool:
     return not args.json and bool(sys.stdin) and sys.stdin.isatty()
 
 
-def _prompt_provider_authorization(project: Path, registered: tuple[str, ...]) -> tuple[str, ...]:
-    """Explain and collect unattended-provider consent. Login probes make no model call."""
-    if not registered:
-        return ()
-    from . import provider_auth
-
-    report = provider_auth.check(tuple(name for name in registered if name in provider_auth.PROVIDERS))
-    states = {str(item["provider"]): item for item in report["providers"]}
+def _prompt_provider_authorization(project: Path, available: tuple[str, ...]) -> tuple[str, ...]:
+    """Collect one explicit opt-in for newly available provider plugins; never invokes a provider."""
+    authorized = tuple(load_config(project).authorized_providers or ())
+    candidates = tuple(name for name in available if name not in authorized)
+    if not candidates:
+        return authorized
     print("\nCoding-agent authorization")
+    print("StageMesh found installed provider plugins that are not active for unattended work.")
+    if authorized:
+        print(f"Already active: {', '.join(authorized)}")
     print("StageMesh needs permission to start selected coding agents without asking again for every task.")
     print("This permits project edits through the configured agent commands; StageMesh still enforces project scope and review policy.")
-    for number, name in enumerate(registered, start=1):
-        state = states.get(name)
-        detail = (
-            f"login: {state['auth_mode']}" + (" subscription" if state["subscription"] else "")
-            if state
-            else "login check unavailable; verify this agent before authorizing it"
-        )
-        print(f"  {number}. {name} ({detail})")
-    if report["api_billing_environment"]:
-        print("  warning: API-billing environment variables are present; subscription-only use is not verified")
+    for number, name in enumerate(candidates, start=1):
+        print(f"  {number}. {name} (installed adapter plugin)")
     print("Independent review normally needs at least two distinct authorized agents.")
-    recommended = (
-        tuple(name for name in registered if states.get(name, {}).get("subscription"))
-        if not report["api_billing_environment"]
-        else ()
-    )
-    recommendation = f"verified subscription agents {', '.join(recommended)}" if recommended else "selected agents"
     try:
         answer = input(
-            f"Authorize {recommendation}? [y/N, or enter names/numbers separated by commas]: "
+            f"Activate all installed provider plugins ({', '.join(candidates)})? "
+            "[y/N, or enter names/numbers separated by commas]: "
         ).strip()
     except EOFError:
         return ()
     if not answer:
-        return ()
+        return authorized
     if answer.casefold() in {"y", "yes"}:
-        if not recommended:
-            print("authorization not saved: no subscription login could be verified; enter explicit agent names after checking them")
-            return ()
-        return _write_provider_authorization(project, recommended)
+        return _write_provider_authorization(project, candidates)
     selected: list[str] = []
     for token in (part.strip() for part in answer.split(",")):
-        name = registered[int(token) - 1] if token.isdigit() and 1 <= int(token) <= len(registered) else token
-        if name not in registered:
-            print(f"authorization not saved: {token!r} is not one of the detected agents")
-            return ()
+        name = candidates[int(token) - 1] if token.isdigit() and 1 <= int(token) <= len(candidates) else token
+        if name not in candidates:
+            print(f"authorization not saved: {token!r} is not one of the newly available agents")
+            return authorized
         selected.append(name)
     return _write_provider_authorization(project, tuple(selected))
 
@@ -589,14 +580,27 @@ def command_init(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
     configured_github_source = _ensure_default_github_task_source(project)
-    initialized_providers, registered_providers = _ensure_provider_registry(project)
+    providers_changed, registered_providers, available_providers = _ensure_provider_registry(project)
+    authorization_before = tuple(load_config(project).authorized_providers or ())
     requested_providers = tuple(dict.fromkeys(args.authorize_provider or ()))
     if requested_providers:
         _write_provider_authorization(project, requested_providers)
-    elif _interactive_init(args) and load_config(project).authorized_providers is None:
-        _prompt_provider_authorization(project, registered_providers)
+    elif _interactive_init(args):
+        _prompt_provider_authorization(project, available_providers)
+    authorization_after = tuple(load_config(project).authorized_providers or ())
     store = Store(db_path(project))
     store.migrate()
+    if authorization_after != authorization_before:
+        record_audit(
+            store,
+            "provider.authorization_changed",
+            {
+                "actor": "stagemesh init",
+                "before": list(authorization_before),
+                "after": list(authorization_after),
+                "added": [name for name in authorization_after if name not in authorization_before],
+            },
+        )
     if args.task:
         store.upsert_task(args.task)
     source_sync: dict[str, str] = {"status": "synced"}
@@ -676,9 +680,13 @@ def command_init(args: argparse.Namespace) -> int:
                     "github_task_source": "configured" if configured_github_source else "unchanged",
                     "github_auth_source": github_auth_source,
                     "provider_registry": {
-                        "status": "initialized" if initialized_providers else "unchanged",
+                        "status": "updated" if providers_changed else "unchanged",
                         "registered": list(registered_providers),
+                        "available": list(available_providers),
                         "authorized": list(config.authorized_providers or ()),
+                        "inactive_available": [
+                            name for name in available_providers if name not in (config.authorized_providers or ())
+                        ],
                         "provider_calls": 0,
                     },
                     "task_source_sync": source_sync,
@@ -707,10 +715,14 @@ def command_init(args: argparse.Namespace) -> int:
             f"(ready: {github_classification.ready_labeled}; needs triage: {github_classification.triage_labeled}; "
             f"failed: {github_classification.failed})"
         )
-    if initialized_providers:
+    if providers_changed:
         names = ", ".join(registered_providers) or "none"
+        available = ", ".join(available_providers) or "none"
         authorized = ", ".join(config.authorized_providers or ()) or "none"
-        print(f"initialized provider registry (registered: {names}; authorized: {authorized}; provider calls: 0)")
+        print(
+            "updated provider registry "
+            f"(registered: {names}; available now: {available}; active: {authorized}; provider calls: 0)"
+        )
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
     elif profile_status == "configured":

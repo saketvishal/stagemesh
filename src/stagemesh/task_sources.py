@@ -655,6 +655,30 @@ class GitHubOutboundSync(OutboundSync):
             {"reason": bounded, "label": label.status, "comment": comment.status},
         )
 
+    def publish_unblocked(self, issue_number: str) -> str:
+        """Clear only StageMesh's advisory blocked label when the local task is actionable again."""
+        retry = RetryRegistry(self.store)
+        key = f"github:{issue_number}:unblocked"
+        decision = retry.decision(key)
+        if not decision.allowed:
+            return self.publish(
+                "github",
+                issue_number,
+                "BACKOFF",
+                {"outcome": "UNBLOCKED", "next_attempt_at": decision.next_attempt_at},
+            )
+        label = self.client.remove_issue_label(issue_number, BLOCKED_OUTBOUND_LABEL)
+        if label.status == "OK":
+            retry.record_success(key)
+        else:
+            retry.record_failure(key, label.status)
+        return self.publish(
+            "github",
+            issue_number,
+            label.status,
+            {"outcome": "UNBLOCKED", "label": label.status},
+        )
+
 
 _MAX_COMMENT_PAGES = 10  # 1000 comments of dedupe history; beyond that a re-block may repeat once
 BLOCKED_OUTBOUND_LABEL = "stagemesh:task-blocked"  # additive, and not a source-gating label

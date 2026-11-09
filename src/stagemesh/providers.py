@@ -17,13 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .agent_skills import SkillPackError, is_frontend_task, skill_prompt
 from .agent_policy import (
     AgentPolicyError,
     EffectiveAgentPolicy,
     agent_policy_prompt,
     load_effective_agent_policy,
 )
+from .agent_skills import SkillPackError, is_frontend_task, skill_prompt
 from .attribution import attribution_for_worker
 from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
@@ -63,7 +63,7 @@ from .git_identity import provider_environment
 from .mcp_capabilities import McpCapabilityError, configure_mcp_command
 from .persistence import Store
 from .process_identity import owner_execution_fields, popen_identity
-from .provider_catalog import PROVIDER_CATALOG, catalog_commands, write_capable_command
+from .provider_catalog import catalog_commands, catalog_definitions, write_capable_command
 from .provider_events import (
     CAPABILITY_EVIDENCE_MISSING,
     CAPABILITY_POLICY_VIOLATION,
@@ -1330,9 +1330,9 @@ def _is_external_workspace_mutation(exc: Exception) -> bool:
 
 
 # Public compatibility views; the source of truth is the adapter catalog.
-WRITE_CAPABLE_DEFAULT_COMMANDS = {item.name: item.command for item in PROVIDER_CATALOG}
-LEGACY_DEFAULT_COMMANDS = {item.name: item.legacy_command for item in PROVIDER_CATALOG}
-PROVIDER_COMMAND_ENVS = {item.name: item.command_env for item in PROVIDER_CATALOG}
+WRITE_CAPABLE_DEFAULT_COMMANDS = {item.name: item.command for item in catalog_definitions()}
+LEGACY_DEFAULT_COMMANDS = {item.name: item.legacy_command for item in catalog_definitions()}
+PROVIDER_COMMAND_ENVS = {item.name: item.command_env for item in catalog_definitions()}
 
 
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
