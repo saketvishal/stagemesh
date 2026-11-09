@@ -223,8 +223,6 @@ def _ensure_default_github_task_source(project: Path) -> bool:
     for key in ("owner", "repo"):
         if key in github and (not isinstance(github[key], str) or not github[key].strip()):
             raise ConfigValidationError(f"github.{key} must be a non-empty string")
-    if "task_sources" in data:
-        return False  # Explicit sources, including an empty list, are operator policy.
     changed = False
     if detected is not None:
         if "owner" not in github:
@@ -238,13 +236,16 @@ def _ensure_default_github_task_source(project: Path) -> bool:
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return changed
-    data["task_sources"] = [{
-        "name": "github", "type": "github",
-        "labels": list(DEFAULT_GITHUB_SOURCE_LABELS),
-        "excluded_labels": list(DEFAULT_GITHUB_EXCLUDED_LABELS),
-    }]
-    github.setdefault("auto_label_unlabeled", True)
-    changed = True
+    if "auto_label_unlabeled" not in github:
+        github["auto_label_unlabeled"] = True
+        changed = True
+    if "task_sources" not in data:
+        data["task_sources"] = [{
+            "name": "github", "type": "github",
+            "labels": list(DEFAULT_GITHUB_SOURCE_LABELS),
+            "excluded_labels": list(DEFAULT_GITHUB_EXCLUDED_LABELS),
+        }]
+        changed = True
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
