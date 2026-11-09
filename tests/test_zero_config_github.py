@@ -107,6 +107,23 @@ def test_repository_detection_invalidates_when_remote_changes(tmp_path: Path) ->
     assert found is not None and (found.owner, found.repo) == ("acme", "changed")
 
 
+def test_github_cli_token_is_bounded_captured_and_never_printed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        seen.update({"argv": argv, **kwargs})
+        return subprocess.CompletedProcess(argv, 0, stdout="TEST_ONLY_TOKEN\n", stderr="")
+
+    monkeypatch.setattr(github_module.subprocess, "run", run)
+
+    assert github_module.github_cli_token() == "TEST_ONLY_TOKEN"
+    assert seen["argv"] == ["gh", "auth", "token"]
+    assert seen["capture_output"] is True and seen["check"] is False and seen["timeout"] == 5.0
+    assert "TEST_ONLY_TOKEN" not in capsys.readouterr().out
+
+
 def test_init_persists_detected_github_origin_as_the_ready_issue_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -138,7 +155,7 @@ def test_init_persists_detected_github_origin_as_the_ready_issue_source(
     ]
 
 
-def test_init_classifies_only_unlabeled_issues_and_resyncs_ready_work(
+def test_init_classifies_unclassified_issues_preserves_team_labels_and_resyncs_ready_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from stagemesh.github import GitHubClient, GitHubResult
@@ -149,7 +166,13 @@ def test_init_classifies_only_unlabeled_issues_and_resyncs_ready_work(
     contracts = project / ".stagemesh/contracts"
     contracts.mkdir()
     (contracts / "19.json").write_text("{}\n", encoding="utf-8")
-    labels: dict[str, tuple[str, ...]] = {"17": (), "18": ("team:owned",), "19": ()}
+    labels: dict[str, tuple[str, ...]] = {
+        "17": (),
+        "18": ("team:owned",),
+        "19": (),
+        "20": ("stagemesh:deferred",),
+        "21": ("caventra:objective",),
+    }
 
     def discover(self: GitHubApiIssueSource):
         return (
@@ -168,8 +191,7 @@ def test_init_classifies_only_unlabeled_issues_and_resyncs_ready_work(
         return GitHubResult("OK", {"name": name})
 
     def add_issue_labels(self: GitHubClient, number: str, added: tuple[str, ...]) -> GitHubResult:
-        assert labels[number] == ()
-        labels[number] = added
+        labels[number] = (*labels[number], *added)
         writes.append((number, added[0]))
         return GitHubResult("OK", {})
 
@@ -183,18 +205,95 @@ def test_init_classifies_only_unlabeled_issues_and_resyncs_ready_work(
     report = json.loads(capsys.readouterr().out)
     assert report["github_issue_classification"] == {
         "status": "labeled",
-        "scanned": 2,
-        "ready_labeled": 1,
+        "scanned": 3,
+        "ready_labeled": 2,
         "triage_labeled": 1,
         "failed": 0,
     }
-    assert writes == [("17", "stagemesh:ready"), ("19", "stagemesh:needs-triage")]
+    assert writes == [
+        ("17", "stagemesh:ready"),
+        ("18", "stagemesh:ready"),
+        ("19", "stagemesh:needs-triage"),
+    ]
+    assert labels["18"] == ("team:owned", "stagemesh:ready")
+    assert labels["20"] == ("stagemesh:deferred",)
+    assert labels["21"] == ("caventra:objective",)
     store = Store(project / ".stagemesh/stagemesh.sqlite3")
     assert store.source_state("github", "17")["eligible"] is True
+    assert store.source_state("github", "18")["eligible"] is True
     assert store.source_state("github", "19")["eligible"] is False
     events = [json.loads(row["payload"]) for row in store.audit_events() if row["event_type"] == "github.init_issue_classified"]
-    assert {(event["source_id"], event["outcome"]) for event in events} == {("17", "LABELED"), ("19", "LABELED")}
+    assert {(event["source_id"], event["outcome"]) for event in events} == {
+        ("17", "LABELED"),
+        ("18", "LABELED"),
+        ("19", "LABELED"),
+    }
     store.close()
+
+
+def test_interactive_init_uses_authenticated_gh_cli_without_persisting_its_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from stagemesh.github import GitHubClient, GitHubResult
+
+    project = _github_project(tmp_path)
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    labels = ["team:owned"]
+
+    def discover(self: GitHubApiIssueSource):
+        return ([DiscoveredTask("github", "31", "Team-labeled issue", labels=tuple(labels))], "OK", None)
+
+    monkeypatch.delenv("STAGEMESH_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(cli_module, "discovered_provider_entries", dict)
+    monkeypatch.setattr(cli_module.sys, "stdin", type("TTY", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(cli_module, "github_cli_token", lambda: "TEST_ONLY_GH_TOKEN")
+    monkeypatch.setattr(GitHubApiIssueSource, "discover", discover)
+    monkeypatch.setattr(
+        GitHubClient,
+        "ensure_label",
+        lambda self, name, color, description: GitHubResult("OK", {"name": name}),
+    )
+
+    def add_issue_labels(self: GitHubClient, number: str, added: tuple[str, ...]) -> GitHubResult:
+        assert number == "31" and added == ("stagemesh:ready",)
+        labels.extend(added)
+        return GitHubResult("OK", {})
+
+    monkeypatch.setattr(GitHubClient, "add_issue_labels", add_issue_labels)
+
+    assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
+
+    output = capsys.readouterr().out
+    assert "used the authenticated GitHub CLI" in output
+    assert "classified GitHub issues (ready: 1; needs triage: 0; failed: 0)" in output
+    assert labels == ["team:owned", "stagemesh:ready"]
+    config = json.loads((project / ".stagemesh/config.json").read_text(encoding="utf-8"))
+    assert "token" not in config["github"]
+
+
+def test_noninteractive_init_can_explicitly_use_gh_cli_without_persisting_its_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = _github_project(tmp_path)
+    seen: list[str] = []
+
+    monkeypatch.delenv("STAGEMESH_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(cli_module.sys, "stdin", type("Pipe", (), {"isatty": lambda self: False})())
+    monkeypatch.setattr(cli_module, "github_cli_token", lambda: seen.append("gh") or "TEST_ONLY_GH_TOKEN")
+    monkeypatch.setattr(GitHubApiIssueSource, "discover", lambda self: ([], "OK", None))
+
+    assert (
+        cli_module.main(
+            ["--project", str(project), "init", "--json", "--allow-incomplete", "--use-gh-auth"]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert seen == ["gh"]
+    assert report["github_auth_source"] == "gh_cli"
+    config = json.loads((project / ".stagemesh/config.json").read_text(encoding="utf-8"))
+    assert "token" not in config["github"]
 
 
 def test_init_defers_unlabeled_issue_writes_without_github_authorization(
@@ -217,7 +316,7 @@ def test_init_defers_unlabeled_issue_writes_without_github_authorization(
         "ready_labeled": 0,
         "triage_labeled": 0,
         "failed": 0,
-        "reason": "set STAGEMESH_GITHUB_TOKEN with Issues write permission",
+        "reason": "use an interactive terminal with an authenticated GitHub CLI, or set STAGEMESH_GITHUB_TOKEN with Issues write permission",
     }
     assert "github_issue_classification" in {item["name"] for item in report["readiness"]["blockers"]}
 

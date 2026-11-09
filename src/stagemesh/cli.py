@@ -89,7 +89,7 @@ from .external_evidence import (
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitError, GitWorkspace
 from .git_identity import identity_report
-from .github import GitHubClient, UrlLibGitHubTransport, detect_github_repository
+from .github import GitHubClient, UrlLibGitHubTransport, detect_github_repository, github_cli_token
 from .github_acceptance import run_github_acceptance
 from .github_bootstrap import GitHubBootstrapResult, classify_unlabeled_github_issues
 from .handoff import HandoffError, build_handoff, write_handoff
@@ -578,7 +578,7 @@ def _init_readiness(
         "github_issue_classification",
         classification_ok,
         github_classification.reason or github_classification.status,
-        "provide explicit GitHub Issues write authorization or label the affected issues, then rerun `stagemesh init`",
+        "authenticate the GitHub CLI and rerun `stagemesh init`, or provide STAGEMESH_GITHUB_TOKEN with Issues write permission",
     )
     blockers = [check for check in checks if check["status"] == "blocked"]
     return {"status": "ready" if not blockers else "needs_attention", "checks": checks, "blockers": blockers}
@@ -600,6 +600,17 @@ def command_init(args: argparse.Namespace) -> int:
         store.upsert_task(args.task)
     source_sync: dict[str, str] = {"status": "synced"}
     config = load_config(project)
+    github_auth_source = "configured" if config.github.token else "none"
+    if (
+        config.github.token is None
+        and config.github.owner
+        and config.github.repo
+        and (_interactive_init(args) or args.use_gh_auth)
+    ):
+        token = github_cli_token()
+        if token:
+            config = replace(config, github=replace(config.github, token=token))
+            github_auth_source = "gh_cli"
     try:
         _sync_all_sources(store, project, config, getattr(args, "task", None))
     except Exception as exc:  # noqa: BLE001 - initialization remains usable while an external task source is unavailable.
@@ -662,6 +673,7 @@ def command_init(args: argparse.Namespace) -> int:
                     "registered": registered,
                     "profile": profile_status,
                     "github_task_source": "configured" if configured_github_source else "unchanged",
+                    "github_auth_source": github_auth_source,
                     "provider_registry": {
                         "status": "initialized" if initialized_providers else "unchanged",
                         "registered": list(registered_providers),
@@ -683,12 +695,14 @@ def command_init(args: argparse.Namespace) -> int:
         qualifier = " (allowed by --allow-incomplete)" if args.allow_incomplete else ""
         print(f"StageMesh setup needs attention at {runtime_dir(project)}{qualifier}")
     if configured_github_source:
-        print("configured GitHub task source with safe unlabeled-issue classification")
+        print("configured GitHub task source with safe issue classification")
+    if github_auth_source == "gh_cli":
+        print("used the authenticated GitHub CLI for issue sync and bounded StageMesh label setup")
     if github_classification.status == "write_authorization_required":
         print(f"GitHub issue classification deferred: {github_classification.reason}")
     elif github_classification.changed:
         print(
-            "classified unlabeled GitHub issues "
+            "classified GitHub issues "
             f"(ready: {github_classification.ready_labeled}; needs triage: {github_classification.triage_labeled}; "
             f"failed: {github_classification.failed})"
         )
@@ -5690,6 +5704,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="NAME",
         help="Authorize one detected coding agent for unattended project work; repeat for additional agents",
+    )
+    init.add_argument(
+        "--use-gh-auth",
+        action="store_true",
+        help="Use the authenticated GitHub CLI for bounded issue sync and StageMesh label setup in non-interactive initialization",
     )
     init.add_argument(
         "--allow-incomplete",

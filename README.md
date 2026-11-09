@@ -67,7 +67,7 @@ Initialization returns success and says the project is ready only when it can se
 
 `stagemesh --help` shows the small everyday operator interface rather than every maintenance and internal command. Existing advanced commands remain compatible and are listed by category with `stagemesh --help-all`; machine integrations use the stable hidden command-catalog JSON interface instead of scraping human help text.
 
-For a fresh GitHub checkout, `stagemesh init` also detects `origin`, configures the GitHub task source, and reads open issues. When `STAGEMESH_GITHUB_TOKEN` has Issues write permission, it classifies only issues that have no labels: issues with a valid explicit contract or a deterministic auto-plan become `stagemesh:ready`; issues missing safe scope or validation information become `stagemesh:needs-triage`. Existing labels and explicit task-source policy are never replaced. The classification and any failure are recorded in the audit ledger, and the command resyncs successful labels before returning. Initialization still makes zero provider calls and does not start coding; use `stagemesh run-window` after authorizing the intended providers.
+For a fresh GitHub checkout, `stagemesh init` also detects `origin`, configures the GitHub task source, and reads open issues. Interactive setup uses the current authenticated GitHub CLI without printing or storing its token; scripted setup can pass `--use-gh-auth` or set `STAGEMESH_GITHUB_TOKEN`. Open issues without a StageMesh admission label are classified even when they carry ordinary team labels: issues with a valid explicit contract or deterministic auto-plan receive `stagemesh:ready`, while issues missing safe scope or validation information receive `stagemesh:needs-triage`. Existing labels, blocking/deferred decisions, objective roots, and explicit task-source policy are preserved. Every attempted label change is recorded in the audit ledger, successful changes are resynced before init returns, and initialization still makes zero provider calls or starts coding.
 
 For StageMesh development, bootstrap the project-owned provider pool and run the fast synthetic stabilization gate before broader acceptance:
 
@@ -88,7 +88,7 @@ Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default. Do not edit it
 Use `stagemesh run-window` for bounded unattended or production work. It applies preflight checks, journals the run, uses isolated task worktrees, and remains PR-only unless the project explicitly authorizes a merge policy. The normal operator flow is:
 
 When GitHub issues are left out, the report names the actual admission condition and a safe next action. For example, it identifies a
-missing `stagemesh:ready` label and explains how to add it or ask `stagemesh init` to classify an unlabeled issue; it does not collapse
+missing `stagemesh:ready` label and explains how to add it or ask `stagemesh init` to classify the issue; it does not collapse
 these cases into the opaque phrase “source no longer eligible.”
 
 ```bash
