@@ -382,6 +382,28 @@ def _init_readiness(
         ),
         "install and authorize enough distinct providers in authorization.unattended_providers, or explicitly change the review policy",
     )
+    from .baseline import resolve_integration_ref
+    from .run_window import INTEGRATION_PR, repository_preflight_checks
+    from .survivor_wave import git_repo_state
+
+    base_ref = resolve_integration_ref(project, config.integration_ref) or "HEAD"
+    repository_state = None
+    if base_ref.startswith("refs/heads/"):
+        repository_store = Store(db_path(project))
+        try:
+            repository_state = git_repo_state(repository_store, project, base_ref)()
+        except Exception:  # noqa: BLE001 - the shared repository check reports the actionable refusal.
+            repository_state = None
+        finally:
+            repository_store.close()
+    for check in repository_preflight_checks(
+        integration_mode=INTEGRATION_PR,
+        base_ref=base_ref,
+        state=repository_state,
+        current_ref=_current_branch_ref(project),
+        check_checkout=True,
+    ):
+        add(check.name, check.ok, check.detail, check.fix)
     synced = source_sync.get("status") == "synced"
     add(
         "task_source_sync",
@@ -508,7 +530,8 @@ def command_init(args: argparse.Namespace) -> int:
             print(f"- {blocker['name']}: {blocker['detail']}")
             print(f"  fix: {blocker['fix']}")
         if not args.allow_incomplete:
-            print("StageMesh did not claim readiness; fix the blockers and rerun `stagemesh init`.")
+            print("StageMesh initialization is incomplete; `stagemesh run-window` will refuse until these blockers are fixed.")
+            print("Fix the blockers and rerun `stagemesh init`; the default run window is usable only after initialization reports ready.")
     return exit_code
 
 

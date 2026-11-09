@@ -21,6 +21,7 @@ automatic landing remains serialized after the current workers quiesce.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import time
@@ -513,11 +514,24 @@ def continuation(
 
 def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: bool) -> Check:
     """Can the configured providers implement a task AND review it independently? (cooldowns are reported, not fatal on their own)."""
+    from . import provider_authorization
     from .provider_pool import IMPLEMENT, REVIEW, ProviderPool, default_pools
     from .providers import adapters_from_config
 
     try:
-        adapters = adapters_from_config(config)
+        # A run window is unattended even when it is launched from an interactive
+        # shell. Build the same fail-closed adapters that dispatch will re-check
+        # immediately before spawning a provider. Otherwise preflight can claim
+        # that installed-but-unauthorised CLIs are available and fail later.
+        previous = os.environ.get(provider_authorization.UNATTENDED_ENV)
+        os.environ[provider_authorization.UNATTENDED_ENV] = "1"
+        try:
+            adapters = adapters_from_config(config)
+        finally:
+            if previous is None:
+                os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
+            else:
+                os.environ[provider_authorization.UNATTENDED_ENV] = previous
         stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
         capable = {stage: {a.name for a in adapters if cap in a.capabilities} for stage, cap in stage_caps.items()}
         priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}
@@ -555,6 +569,79 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
     if cooling:
         detail += f"; cooling down (the others carry the work): {', '.join(sorted(set(cooling)))}"
     return Check("providers", True, detail)
+
+
+def repository_preflight_checks(
+    *,
+    integration_mode: str,
+    base_ref: str,
+    state: Any | None,
+    current_ref: str | None = None,
+    check_checkout: bool = False,
+) -> list[Check]:
+    """Static repository checks shared by `init` and the default run window."""
+    if integration_mode != INTEGRATION_PR:
+        return []
+    if not base_ref.startswith("refs/heads/"):
+        return [
+            Check(
+                "checkout",
+                False,
+                f"PR mode needs the integration branch to be a local branch (refs/heads/...), got {base_ref}",
+                fix="check out the integration branch or set integration_ref in .stagemesh/config.json",
+            )
+        ]
+    checks: list[Check] = []
+    if check_checkout:
+        checks.append(
+            Check(
+                "checkout",
+                current_ref == base_ref,
+                f"the project checkout is on {current_ref or 'a detached HEAD'}"
+                + (
+                    f", not {base_ref}: task branches start from the checked-out commit, so PRs would carry its unmerged commits"
+                    if current_ref != base_ref
+                    else f" ({base_ref})"
+                ),
+                fix=f"git switch {base_ref.removeprefix('refs/heads/')}",
+            )
+        )
+    if state is None:
+        checks.append(Check("repo", False, f"cannot read local {base_ref} against origin", fix="git fetch origin"))
+    elif not state.main_sha or not state.origin_sha or state.relation not in {"in_sync", "ahead", "behind", "diverged"}:
+        checks.append(
+            Check(
+                "repo",
+                False,
+                f"cannot compare local {state.main_ref} with origin because one or both refs are missing",
+                fix="configure origin, fetch it, and ensure the integration branch exists locally and remotely",
+            )
+        )
+    elif state.relation in ("ahead", "diverged"):
+        pull_note = "; git pull cannot remove local-only commits" if state.relation == "ahead" else ""
+        checks.append(
+            Check(
+                "repo",
+                False,
+                f"local {state.main_ref} is {state.relation} origin (ahead {state.ahead}, behind {state.behind}); "
+                f"PR mode requires an exact match{pull_note}",
+                fix=(
+                    "preserve the local commit and any dirty work on a feature branch/PR, then restore local main "
+                    "to origin/main; StageMesh will not push or reset unreviewed work automatically"
+                ),
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "repo",
+                True,
+                f"local {state.main_ref} vs origin: {state.relation} (ahead {state.ahead}, behind {state.behind})"
+                + ("; consider git pull --ff-only" if state.behind else ""),
+                fatal=False,
+            )
+        )
+    return checks
 
 
 def preflight(
@@ -624,40 +711,15 @@ def preflight(
     checks.append(Check("claims", claims == 0, "no active claims" if claims == 0 else f"{claims} active claim(s) with nothing running",
                         fix="stagemesh doctor; stagemesh recover-stale --task <id>"))
 
-    if options.integration_mode == INTEGRATION_PR and checkout_ref is not None:
-        # New task worktrees are created from the checkout's HEAD. On any other branch the task commits would be stacked on that
-        # branch's unmerged commits and the PR branches would carry them.
-        current = checkout_ref()
-        checks.append(
-            Check(
-                "checkout",
-                current == base_ref,
-                f"the project checkout is on {current or 'a detached HEAD'}"
-                + (f", not {base_ref}: task branches start from the checked-out commit, so PRs would carry its unmerged commits" if current != base_ref else f" ({base_ref})"),
-                fix=f"git switch {base_ref.removeprefix('refs/heads/')}",
-            )
+    checks.extend(
+        repository_preflight_checks(
+            integration_mode=options.integration_mode,
+            base_ref=base_ref,
+            state=repo_state() if options.integration_mode == INTEGRATION_PR and repo_state is not None else None,
+            current_ref=checkout_ref() if options.integration_mode == INTEGRATION_PR and checkout_ref is not None else None,
+            check_checkout=checkout_ref is not None,
         )
-    if options.integration_mode == INTEGRATION_PR:
-        state = repo_state() if repo_state is not None else None
-        if state is None:
-            checks.append(Check("repo", False, f"cannot read local {base_ref} against origin", fix="git fetch origin"))
-        elif state.relation in ("ahead", "diverged"):
-            pull_note = "; git pull cannot remove local-only commits" if state.relation == "ahead" else ""
-            checks.append(
-                Check(
-                    "repo",
-                    False,
-                    f"local {state.main_ref} is {state.relation} origin (ahead {state.ahead}, behind {state.behind}); "
-                    f"PR mode requires an exact match{pull_note}",
-                    fix=(
-                        "preserve the local commit and any dirty work on a feature branch/PR, then restore local main "
-                        "to origin/main; StageMesh will not push or reset unreviewed work automatically"
-                    ),
-                )
-            )
-        else:
-            checks.append(Check("repo", True, f"local {state.main_ref} vs origin: {state.relation} (ahead {state.ahead}, behind {state.behind})"
-                                + ("; consider git pull --ff-only" if state.behind else ""), fatal=False))
+    )
     checks.append(provider_check(store, config, strict_live=options.strict_live))
 
     path = options.report_path

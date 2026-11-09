@@ -55,11 +55,11 @@ Initialize a project and run one bounded task loop:
 ```bash
 stagemesh init
 stagemesh doctor
-stagemesh continue
+stagemesh run-window
 stagemesh status
 ```
 
-`stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without launching them. It returns success and says the project is ready only when it can see real validation gates, enough available and explicitly authorized providers for the selected review policy, and synchronized task sources. Otherwise it creates the safe setup files, reports every known blocker with a concrete fix, and exits with status 2; rerun it after fixing those items. `--allow-incomplete` exists for bounded packaging and synthetic harnesses and never claims readiness. The registry is a snapshot: rerunning init does not replace operator edits, arbitrary command providers can be added under `providers`, and an explicitly empty registry stays empty. Detection or registration does **not** authenticate, authorize, or invoke a provider; unattended use still requires the separate `authorization.unattended_providers` opt-in.
+`stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without launching them. It returns success and says the project is ready only when it can see real validation gates, enough available and explicitly authorized providers for the selected review policy, synchronized task sources, and a local integration checkout that the default PR-mode run window can safely use. In particular, local-only or diverged commits on the integration branch are reported during initialization instead of being discovered by `run-window` later. Otherwise init creates the safe setup files, reports every known blocker with a concrete fix, and exits with status 2; rerun it after fixing those items. `--allow-incomplete` exists for bounded packaging and synthetic harnesses and never claims readiness. The registry is a snapshot: rerunning init does not replace operator edits, arbitrary command providers can be added under `providers`, and an explicitly empty registry stays empty. Detection or registration does **not** authenticate, authorize, or invoke a provider; unattended use still requires the separate `authorization.unattended_providers` opt-in.
 
 `stagemesh --help` shows the small everyday operator interface rather than every maintenance and internal command. Existing advanced commands remain compatible and are listed by category with `stagemesh --help-all`; machine integrations use the stable hidden command-catalog JSON interface instead of scraping human help text.
 

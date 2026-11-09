@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -609,6 +610,34 @@ def test_a_provider_setup_that_cannot_review_independently_refuses_to_start(tmp_
     assert report.refused and rig.runs == [] and seen["strict_live"] is True and report.next_command == "stagemesh capacity"
 
 
+def test_real_run_window_preflight_requires_project_provider_authorization(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, [])
+    config_path = project / ".stagemesh" / "config.json"
+    payload = {
+        "providers": {
+            "local-agent": {
+                "command": f'"{sys.executable}"',
+                "capabilities": ["IMPLEMENT", "REVIEW"],
+            }
+        },
+        "routing": {"require_independent_review": False},
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    refused = rw.provider_pool_check(store, cli_module.load_config(project), strict_live=False)
+
+    assert refused.ok is False
+    assert "not_authorized" in refused.detail
+    assert "no explicit unattended provider allowlist" in refused.detail
+
+    payload["authorization"] = {"unattended_providers": ["local-agent"]}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    ready = rw.provider_pool_check(store, cli_module.load_config(project), strict_live=False)
+
+    assert ready.ok is True
+
+
 def test_a_local_main_that_is_ahead_or_diverged_refuses_pr_mode(tmp_path: Path) -> None:
     for relation in ("ahead", "diverged"):
         store, project, rig, hooks, options, config, kwargs = window(tmp_path / relation, ["1"])
@@ -621,6 +650,17 @@ def test_a_local_main_that_is_ahead_or_diverged_refuses_pr_mode(tmp_path: Path) 
         assert "will not push or reset unreviewed work automatically" in report.next_command
         if relation == "ahead":
             assert "git pull cannot remove local-only commits" in report.stop_reason
+
+
+def test_pr_mode_refuses_when_origin_integration_ref_is_missing(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
+    hooks.repo_state = lambda: RepoState(main_ref="main", main_sha="a" * 40, origin_sha=None, relation="unknown")
+
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", **kwargs)
+
+    assert report.refused and rig.runs == []
+    assert "one or both refs are missing" in report.stop_reason
+    assert "configure origin" in report.next_command
 
 
 # --- recovery and resume ---------------------------------------------------------------------------------------------------------
