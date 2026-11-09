@@ -74,6 +74,23 @@ PROVIDER_CATALOG = (
     ),
 )
 
+PREVIOUS_UNSAFE_BUNDLED_COMMANDS = {
+    "codex": "codex exec --sandbox workspace-write",
+    "claude": (
+        "claude -p --permission-mode acceptEdits --permission-prompts none "
+        f"--allowedTools 'Edit,Write,MultiEdit,{READ_ONLY_GIT_TOOLS},"
+        "Bash(python *),Bash(pytest *),Bash(ruff *)'"
+    ),
+    "grok": (
+        "grok --permission-mode acceptEdits --always-approve "
+        "--allow Edit --allow Write --allow MultiEdit "
+        "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
+        "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
+        "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+    ),
+    "agy": "agy --mode accept-edits",
+}
+
 PROVIDER_PLUGIN_GROUP = "stagemesh.providers"
 
 
@@ -161,6 +178,25 @@ def discovered_provider_entries(
             "capabilities": list(item.capabilities),
         }
     return entries
+
+
+def migrate_unsafe_bundled_provider_commands(providers: dict[str, object]) -> tuple[str, ...]:
+    """Replace only exact StageMesh-generated unsafe defaults from older releases.
+
+    User-customized commands and plugin providers are deliberately left unchanged.
+    Runtime invocation hardening remains authoritative even when no saved command
+    qualifies for this narrow on-disk migration.
+    """
+
+    current = {item.name: item.command for item in PROVIDER_CATALOG}
+    changed: list[str] = []
+    for name, previous in PREVIOUS_UNSAFE_BUNDLED_COMMANDS.items():
+        entry = providers.get(name)
+        if not isinstance(entry, dict) or entry.get("command") != previous:
+            continue
+        entry["command"] = current[name]
+        changed.append(name)
+    return tuple(sorted(changed))
 
 
 def write_capable_command(name: str, command: str) -> str:

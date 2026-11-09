@@ -108,6 +108,62 @@ def verify_install(wheel: Path, version: str) -> None:
         if not isinstance(readiness, dict) or readiness.get("status") != "needs_attention":
             raise DistributionVerificationError("empty-project setup must report its readiness blockers truthfully")
 
+        upgrade_project = root / "legacy-project"
+        upgrade_runtime = upgrade_project / ".stagemesh"
+        upgrade_runtime.mkdir(parents=True)
+        legacy_commands = {
+            "codex": "codex exec --sandbox workspace-write",
+            "claude": (
+                "claude -p --permission-mode acceptEdits --permission-prompts none "
+                "--allowedTools 'Edit,Write,MultiEdit,Bash(git status*),Bash(git diff*),"
+                "Bash(git log*),Bash(git show*),Bash(git rev-parse*),Bash(python *),"
+                "Bash(pytest *),Bash(ruff *)'"
+            ),
+            "grok": (
+                "grok --permission-mode acceptEdits --always-approve --allow Edit --allow Write "
+                "--allow MultiEdit --allow 'Bash(git status*)' --allow 'Bash(git diff*)' "
+                "--allow 'Bash(git log*)' --allow 'Bash(git show*)' "
+                "--allow 'Bash(git rev-parse*)' --allow 'Bash(python *)' "
+                "--allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+            ),
+            "agy": "agy --mode accept-edits",
+        }
+        legacy_config = {
+            "providers": {
+                **{
+                    name: {"command": provider_command, "capabilities": ["IMPLEMENT", "REVIEW"]}
+                    for name, provider_command in legacy_commands.items()
+                },
+                "custom": {"command": "custom-agent --browser-policy user-owned", "capabilities": ["REVIEW"]},
+            },
+            "authorization": {"unattended_providers": ["codex", "claude", "grok", "agy"]},
+        }
+        config_path = upgrade_runtime / "config.json"
+        config_path.write_text(json.dumps(legacy_config, indent=2) + "\n", encoding="utf-8")
+        upgraded = _run(
+            [str(command), "--project", str(upgrade_project), "init", "--json", "--allow-incomplete"],
+            upgrade_project,
+            clean_env,
+        )
+        try:
+            upgrade_report = json.loads(upgraded.stdout)
+            upgraded_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise DistributionVerificationError("legacy-project initialization did not return valid JSON") from exc
+        registry = upgrade_report.get("provider_registry")
+        if not isinstance(registry, dict) or registry.get("hardened") != ["agy", "claude", "codex", "grok"]:
+            raise DistributionVerificationError("installed package did not report the complete legacy provider migration")
+        upgraded_providers = upgraded_config.get("providers")
+        if not isinstance(upgraded_providers, dict) or any(
+            upgraded_providers.get(name, {}).get("command") == old_command
+            for name, old_command in legacy_commands.items()
+        ):
+            raise DistributionVerificationError("installed package retained an unsafe StageMesh-generated provider default")
+        if upgraded_providers.get("custom") != legacy_config["providers"]["custom"]:
+            raise DistributionVerificationError("legacy provider migration changed a custom provider")
+        if upgraded_config.get("authorization") != legacy_config["authorization"]:
+            raise DistributionVerificationError("legacy provider migration changed provider authorization")
+
 
 def verify_distribution(directory: Path, expected_tag: str, *, install: bool = True) -> Path:
     wheels = sorted(directory.glob("*.whl"))
