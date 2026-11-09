@@ -40,13 +40,17 @@ class ProviderDefinition:
 
 PROVIDER_CATALOG = (
     ProviderDefinition(
-        "codex", "codex", "codex exec --sandbox workspace-write", "codex exec",
+        "codex", "codex",
+        "codex exec --sandbox workspace-write --ignore-user-config --ephemeral",
+        "codex exec",
         "STAGEMESH_CODEX_CMD", 0, 3,
     ),
     ProviderDefinition(
         "claude", "claude",
         (
             "claude -p --permission-mode acceptEdits --permission-prompts none "
+            "--safe-mode --no-chrome --no-session-persistence --disable-slash-commands "
+            "--strict-mcp-config "
             f"--allowedTools 'Edit,Write,MultiEdit,{READ_ONLY_GIT_TOOLS},"
             "Bash(python *),Bash(pytest *),Bash(ruff *)'"
         ),
@@ -55,7 +59,8 @@ PROVIDER_CATALOG = (
     ProviderDefinition(
         "grok", "grok",
         (
-            "grok --permission-mode acceptEdits --always-approve "
+            "grok --permission-mode acceptEdits --disable-web-search --no-subagents "
+            "--tools read_file,list_dir,grep,run_terminal_command "
             "--allow Edit --allow Write --allow MultiEdit "
             "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
             "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
@@ -64,7 +69,8 @@ PROVIDER_CATALOG = (
         "grok", "STAGEMESH_GROK_CMD", 1, 1,
     ),
     ProviderDefinition(
-        "agy", "agy", "agy --mode accept-edits", "agy", "STAGEMESH_AGY_CMD", 3, 2,
+        "agy", "agy", "agy --mode accept-edits --sandbox --disable-slash-commands",
+        "agy", "STAGEMESH_AGY_CMD", 3, 2,
     ),
 )
 

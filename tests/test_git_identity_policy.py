@@ -354,6 +354,9 @@ def test_provider_environment_removes_desktop_bridges_and_is_headless() -> None:
         & env.keys()
     )
     assert env["STAGEMESH_PROVIDER_PROCESS"] == "1"
+    assert env["STAGEMESH_NO_DESKTOP"] == "1"
+    assert env["CI"] == "true"
+    assert env["NO_COLOR"] == "1"
 
 
 def test_grok_provider_environment_disables_unattached_agent_home_capabilities() -> None:

@@ -1173,9 +1173,81 @@ REVIEW_JSON_SCHEMA = json.dumps(
     separators=(",", ":"),
 )
 
+_GROK_UNATTENDED_TOOLS = "read_file,list_dir,grep,run_terminal_command"
+_GROK_DESKTOP_DENY_RULES = (
+    "Bash(start *)",
+    "Bash(explorer *)",
+    "Bash(rundll32 *)",
+    "Bash(msedge *)",
+    "Bash(chrome *)",
+    "Bash(firefox *)",
+    "Bash(powershell *Start-Process*)",
+    "Bash(pwsh *Start-Process*)",
+)
+
+
+def _without_option(args: list[str], flag: str, *, takes_value: bool = False) -> list[str]:
+    """Remove every exact option occurrence and, when requested, its following value."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(args):
+        if args[index] == flag:
+            index += 2 if takes_value and index + 1 < len(args) else 1
+            continue
+        cleaned.append(args[index])
+        index += 1
+    return cleaned
+
+
+def _ensure_flag(args: list[str], flag: str) -> list[str]:
+    return args if flag in args else [*args, flag]
+
+
+def _harden_unattended_command(args: list[str]) -> list[str]:
+    """Enforce provider-owned headless isolation even for commands saved by older StageMesh releases."""
+    executable = Path(args[0]).name.lower() if args else ""
+    if executable in {"codex", "codex.exe"}:
+        args = _without_option(args, "--dangerously-bypass-approvals-and-sandbox")
+        args = _ensure_flag(args, "--ignore-user-config")
+        return _ensure_flag(args, "--ephemeral")
+    if executable in {"claude", "claude.exe"}:
+        args = _without_option(args, "--dangerously-skip-permissions")
+        args = _without_option(args, "--allow-dangerously-skip-permissions")
+        for flag in ("--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"):
+            args = _ensure_flag(args, flag)
+        explicit_customization = any(
+            flag in args
+            for flag in ("--agent", "--agents", "--mcp-config", "--plugin-dir", "--plugin-url", "--settings")
+        )
+        if explicit_customization:
+            # `--safe-mode` disables even explicit plugin/MCP attachments. The
+            # explicit command remains isolated by strict MCP selection and the
+            # provider's bounded capability adapter instead.
+            return _without_option(args, "--safe-mode")
+        return _ensure_flag(args, "--safe-mode")
+    if executable in {"grok", "grok.exe"}:
+        args = _without_option(args, "--always-approve")
+        args = _without_option(args, "--tools", takes_value=True)
+        if "--permission-mode" in args:
+            mode_index = args.index("--permission-mode") + 1
+            if mode_index < len(args) and args[mode_index] == "bypassPermissions":
+                args[mode_index] = "acceptEdits"
+        args.extend(("--tools", _GROK_UNATTENDED_TOOLS))
+        for flag in ("--disable-web-search", "--no-subagents"):
+            args = _ensure_flag(args, flag)
+        for rule in _GROK_DESKTOP_DENY_RULES:
+            if not any(args[index : index + 2] == ["--deny", rule] for index in range(len(args) - 1)):
+                args.extend(("--deny", rule))
+        return args
+    if executable in {"agy", "agy.exe"}:
+        args = _without_option(args, "--dangerously-skip-permissions")
+        for flag in ("--sandbox", "--disable-slash-commands"):
+            args = _ensure_flag(args, flag)
+    return args
+
 
 def _command_and_input(command: tuple[str, ...], prompt: str, *, structured_review: bool = False) -> tuple[list[str], str]:
-    args = list(command)
+    args = _harden_unattended_command(list(command))
     executable = Path(args[0]).name.lower() if args else ""
     if executable in {"grok", "grok.exe"}:
         args = _ensure_arg(args, "--json-schema", REVIEW_JSON_SCHEMA) if structured_review else args

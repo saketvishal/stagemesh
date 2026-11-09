@@ -301,6 +301,9 @@ def provider_environment(
     # Marks the process tree of an implementation or review provider. Commands that record operator decisions (finding
     # dispositions, delivery unblocking, follow-up cancellation) refuse to run inside it.
     env["STAGEMESH_PROVIDER_PROCESS"] = "1"
+    env["STAGEMESH_NO_DESKTOP"] = "1"
+    env["CI"] = "true"
+    env["NO_COLOR"] = "1"
     try:
         identity = configured_identity(path, _without_unapproved_commit_identity(env)) or SYNTHETIC_IDENTITY
     except GitIdentityError:

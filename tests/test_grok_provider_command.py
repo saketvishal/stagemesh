@@ -12,14 +12,17 @@ from stagemesh.providers import (
 def test_grok_provider_prompt_is_passed_as_single_turn_argument() -> None:
     command, stdin = _command_and_input(("grok", "--permission-mode", "acceptEdits"), "do the task")
 
-    assert command == ["grok", "-p", "do the task", "--permission-mode", "acceptEdits"]
+    assert command[:5] == ["grok", "-p", "do the task", "--permission-mode", "acceptEdits"]
     assert stdin == ""
+    assert "--always-approve" not in command
+    assert command[command.index("--tools") + 1] == "read_file,list_dir,grep,run_terminal_command"
+    assert "--disable-web-search" in command and "--no-subagents" in command
 
 
 def test_grok_provider_existing_single_flag_gets_prompt_before_options() -> None:
     command, stdin = _command_and_input(("grok", "-p", "--permission-mode", "acceptEdits"), "do the task")
 
-    assert command == ["grok", "-p", "do the task", "--permission-mode", "acceptEdits"]
+    assert command[:5] == ["grok", "-p", "do the task", "--permission-mode", "acceptEdits"]
     assert stdin == ""
 
 
@@ -41,7 +44,8 @@ def test_grok_json_mode_wrapper_is_normalized_to_review_json() -> None:
 def test_agy_provider_prompt_is_passed_as_print_argument() -> None:
     command, stdin = _command_and_input(("agy", "--mode", "accept-edits"), "do the task")
 
-    assert command == ["agy", "--print", "do the task", "--mode", "accept-edits"]
+    assert command[:5] == ["agy", "--print", "do the task", "--mode", "accept-edits"]
+    assert "--sandbox" in command and "--disable-slash-commands" in command
     assert stdin == ""
 
 
@@ -64,17 +68,51 @@ def test_agy_json_mode_wrapper_is_normalized_to_review_json() -> None:
 def test_grok_default_command_auto_approves_edits() -> None:
     adapters = {adapter.name: adapter.command for adapter in approved_default_adapters()}
 
-    assert "--always-approve" in adapters["grok"]
+    assert "--always-approve" not in adapters["grok"]
+    assert "--tools" in adapters["grok"]
+
+
+def test_saved_provider_commands_are_hardened_at_invocation_time() -> None:
+    grok, _ = _command_and_input(
+        ("grok", "--always-approve", "--tools", "default", "--permission-mode", "bypassPermissions"),
+        "work",
+    )
+    claude, _ = _command_and_input(("claude", "-p", "--dangerously-skip-permissions"), "work")
+    codex, _ = _command_and_input(("codex", "exec", "--dangerously-bypass-approvals-and-sandbox"), "work")
+    agy, _ = _command_and_input(("agy", "--dangerously-skip-permissions"), "work")
+
+    assert "--always-approve" not in grok and "bypassPermissions" not in grok
+    assert grok[grok.index("--tools") + 1] == "read_file,list_dir,grep,run_terminal_command"
+    assert "--dangerously-skip-permissions" not in claude
+    assert {"--safe-mode", "--no-chrome", "--strict-mcp-config"} <= set(claude)
+    assert "--dangerously-bypass-approvals-and-sandbox" not in codex
+    assert {"--ignore-user-config", "--ephemeral"} <= set(codex)
+    assert "--dangerously-skip-permissions" not in agy
+    assert {"--sandbox", "--disable-slash-commands"} <= set(agy)
+
+
+def test_explicit_claude_capability_configuration_is_preserved_without_safe_mode() -> None:
+    command, _ = _command_and_input(
+        ("claude", "-p", "--safe-mode", "--mcp-config", '{"mcpServers":{"project":{}}}'),
+        "review",
+    )
+
+    assert "--safe-mode" not in command
+    assert command[command.index("--mcp-config") + 1] == '{"mcpServers":{"project":{}}}'
+    assert "--strict-mcp-config" in command
 
 
 def test_agy_default_command_does_not_bypass_permissions() -> None:
     adapters = {adapter.name: adapter.command for adapter in approved_default_adapters()}
 
-    assert adapters["agy"] == ("agy", "--mode", "accept-edits")
+    assert adapters["agy"] == (
+        "agy", "--mode", "accept-edits", "--sandbox", "--disable-slash-commands",
+    )
 
 
 def test_non_grok_provider_keeps_stdin_prompt() -> None:
     command, stdin = _command_and_input(("codex", "exec", "--sandbox", "workspace-write"), "do the task")
 
-    assert command == ["codex", "exec", "--sandbox", "workspace-write"]
+    assert command[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
+    assert "--ignore-user-config" in command and "--ephemeral" in command
     assert stdin == "do the task"
