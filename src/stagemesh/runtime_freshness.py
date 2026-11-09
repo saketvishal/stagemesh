@@ -7,6 +7,7 @@ which one the current process is running. Nothing here changes the install.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -74,6 +75,30 @@ def _help_commands(argv: list[str], runner: Runner, env: dict[str, str] | None =
     return sorted(max(groups, key=len).split(",")) if groups else None
 
 
+def _catalog_commands(argv: list[str], runner: Runner, env: dict[str, str] | None = None) -> list[str] | None:
+    """Prefer the stable machine catalog; retain help parsing for older installed CLIs."""
+    try:
+        proc = runner(
+            [*argv, "--command-catalog-json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        try:
+            payload = json.loads(proc.stdout or "")
+        except json.JSONDecodeError:
+            payload = None
+        commands = payload.get("commands") if isinstance(payload, dict) else None
+        if isinstance(commands, list) and commands and all(isinstance(item, str) and item for item in commands):
+            return sorted(set(commands))
+    return _help_commands([*argv, "--help"], runner, env)
+
+
 def _python_for(cli: Path) -> str:
     for name in ("python.exe", "python"):
         candidate = cli.parent / name
@@ -99,13 +124,13 @@ def check_runtime(project: Path, *, runner: Runner = subprocess.run, running_fil
         return result
     env = dict(os.environ)
     env["PYTHONPATH"] = str(src) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    result.source_commands = _help_commands([sys.executable, "-c", _BOOTSTRAP, "--help"], runner, env) or []
+    result.source_commands = _catalog_commands([sys.executable, "-c", _BOOTSTRAP], runner, env) or []
     if cli is None:
         result.message = "no installed `stagemesh` found; run from source: PYTHONPATH=src python -c \"from stagemesh.cli import main; main()\" ..."
         return result
     result.installed_cli = str(cli)
     clean = {key: value for key, value in os.environ.items() if key.upper() not in ("PYTHONPATH", "PYTHONHOME")}
-    installed = _help_commands([str(cli), "--help"], runner, clean)  # an inherited PYTHONPATH=src would make the install look current
+    installed = _catalog_commands([str(cli)], runner, clean)  # an inherited PYTHONPATH=src would make the install look current
     if installed is None or not result.source_commands:
         result.message = f"could not compare the installed CLI {cli} with source (help output unavailable)"
         return result

@@ -22,7 +22,7 @@ def test_init_snapshots_discovered_providers_without_authorizing_or_invoking(
     }
     monkeypatch.setattr(cli_module, "discovered_provider_entries", lambda: discovered)
 
-    assert cli_module.main(["--project", str(tmp_path), "init", "--json"]) == 0
+    assert cli_module.main(["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]) == 0
 
     report = json.loads(capsys.readouterr().out)
     assert report["provider_registry"] == {
@@ -55,7 +55,7 @@ def test_init_preserves_an_existing_provider_registry_exactly(
         lambda: pytest.fail("discovery must not replace an existing registry"),
     )
 
-    assert cli_module.main(["--project", str(tmp_path), "init", "--json"]) == 0
+    assert cli_module.main(["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]) == 0
 
     report = json.loads(capsys.readouterr().out)
     assert report["provider_registry"]["status"] == "unchanged"
@@ -69,7 +69,7 @@ def test_init_records_an_explicit_empty_registry_when_nothing_is_installed(
 ) -> None:
     monkeypatch.setattr(cli_module, "discovered_provider_entries", dict)
 
-    assert cli_module.main(["--project", str(tmp_path), "init", "--json"]) == 0
+    assert cli_module.main(["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]) == 0
 
     capsys.readouterr()
     config = load_config(tmp_path)

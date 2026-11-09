@@ -642,8 +642,19 @@ def preflight(
         if state is None:
             checks.append(Check("repo", False, f"cannot read local {base_ref} against origin", fix="git fetch origin"))
         elif state.relation in ("ahead", "diverged"):
-            checks.append(Check("repo", False, f"local {state.main_ref} is {state.relation} origin (ahead {state.ahead}, behind {state.behind}); PR mode requires it to match",
-                                fix="reconcile local main with origin/main first"))
+            pull_note = "; git pull cannot remove local-only commits" if state.relation == "ahead" else ""
+            checks.append(
+                Check(
+                    "repo",
+                    False,
+                    f"local {state.main_ref} is {state.relation} origin (ahead {state.ahead}, behind {state.behind}); "
+                    f"PR mode requires an exact match{pull_note}",
+                    fix=(
+                        "preserve the local commit and any dirty work on a feature branch/PR, then restore local main "
+                        "to origin/main; StageMesh will not push or reset unreviewed work automatically"
+                    ),
+                )
+            )
         else:
             checks.append(Check("repo", True, f"local {state.main_ref} vs origin: {state.relation} (ahead {state.ahead}, behind {state.behind})"
                                 + ("; consider git pull --ff-only" if state.behind else ""), fatal=False))

@@ -7,7 +7,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -53,7 +52,7 @@ def assert_installed_runtime_identity(project: Path) -> None:
 
 
 def assert_plain_continue(project: Path) -> None:
-    run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init"], ROOT)
+    run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init", "--allow-incomplete"], ROOT)
     objective = project / "objective.json"
     objective.write_text(
         json.dumps(
@@ -78,7 +77,7 @@ def assert_plain_continue(project: Path) -> None:
 
 
 def assert_objective_root_refusal(project: Path) -> None:
-    run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init"], ROOT)
+    run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init", "--allow-incomplete"], ROOT)
     store_db = project / ".stagemesh" / "stagemesh.sqlite3"
     setup = (
         "from stagemesh.persistence import Store; "

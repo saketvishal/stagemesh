@@ -21,8 +21,11 @@ from stagemesh.window_journal import last_window, record_started
 
 FRESH = RuntimeFreshness(running_from="src", running_from_source=True, installed_cli="x", source_cli="y")
 STALE = RuntimeFreshness(installed_cli="C:/x/stagemesh.exe", missing_from_installed=["run-window"], stale=True, refresh_command="python bootstrap")
-OK_PROVIDERS = lambda store, config, strict_live: rw.Check("providers", True, "fake providers")
 IN_SYNC = RepoState(main_ref="main", main_sha="a" * 40, origin_sha="a" * 40, relation="in_sync")
+
+
+def OK_PROVIDERS(store, config, strict_live):
+    return rw.Check("providers", True, "fake providers")
 
 
 @pytest.fixture(autouse=True)
@@ -614,6 +617,10 @@ def test_a_local_main_that_is_ahead_or_diverged_refuses_pr_mode(tmp_path: Path) 
         report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", **kwargs)
 
         assert report.refused and f"local main is {relation} origin" in report.stop_reason and rig.runs == []
+        assert "feature branch/PR" in report.next_command
+        assert "will not push or reset unreviewed work automatically" in report.next_command
+        if relation == "ahead":
+            assert "git pull cannot remove local-only commits" in report.stop_reason
 
 
 # --- recovery and resume ---------------------------------------------------------------------------------------------------------

@@ -102,7 +102,7 @@ def make_project(root: Path, task_count: int) -> tuple[Path, Path]:
     (project / "README.md").write_text("disposable acceptance project\n", encoding="utf-8")
     git(project, "add", "README.md")
     git(project, "commit", "-q", "-m", "init")
-    if cli(project, "init").returncode != 0:
+    if cli(project, "init", "--allow-incomplete").returncode != 0:
         raise SystemExit("stagemesh init failed")
     calls_file = root / "mock-calls.jsonl"
     write_providers(project, calls_file)

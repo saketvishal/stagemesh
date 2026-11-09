@@ -39,13 +39,14 @@ def test_built_wheel_has_publishable_metadata_and_exact_tag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(build_backend, "_build_info", _clean_build_info)
+    monkeypatch.setattr(build_backend, "VERSION", "9.9.9")
     wheel = tmp_path / build_backend.build_wheel(str(tmp_path))
     verifier = _verifier()
 
     assert verifier.inspect_wheel(wheel, f"v{build_backend.VERSION}") == build_backend.VERSION
 
     with pytest.raises(verifier.DistributionVerificationError, match="does not match"):
-        verifier.inspect_wheel(wheel, "v9.9.9")
+        verifier.inspect_wheel(wheel, "v8.8.8")
 
 
 def test_distribution_verifier_installs_cli_and_initializes_a_new_project(
@@ -55,5 +56,4 @@ def test_distribution_verifier_installs_cli_and_initializes_a_new_project(
     wheel = tmp_path / build_backend.build_wheel(str(tmp_path))
     verifier = _verifier()
 
-    version = verifier.inspect_wheel(wheel, f"v{build_backend.VERSION}")
-    verifier.verify_install(wheel, version)
+    verifier.verify_install(wheel, build_backend.VERSION)

@@ -326,7 +326,11 @@ def create_sandbox(
         (project / "spec" / f"check_{task['name']}.py").write_text(SPEC_HEADER + task["spec"], encoding="utf-8")
     _git(project, "add", "-A")
     _git(project, "commit", "-q", "-m", "Scaffold the textkit sandbox and its independent specs")
-    subprocess.run([python, "-m", "stagemesh.cli", "--project", str(project), "init"], check=True, capture_output=True)
+    subprocess.run(
+        [python, "-m", "stagemesh.cli", "--project", str(project), "init", "--allow-incomplete"],
+        check=True,
+        capture_output=True,
+    )
     from stagemesh.persistence import Store
 
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
