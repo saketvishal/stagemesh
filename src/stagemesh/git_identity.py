@@ -52,6 +52,11 @@ _PROVIDER_DESKTOP_ENV_NAMES = frozenset(
         "VISUAL",
     }
 )
+_GROK_EXTERNAL_COMPAT_ENV = {
+    f"GROK_{vendor}_{surface}_ENABLED": "false"
+    for vendor in ("CLAUDE", "CODEX", "CURSOR")
+    for surface in ("AGENTS", "HOOKS", "MCPS", "RULES", "SESSIONS", "SKILLS")
+}
 
 
 class GitIdentityError(ValueError):
@@ -275,13 +280,24 @@ def is_tool_email(email: str) -> bool:
     return domain in AI_PROVIDER_EMAIL_DOMAINS or "+local-worker" in local
 
 
-def provider_environment(path: Path | None = None, base: dict[str, str] | None = None) -> dict[str, str]:
+def provider_environment(
+    path: Path | None = None,
+    base: dict[str, str] | None = None,
+    *,
+    provider_name: str | None = None,
+) -> dict[str, str]:
     """Environment for a provider subprocess: pinned to the project identity so a commit the provider makes itself is never credited
     to the provider's own git configuration."""
     env = dict(os.environ if base is None else base)
     for key in tuple(env):
         if key in _PROVIDER_DESKTOP_ENV_NAMES or key.startswith(_PROVIDER_DESKTOP_ENV_PREFIXES):
             env.pop(key, None)
+    if provider_name and provider_name.casefold() == "grok":
+        # Grok imports Claude, Codex and Cursor user capabilities by default.
+        # An unattended StageMesh worker receives only capabilities attached by
+        # the project registry, never unrelated browser/computer-use skills,
+        # hooks or MCP servers from the operator's interactive agent homes.
+        env.update(_GROK_EXTERNAL_COMPAT_ENV)
     # Marks the process tree of an implementation or review provider. Commands that record operator decisions (finding
     # dispositions, delivery unblocking, follow-up cancellation) refuse to run inside it.
     env["STAGEMESH_PROVIDER_PROCESS"] = "1"

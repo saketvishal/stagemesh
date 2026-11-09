@@ -1366,7 +1366,7 @@ def test_observed_load_policy_enforces_review_skill_reads_and_records_redacted_r
     monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
     monkeypatch.setattr(providers_module, "_tracked_content_changed", lambda *_args: False)
     monkeypatch.setattr(providers_module, "_authorization_refusal", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(providers_module, "provider_environment", lambda *_args: {})
+    monkeypatch.setattr(providers_module, "provider_environment", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(providers_module.shutil, "which", lambda _command: "codex")
     monkeypatch.setattr(providers_module.subprocess, "Popen", popen)
     monkeypatch.setattr(providers_module, "communicate_bounded", communicate)

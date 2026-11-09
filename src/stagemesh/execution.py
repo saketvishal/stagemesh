@@ -555,7 +555,7 @@ class SubprocessExecutor(Executor):
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env=provider_environment(run_path),
+                    env=provider_environment(run_path, provider_name=self.name),
                     **popen_session_kwargs(),
                 )
             except FileNotFoundError as exc:
@@ -665,7 +665,7 @@ class SubprocessExecutor(Executor):
                             stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
-                            env=provider_environment(run_path),
+                            env=provider_environment(run_path, provider_name=self.name),
                             **popen_session_kwargs(),
                         )
                     except (FileNotFoundError, OSError):

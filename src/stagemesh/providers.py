@@ -451,7 +451,7 @@ class RuntimeCommandAdapter:
                 attempt_proc = subprocess.Popen(
                     command, cwd=run_path, text=True, encoding="utf-8", errors="replace",
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env=provider_environment(run_path), **popen_session_kwargs(),
+                    env=provider_environment(run_path, provider_name=self.name), **popen_session_kwargs(),
                 )
             except FileNotFoundError as exc:
                 is_capacity, launch_reason = classify_failure(1, exc=exc)
@@ -590,7 +590,7 @@ class RuntimeCommandAdapter:
                                 setup_proc = subprocess.Popen(
                                     argv, cwd=run_path, text=True, encoding="utf-8", errors="replace",
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    env=provider_environment(run_path), **popen_session_kwargs(),
+                                    env=provider_environment(run_path, provider_name=self.name), **popen_session_kwargs(),
                                 )
                             except OSError:
                                 return False
@@ -798,7 +798,7 @@ class RuntimeCommandAdapter:
                 proc = subprocess.Popen(
                     command, cwd=run_path, text=True, encoding="utf-8", errors="replace",
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env=provider_environment(run_path), **popen_session_kwargs(),
+                    env=provider_environment(run_path, provider_name=self.name), **popen_session_kwargs(),
                 )
             except OSError as exc:
                 cleanup_confirmed = True  # Popen did not create a child
@@ -991,7 +991,7 @@ class RuntimeCommandAdapter:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env=_review_provider_environment(Path(project), review_path),
+                    env=_review_provider_environment(Path(project), review_path, self.name),
                     **popen_session_kwargs(),
                 )
             except FileNotFoundError:
@@ -1114,8 +1114,10 @@ class RuntimeCommandAdapter:
                 _cleanup_review_workspace(Path(temp_dir))
 
 
-def _review_provider_environment(project: Path, review_path: Path) -> dict[str, str]:
-    environment = provider_environment(project)
+def _review_provider_environment(
+    project: Path, review_path: Path, provider_name: str | None = None
+) -> dict[str, str]:
+    environment = provider_environment(project, provider_name=provider_name)
     # The sandbox account differs from the host account that created this exact
     # disposable checkout. Trust only this checkout, only in the review process.
     setting = "safe.directory=" + review_path.resolve().as_posix()
