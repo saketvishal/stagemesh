@@ -40,7 +40,7 @@ stagemesh --version
 stagemesh init
 ```
 
-`stagemesh init` is safe to rerun in the same project. It reuses `.stagemesh`, applies idempotent setup and database migrations, and preserves existing profile and provider-registry edits. It does not create, replace, or delete the project's application source directories.
+`stagemesh init` is safe to rerun in the same project. It reuses `.stagemesh`, applies idempotent setup and database migrations, and preserves existing profile and provider-registry edits. If an older init created StageMesh's exact placeholder profile, rerunning init upgrades that placeholder when a safe validation gate can now be detected; hand-written and already-real profiles remain unchanged. It does not create, replace, or delete the project's application source directories.
 
 StageMesh does not provide a `stagemesh uninstall` subcommand. Remove a pip-installed copy from the active environment with:
 
@@ -59,7 +59,7 @@ stagemesh run-window
 stagemesh status
 ```
 
-`stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without making a model call. In an interactive terminal it explains unattended access, shows the detected coding agents and their verifiable login state, and can authorize all verified subscription agents with one confirmation. It detects conventional project test commands automatically; an unconfigured Python project gets the first-task bootstrap gate described below, while other unknown stacks ask for the command the team normally uses. Scripted setup can repeat `--authorize-provider NAME` and use `--test-command "COMMAND"`; no JSON editing is required. A custom command is never executed or persisted without confirmation, and an existing hand-written profile is never replaced.
+`stagemesh init` creates the project-local provider registry by detecting supported CLIs on `PATH` (or an explicit command environment override) without making a model call. In an interactive terminal it explains unattended access, shows the detected coding agents and their verifiable login state, and can authorize all verified subscription agents with one confirmation. It detects conventional project test commands automatically; an unconfigured Python project gets the first-task bootstrap gate described below. If no existing test command can be detected, the setup menu offers basic Python `unittest` bootstrapping, entry of the project's existing command, or leaving setup incomplete. Scripted setup can repeat `--authorize-provider NAME` and use `--test-command "COMMAND"`; no JSON editing is required. A custom command is never executed or persisted without confirmation, and an existing hand-written profile is never replaced.
 
 An early Python project with source code but no tests is not blocked from starting development. Init installs a fixed bootstrap gate: the first implementation may run, but it cannot complete until it adds at least one passing standard-library `unittest` under `tests/`. The gate rejects zero-test success and then runs every discovered test. This allows StageMesh to establish validation as part of the first task without pretending an untested implementation is complete.
 

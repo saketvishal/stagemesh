@@ -402,11 +402,23 @@ def _prompt_test_command(project: Path) -> tuple[str, ...] | None:
             return suggestion
     else:
         print("StageMesh could not safely detect a project test command.")
-        print("Examples: python -m pytest -q, npm test, cargo test, or go test ./...")
+        print("Choose one:")
+        print("  1. Let StageMesh add basic Python unittest validation with the first task")
+        print("  2. Enter this project's existing test command")
+        print("  3. Leave setup incomplete for now")
     try:
-        custom = input("Enter the command your team normally uses to test this project (Enter to leave setup incomplete): ").strip()
+        custom = input("Selection, or enter the existing test command directly [3]: ").strip()
     except EOFError:
         return None
+    if custom == "1":
+        return ("stagemesh", "validation-bootstrap")
+    if custom in {"", "3"}:
+        return None
+    if custom == "2":
+        try:
+            custom = input("Existing test command: ").strip()
+        except EOFError:
+            return None
     return _split_setup_command(custom) if custom else None
 
 
