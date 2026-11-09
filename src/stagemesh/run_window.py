@@ -319,6 +319,51 @@ def _task_sort_key(task_id: str) -> tuple[int, int, str]:
     return (0, int(task_id), task_id) if task_id.isdigit() else (1, 0, task_id)
 
 
+def _actionable_source_reason(state: dict[str, Any], reason: str) -> str:
+    """Turn an internal source refusal into a plain reason plus a safe next action."""
+    if reason == "source synchronization incomplete":
+        return "GitHub issue eligibility was not fully synchronized; next: rerun stagemesh init, then rerun stagemesh run-window"
+    if reason == "source closed":
+        return "GitHub issue is closed; next: reopen it only if the work is still required, then rerun stagemesh init"
+    if reason != "source no longer eligible":
+        return reason
+
+    detail = state.get("eligibility_reason") or state.get("retirement_reason")
+    detail = str(detail).strip() if detail else ""
+    wrapper = "source no longer eligible ("
+    if detail.startswith(wrapper) and detail.endswith(")"):
+        detail = detail[len(wrapper) : -1]
+    if detail == "source no longer eligible":
+        detail = ""
+    if detail.startswith("missing required label(s):"):
+        labels = detail.split(":", 1)[1].strip()
+        return (
+            f"GitHub issue is open but {detail}; next: add {labels} after confirming the issue is executable, "
+            "or rerun stagemesh init with GitHub Issues write access to classify an unlabeled issue"
+        )
+    if detail.startswith("has excluded label(s):"):
+        return f"GitHub issue {detail}; next: remove the excluded label only when the issue should be worked, then rerun stagemesh init"
+    if detail.startswith("blocked by label:"):
+        return f"GitHub issue is intentionally {detail}; next: remove the blocking label only when the issue is ready, then rerun stagemesh init"
+    if "objective root" in detail:
+        return "GitHub issue is an objective root, not an executable task; next: create or select executable child issues"
+    if detail.startswith("source validation failed:"):
+        return f"GitHub issue {detail}; next: correct its labels or dependencies, then rerun stagemesh init"
+    if detail:
+        return f"GitHub issue is open but not eligible: {detail}; next: correct the issue or task-source selector, then rerun stagemesh init"
+    return (
+        "GitHub issue is open but outside the configured task-source policy; next: inspect its labels and the task-source selector, "
+        "correct them, then rerun stagemesh init"
+    )
+
+
+def _task_source_reason(store: Store, task: Any, reason: str) -> str:
+    source, source_id = task["source"], task["source_id"]
+    if source != "github" or source_id is None:
+        return reason
+    return _actionable_source_reason(store.source_state(str(source), str(source_id)), reason)
+
+
 def select_tasks(
     store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None,
     project: Path | None = None, compatible_with: list[str] | None = None, required_label: str | None = None,
@@ -378,7 +423,7 @@ def select_tasks(
         if task["status"] == TaskStatus.BLOCKED:
             external = scheduler.decision(task_id).reason  # "blocked" unless the work itself is gone (source closed, objective root, ...)
             if external != "blocked":
-                skipped[task_id] = external
+                skipped[task_id] = _task_source_reason(store, task, external)
                 continue
             info = classify_block(store, task_id)
             refusal = None if fingerprint is None else reentry_refusal(store, task_id, fingerprint)
@@ -408,7 +453,7 @@ def select_tasks(
         reason = None if decision.eligible else decision.reason
         reason = reason or skip_reason(store, task_id)
         if reason is not None:
-            skipped[task_id] = reason
+            skipped[task_id] = _task_source_reason(store, task, reason)
             continue
         if project is not None:
             state = contract_state(store, project, task_id, auto_plan=True)
@@ -761,6 +806,15 @@ def next_command(report: WindowReport) -> str:
         return "stagemesh doctor  # tasks " + ", ".join(t.task_id for t in decisions) + " need a design decision"
     if any(t.resumable for t in report.tasks):
         return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
+    actions = {
+        reason.split("; next: ", 1)[1]
+        for reason in report.not_selected.values()
+        if "; next: " in reason
+    }
+    if len(actions) == 1:
+        return actions.pop()
+    if actions:
+        return "review the left-alone reasons above and complete each listed next action"
     return "nothing to do: no eligible work left"
 
 

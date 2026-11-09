@@ -87,6 +87,10 @@ Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default. Do not edit it
 
 Use `stagemesh run-window` for bounded unattended or production work. It applies preflight checks, journals the run, uses isolated task worktrees, and remains PR-only unless the project explicitly authorizes a merge policy. The normal operator flow is:
 
+When GitHub issues are left out, the report names the actual admission condition and a safe next action. For example, it identifies a
+missing `stagemesh:ready` label and explains how to add it or ask `stagemesh init` to classify an unlabeled issue; it does not collapse
+these cases into the opaque phrase “source no longer eligible.”
+
 ```bash
 stagemesh doctor
 stagemesh queue reconcile
