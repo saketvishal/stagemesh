@@ -21,6 +21,12 @@ def _jobs(text: str) -> dict[str, str]:
     return {"windows": text[windows:linux], "linux": text[linux:]}
 
 
+def _attribution_job(text: str) -> str:
+    start = text.index("\n  attribution:\n")
+    end = text.index("\n  windows:\n")
+    return text[start:end]
+
+
 def _step(job: str, name: str) -> str:
     marker = f"      - name: {name}\n"
     start = job.index(marker)
@@ -49,13 +55,18 @@ def test_protected_jobs_compute_and_publish_exact_diff_plan_without_renaming() -
 
 
 def test_mandatory_steps_never_depend_on_focused_mode() -> None:
-    jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
+    text = WORKFLOW.read_text(encoding="utf-8")
+    jobs = _jobs(text)
+    attribution = _attribution_job(text)
+    attribution_step = _step(attribution, "Attribution and static range policy")
+    assert "if:" not in attribution_step
+    assert "python scripts/check_ci_range.py" in attribution_step
     for job in jobs.values():
+        assert "needs: attribution" in job
         for name in MANDATORY_STEPS:
+            if name == "Attribution and static range policy":
+                continue
             assert "if:" not in _step(job, name), name
-        assert "python scripts/check_ci_range.py" in _step(
-            job, "Attribution and static range policy"
-        )
         quality = _step(job, "Fail-closed repository quality gate")
         assert "scripts/quality_gate.py --mode ci" in quality.replace("\\", "/")
         assert "STAGEMESH_CI_BASE_SHA:" in quality

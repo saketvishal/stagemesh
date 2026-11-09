@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "stagemesh"
-version = "0.6.9"
+version = "0.6.10"
 description = "Provider-neutral control plane for autonomous software engineering lifecycles"
 readme = "README.md"
 requires-python = ">=3.11"

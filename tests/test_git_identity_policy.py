@@ -318,6 +318,44 @@ def test_provider_environment_cannot_override_the_approved_identity(tmp_path: Pa
     assert (env["GIT_COMMITTER_NAME"], env["GIT_COMMITTER_EMAIL"]) == OWNER
 
 
+def test_provider_environment_removes_desktop_bridges_and_is_headless() -> None:
+    from stagemesh.git_identity import provider_environment
+
+    inherited = {
+        "PATH": "provider-path",
+        "CODEX_HOME": "persistent-auth-config",
+        "ANTHROPIC_API_KEY": "provider-credential",
+        "BROWSER": "browser.exe",
+        "BROWSER_USE_ACCESS_PIPE_PATH": r"\\.\pipe\browser-bridge",
+        "CODEX_APP_TOOLS_PIPE_PATH": r"\\.\pipe\codex-app-tools",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
+        "CODEX_SESSION_ID": "desktop-session",
+        "CODEX_THREAD_ID": "desktop-thread",
+        "CODEX_TOOL_CALL_ID": "desktop-call",
+        "EDITOR": "editor.exe",
+        "VISUAL": "visual-editor.exe",
+    }
+
+    env = provider_environment(None, inherited)
+
+    assert env["PATH"] == "provider-path"
+    assert env["CODEX_HOME"] == "persistent-auth-config"
+    assert env["ANTHROPIC_API_KEY"] == "provider-credential"
+    assert not ({"BROWSER", "EDITOR", "VISUAL"} & env.keys())
+    assert not any(key.startswith(("BROWSER_USE_ACCESS_", "CODEX_APP_")) for key in env)
+    assert not (
+        {
+            "CODEX_APP_TOOLS_PIPE_PATH",
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+            "CODEX_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "CODEX_TOOL_CALL_ID",
+        }
+        & env.keys()
+    )
+    assert env["STAGEMESH_PROVIDER_PROCESS"] == "1"
+
+
 def test_doctor_reports_the_effective_identity(tmp_path: Path) -> None:
     from stagemesh.git_identity import identity_report
 
