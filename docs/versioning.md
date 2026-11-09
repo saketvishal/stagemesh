@@ -1,9 +1,10 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.9 makes provider activation
-plugin-driven and reconciles StageMesh-owned blocked labels.
-See the [0.6.9 release notes](releases/0.6.9.md),
+files as reinstallable package points. Version 0.6.10 keeps unattended provider
+processes detached from interactive desktop and browser sessions.
+See the [0.6.10 release notes](releases/0.6.10.md),
+[0.6.9 release notes](releases/0.6.9.md),
 [0.6.8 release notes](releases/0.6.8.md),
 [0.6.7 release notes](releases/0.6.7.md),
 [0.6.6 release notes](releases/0.6.6.md),
@@ -15,14 +16,14 @@ See the [0.6.9 release notes](releases/0.6.9.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.9` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.10` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.9
+python -m pip install --no-cache-dir stagemesh==0.6.10
 ```
 
-The preceding `0.6.8` PyPI release remains available for rollback. The older
+The preceding `0.6.9` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -31,6 +32,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.10`: headless provider isolation from inherited desktop and browser session bridges.
 - `0.6.9`: provider-plugin discovery and activation reconciliation; StageMesh blocked-label cleanup.
 - `0.6.8`: run-window materializes deterministic contracts before conflict-aware scheduling.
 - `0.6.7`: existing-project GitHub admission migration and truthful init readiness.

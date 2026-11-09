@@ -34,6 +34,25 @@ NON_HUMAN_EMAIL_DOMAINS = frozenset({"anthropic.com", "openai.com", "x.ai", "sta
 _COAUTHOR_LINE = re.compile(r"^\s*co-authored-by\s*:\s*(?P<who>.*?)\s*$", re.IGNORECASE)
 _EMAIL_IN_TRAILER = re.compile(r"<(?P<email>[^<>]*)>")
 
+# A StageMesh provider is an unattended child process, even when StageMesh was
+# started from an interactive coding-agent desktop.  Do not let a nested agent
+# inherit the parent's desktop/session bridge and surface disposable workspaces
+# as file:// browser tabs.  Authentication/configuration variables such as
+# CODEX_HOME remain available; only live session integration is removed.
+_PROVIDER_DESKTOP_ENV_PREFIXES = ("BROWSER_USE_ACCESS_", "CODEX_APP_")
+_PROVIDER_DESKTOP_ENV_NAMES = frozenset(
+    {
+        "BROWSER",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE",
+        "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_TOOL_CALL_ID",
+        "EDITOR",
+        "VISUAL",
+    }
+)
+
 
 class GitIdentityError(ValueError):
     """The identity a commit would carry is unusable or would credit the wrong account."""
@@ -260,6 +279,9 @@ def provider_environment(path: Path | None = None, base: dict[str, str] | None =
     """Environment for a provider subprocess: pinned to the project identity so a commit the provider makes itself is never credited
     to the provider's own git configuration."""
     env = dict(os.environ if base is None else base)
+    for key in tuple(env):
+        if key in _PROVIDER_DESKTOP_ENV_NAMES or key.startswith(_PROVIDER_DESKTOP_ENV_PREFIXES):
+            env.pop(key, None)
     # Marks the process tree of an implementation or review provider. Commands that record operator decisions (finding
     # dispositions, delivery unblocking, follow-up cancellation) refuse to run inside it.
     env["STAGEMESH_PROVIDER_PROCESS"] = "1"
