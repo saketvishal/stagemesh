@@ -24,7 +24,7 @@ STALE = RuntimeFreshness(installed_cli="C:/x/stagemesh.exe", missing_from_instal
 IN_SYNC = RepoState(main_ref="main", main_sha="a" * 40, origin_sha="a" * 40, relation="in_sync")
 
 
-def ok_providers(store, config, strict_live):
+def OK_PROVIDERS(store, config, strict_live):
     return rw.Check("providers", True, "fake providers")
 
 
@@ -55,7 +55,7 @@ def window(tmp_path: Path, ids: list[str], behaviour: dict | None = None, **opts
     run_kwargs = {
         "runtime": opts.pop("_runtime", FRESH),
         "list_prs": lambda project: [],
-        "provider_check": ok_providers,
+        "provider_check": OK_PROVIDERS,
         "clock": Clock(),
     }
     config = cli_module.load_config(project)
