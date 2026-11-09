@@ -339,7 +339,7 @@ def _actionable_source_reason(state: dict[str, Any], reason: str) -> str:
         labels = detail.split(":", 1)[1].strip()
         return (
             f"GitHub issue is open but {detail}; next: add {labels} after confirming the issue is executable, "
-            "or rerun stagemesh init with GitHub Issues write access to classify an unlabeled issue"
+            "or rerun stagemesh init with an authenticated GitHub CLI to classify issues without a StageMesh admission label"
         )
     if detail.startswith("has excluded label(s):"):
         return f"GitHub issue {detail}; next: remove the excluded label only when the issue should be worked, then rerun stagemesh init"

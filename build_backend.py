@@ -10,7 +10,7 @@ from pathlib import Path
 
 NAME = "stagemesh"
 UI_ASSETS = ("index.html", "app.js", "app.css")  # keep equal to stagemesh.api_server.UI_ASSETS (tested)
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 DIST_INFO = f"{NAME}-{VERSION}.dist-info"
 
 

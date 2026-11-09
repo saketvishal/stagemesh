@@ -53,26 +53,26 @@ def classify_unlabeled_github_issues(
     project: Path,
     config: StageMeshConfig,
 ) -> GitHubBootstrapResult:
-    """Classify only completely unlabeled open issues; never replace team policy."""
+    """Classify open issues with no StageMesh admission label; preserve every existing team label."""
     github = config.github
     if not github.auto_label_unlabeled:
         return GitHubBootstrapResult("disabled", reason="not enabled by project configuration")
     if not github.owner or not github.repo:
         return GitHubBootstrapResult("unavailable", reason="GitHub repository is not configured")
 
-    candidates = _unlabeled_open_tasks(store)
+    candidates = _unclassified_open_tasks(store)
     if not candidates:
-        return GitHubBootstrapResult("no_unlabeled_issues")
+        return GitHubBootstrapResult("no_unclassified_issues")
     if not github.token:
         result = GitHubBootstrapResult(
             "write_authorization_required",
             scanned=len(candidates),
-            reason="set STAGEMESH_GITHUB_TOKEN with Issues write permission",
+            reason="use an interactive terminal with an authenticated GitHub CLI, or set STAGEMESH_GITHUB_TOKEN with Issues write permission",
         )
         record_audit(
             store,
             "github.init_classification_deferred",
-            {"repository": f"{github.owner}/{github.repo}", "unlabeled_issues": len(candidates)},
+            {"repository": f"{github.owner}/{github.repo}", "unclassified_issues": len(candidates)},
         )
         return result
 
@@ -112,7 +112,16 @@ def classify_unlabeled_github_issues(
     return GitHubBootstrapResult(status, len(candidates), ready, triage, failed)
 
 
-def _unlabeled_open_tasks(store: Store) -> tuple[str, ...]:
+def _unclassified_open_tasks(store: Store) -> tuple[str, ...]:
+    """Open issues StageMesh can safely classify without replacing an existing workflow decision."""
+    lifecycle_labels = {
+        READY_LABEL,
+        TRIAGE_LABEL,
+        "stagemesh:blocked",
+        "stagemesh:deferred",
+        "status:blocked",
+        "status:remediating",
+    }
     rows = store.conn.execute(
         "SELECT t.id, sc.state FROM tasks t "
         "JOIN source_cache sc ON sc.source=t.source AND sc.source_id=t.source_id "
@@ -126,8 +135,12 @@ def _unlabeled_open_tasks(store: Store) -> tuple[str, ...]:
             continue
         if not isinstance(state, dict) or str(state.get("state", "")).upper() != "OPEN":
             continue
+        if state.get("objective_root") is True:
+            continue
         labels = state.get("labels")
-        if isinstance(labels, list) and not labels:
+        if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
+            continue
+        if lifecycle_labels.isdisjoint(label.casefold() for label in labels):
             found.append(str(row["id"]))
     return tuple(found)
 

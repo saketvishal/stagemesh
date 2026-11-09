@@ -32,6 +32,26 @@ class GitHubRepository:
     remote: str
 
 
+def github_cli_token(timeout_seconds: float = 5.0) -> str | None:
+    """Return the current GitHub CLI token without printing or persisting it."""
+    kwargs: dict[str, object] = {}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+            **kwargs,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    token = result.stdout.strip()
+    return token if result.returncode == 0 and token else None
+
+
 class UrlLibGitHubTransport:
     def __init__(self, token: str | None = None, api_root: str = "https://api.github.com"):
         self.token = token
