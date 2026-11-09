@@ -208,8 +208,10 @@ def validate_profile(profile: Profile) -> None:
         if len(set(names)) != len(names):
             raise ProfileError(f"task type {type_id} has duplicate gate names")
         commands = [expand_gate(profile, gate_id)["command"] for gate_id in task_type.gates]
-        broad = [_is_broad_gate(n) or _is_broad_command(tuple(c)) for n, c in zip(names, commands)]
-        if task_type.level == "light" and not all(any(t in n.casefold() for t in DOC_GATE_TOKENS) and not b for n, b in zip(names, broad)):
+        broad = [_is_broad_gate(n) or _is_broad_command(tuple(c)) for n, c in zip(names, commands, strict=True)]
+        if task_type.level == "light" and not all(
+            any(t in n.casefold() for t in DOC_GATE_TOKENS) and not b for n, b in zip(names, broad, strict=True)
+        ):
             raise ProfileError(
                 f"light task type {type_id}: every gate name must contain one of {', '.join(DOC_GATE_TOKENS)} and not be broad, "
                 "otherwise validation planning would skip it"
@@ -223,7 +225,7 @@ def validate_profile(profile: Profile) -> None:
 
         try:
             validate_generated(build_contract(profile, TypeDecision(type_id, "validation", ()), "probe", "probe-task", ""))
-        except Exception as exc:  # noqa: BLE001 - surfaced as a profile problem
+        except Exception as exc:
             raise ProfileError(f"task type {type_id} produces an invalid contract: {exc}") from exc
 
 
@@ -303,19 +305,25 @@ def resolve_type(profile: Profile, labels: tuple[str, ...], title: str, body: st
 
 def build_contract(profile: Profile, decision: TypeDecision, objective: str, task_id: str, generated_by: str) -> dict[str, Any]:
     task_type = profile.types[decision.type_id]
+    gates = [expand_gate(profile, gate_id) for gate_id in task_type.gates]
+    acceptance = [
+        "The change fulfils the task objective and nothing else.",
+        f"Every {task_type.id} validation gate of the {profile.name} profile passes.",
+    ]
+    if any(gate["command"] == ["stagemesh", "validation-bootstrap"] for gate in gates):
+        acceptance.append(
+            "Add at least one passing standard-library unittest under tests/ as part of this implementation; zero tests fail validation."
+        )
     return {
         "objective": objective,
         "explicit": True,
         "validation_classification": LEVELS[task_type.level],
         "validation_escalation_reasons": [f"profile {profile.name}: task type {task_type.id} ({task_type.level} validation)"],
-        "acceptance_criteria": [
-            "The change fulfils the task objective and nothing else.",
-            f"Every {task_type.id} validation gate of the {profile.name} profile passes.",
-        ],
+        "acceptance_criteria": acceptance,
         "allowed_files": list(task_type.allowed_files),
         "forbidden_files": list(dict.fromkeys((*profile.forbidden_files, *task_type.forbidden_files))),
         "protected_files": list(task_type.protected_files),
-        "required_tests": [expand_gate(profile, gate_id) for gate_id in task_type.gates],
+        "required_tests": gates,
         "max_changed_files": task_type.max_changed_files,
         "max_diff_lines": task_type.max_diff_lines,
         "generated_by": generated_by,
