@@ -31,9 +31,15 @@ def sync_outbound_outcomes(
         if task["source"] not in github_sources or task["source_id"] is None:
             continue
         outcome = _outcome(task)
-        if outcome is None:
-            continue
         issue = str(task["source_id"])
+        if outcome is None:
+            if task["status"] == TaskStatus.OPEN and _needs_unblock(store, issue):
+                try:
+                    sync.publish_unblocked(issue)
+                    results.append({"task_id": task_id, "issue": issue, "outcome": "UNBLOCKED"})
+                except Exception as exc:  # noqa: BLE001 - reconciliation is advisory like other outbound sync
+                    _record_unblock_error(store, sync, issue, exc)
+            continue
         subject = None
         key = f"github:{issue}:{'outbound' if outcome == 'DONE' else 'blocked'}"
         try:
@@ -68,6 +74,43 @@ def sync_outbound_outcomes(
             except Exception:  # noqa: BLE001
                 pass
     return results
+
+
+def _record_unblock_error(store: Store, sync: GitHubOutboundSync, issue: str, exc: Exception) -> bool:
+    """Best-effort evidence for advisory reconciliation; false means even local recording was unavailable."""
+    try:
+        RetryRegistry(store).record_failure(f"github:{issue}:unblocked", "ERROR")
+        sync.publish(
+            GITHUB_SOURCE,
+            issue,
+            "ERROR",
+            {"outcome": "UNBLOCKED", "error": f"{type(exc).__name__}: {exc}"[:300]},
+        )
+        return True
+    except Exception:  # noqa: BLE001 - outbound evidence must never alter local lifecycle
+        return False
+
+
+def _needs_unblock(store: Store, issue: str) -> bool:
+    """True only after StageMesh successfully published BLOCKED and has not since cleared it."""
+    rows = store.conn.execute(
+        "SELECT status, payload FROM source_events WHERE source=? AND source_id=? AND direction='outbound' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 200",
+        (GITHUB_SOURCE, issue),
+    )
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        outcome = payload.get("outcome")
+        if outcome == "UNBLOCKED":
+            return row["status"] != "OK"
+        if outcome == "BLOCKED" or (outcome is None and "reason" in payload):
+            return row["status"] == "OK"
+    return False
 
 
 def _delivery_allows_closure(store: Store, task_id: str) -> bool:

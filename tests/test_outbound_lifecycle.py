@@ -10,6 +10,7 @@ from stagemesh.audit import record_audit
 from stagemesh.concurrency import IntegrationLock
 from stagemesh.coordinator import Coordinator
 from stagemesh.github import GitHubClient
+from stagemesh.outbound_lifecycle import sync_outbound_outcomes
 from stagemesh.parallel import worker_id_for
 from stagemesh.serialized_integration import SerializedIntegrator
 from stagemesh.task_sources import BLOCKED_OUTBOUND_LABEL, GitHubOutboundSync, _blocked_marker
@@ -136,6 +137,48 @@ def test_coordinator_tick_posts_blocked_reason_once_and_skips_local_task(tmp_pat
     assert transport.calls("PATCH") == []  # blocked tasks are commented, never closed or relabelled
     assert rig.store.get_task("A")["status"] == "BLOCKED"
     assert all("/issues/101/" in r[1] for r in transport.requests)
+
+
+def test_open_task_clears_stagemesh_blocked_label_once_and_records_audit(tmp_path):
+    rig = _github_rig(tmp_path, ["A"], {"A": "101"})
+    transport = FakeTransport()
+    sync = GitHubOutboundSync(rig.store, GitHubClient("o", "r", transport))
+    sync.publish_blocked("101", "provider unavailable")
+    transport.requests.clear()
+
+    sync_outbound_outcomes(
+        rig.store, sync, frozenset({"github"}), [rig.store.get_task("A")], {}
+    )
+    sync_outbound_outcomes(
+        rig.store, sync, frozenset({"github"}), [rig.store.get_task("A")], {}
+    )
+
+    assert transport.calls("DELETE") == [
+        ("DELETE", "/repos/o/r/issues/101/labels/stagemesh%3Atask-blocked", None)
+    ]
+    assert _outbound(rig, "101")[-1] == (
+        "OK", {"label": "OK", "outcome": "UNBLOCKED"}
+    )
+    audit = [json.loads(row[0]) for row in rig.store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type='source.outbound' ORDER BY rowid"
+    )]
+    assert audit[-1]["outcome"] == "UNBLOCKED"
+
+
+def test_removing_an_already_absent_stagemesh_label_is_success(tmp_path):
+    rig = _github_rig(tmp_path, ["A"], {"A": "101"})
+
+    class MissingLabel(FakeTransport):
+        def request(self, method, path, body=None):
+            self.requests.append((method, path, body))
+            if method == "DELETE":
+                return 404, {}, {"message": "Label does not exist"}
+            return super().request(method, path, body)
+
+    sync = GitHubOutboundSync(rig.store, GitHubClient("o", "r", MissingLabel()))
+    event_id = sync.publish_unblocked("101")
+    event = rig.store.conn.execute("SELECT status FROM source_events WHERE id=?", (event_id,)).fetchone()
+    assert event["status"] == "OK"
 
 
 @pytest.mark.parametrize("transport", [FakeTransport(post_status=500), FakeTransport(raises=True)])
