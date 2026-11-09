@@ -439,7 +439,9 @@ def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, mo
 
     assert code == 0
     assert json.loads(capsys.readouterr().out)["would_run"] == ["3"]
-    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
+    migrated = json.loads(config_path.read_text(encoding="utf-8"))
+    assert migrated["task_sources"][0]["labels"] == ["stagemesh:ready"]
+    assert migrated["github"]["auto_label_unlabeled"] is True
     assert config_path.read_bytes() == before
 
 
@@ -502,7 +504,64 @@ def test_init_preserves_explicit_github_source_policy(
     assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
 
     source["labels"] = expected
-    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"] == [source]
+    migrated = json.loads(config_path.read_text(encoding="utf-8"))
+    assert migrated["task_sources"] == [source]
+    assert migrated["github"]["auto_label_unlabeled"] is True
+
+
+def test_init_migrates_existing_github_admission_and_refuses_ready_without_write_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = _github_project(tmp_path)
+    (project / ".stagemesh").mkdir()
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    config_path = project / ".stagemesh/config.json"
+    source = {
+        "name": "github",
+        "type": "github",
+        "labels": ["stagemesh:ready"],
+        "excluded_labels": ["stagemesh:blocked", "stagemesh:deferred"],
+    }
+    config_path.write_text(
+        json.dumps({"github": {"owner": "acme", "repo": "widgets"}, "task_sources": [source]}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("STAGEMESH_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        GitHubApiIssueSource,
+        "discover",
+        lambda self: ([DiscoveredTask("github", "9", "Scoped task", labels=("autonomous-task",))], "OK", None),
+    )
+
+    assert cli_module.main(["--project", str(project), "init", "--json", "--allow-incomplete"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    migrated = json.loads(config_path.read_text(encoding="utf-8"))
+    assert migrated["task_sources"] == [source]
+    assert migrated["github"]["auto_label_unlabeled"] is True
+    assert report["github_issue_classification"]["status"] == "write_authorization_required"
+    assert "github_issue_classification" in {item["name"] for item in report["readiness"]["blockers"]}
+
+
+def test_init_preserves_explicit_github_classification_opt_out(tmp_path: Path) -> None:
+    project = _github_project(tmp_path)
+    config_path = project / ".stagemesh/config.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "github": {"owner": "acme", "repo": "widgets", "auto_label_unlabeled": False},
+                "task_sources": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cli_module.main(["--project", str(project), "init", "--allow-incomplete"]) == 0
+
+    migrated = json.loads(config_path.read_text(encoding="utf-8"))
+    assert migrated["github"]["auto_label_unlabeled"] is False
+    assert migrated["task_sources"] == []
 
 
 def test_run_window_unmigratable_missing_source_refuses_with_one_fix_and_writes_report(

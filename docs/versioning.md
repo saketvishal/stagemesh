@@ -1,9 +1,10 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.6 uses authenticated GitHub
-CLI access during initialization to admit safely classifiable issues.
-See the [0.6.6 release notes](releases/0.6.6.md),
+files as reinstallable package points. Version 0.6.7 migrates existing GitHub
+projects to safe automatic issue admission without replacing explicit policy.
+See the [0.6.7 release notes](releases/0.6.7.md),
+[0.6.6 release notes](releases/0.6.6.md),
 [0.6.5 release notes](releases/0.6.5.md),
 [0.6.4 release notes](releases/0.6.4.md),
 [0.6.3 release notes](releases/0.6.3.md),
@@ -12,14 +13,14 @@ See the [0.6.6 release notes](releases/0.6.6.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.6` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.7` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.6
+python -m pip install --no-cache-dir stagemesh==0.6.7
 ```
 
-The preceding `0.6.5` PyPI release remains available for rollback. The older
+The preceding `0.6.6` PyPI release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -28,6 +29,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.7`: existing-project GitHub admission migration and truthful init readiness.
 - `0.6.6`: zero-friction authenticated GitHub issue classification during init.
 - `0.6.5`: actionable GitHub task-admission reasons in run-window reports.
 - `0.6.4`: safe rerun migration from StageMesh's exact generated placeholder to a detected real gate.
