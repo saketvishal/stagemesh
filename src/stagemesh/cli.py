@@ -125,7 +125,11 @@ from .provider_acceptance import (
     run_live_provider_smoke,
     run_provider_acceptance,
 )
-from .provider_catalog import balanced_provider_pools, discovered_provider_entries
+from .provider_catalog import (
+    balanced_provider_pools,
+    discovered_provider_entries,
+    migrate_unsafe_bundled_provider_commands,
+)
 from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .provider_pool import (
     IMPLEMENT,
@@ -252,7 +256,9 @@ def _ensure_default_github_task_source(project: Path) -> bool:
     return changed
 
 
-def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
+def _ensure_provider_registry(
+    project: Path,
+) -> tuple[bool, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Merge newly installed provider plugins into the project registry without provider calls."""
     config_path = runtime_dir(project) / "config.json"
     data: dict[str, object] = {}
@@ -267,8 +273,9 @@ def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...], tup
     providers = data.get("providers", {})
     if not isinstance(providers, dict):
         raise ConfigValidationError("providers must be an object")
+    hardened = migrate_unsafe_bundled_provider_commands(providers)
     available = discovered_provider_entries()
-    changed = False
+    changed = bool(hardened)
     for name, entry in available.items():
         if name not in providers:
             providers[name] = entry
@@ -279,7 +286,12 @@ def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...], tup
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return changed, tuple(sorted(str(name) for name in providers)), tuple(sorted(available))
+    return (
+        changed,
+        tuple(sorted(str(name) for name in providers)),
+        tuple(sorted(available)),
+        hardened,
+    )
 
 
 def _split_setup_command(raw: str) -> tuple[str, ...]:
@@ -580,7 +592,12 @@ def command_init(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
     configured_github_source = _ensure_default_github_task_source(project)
-    providers_changed, registered_providers, available_providers = _ensure_provider_registry(project)
+    (
+        providers_changed,
+        registered_providers,
+        available_providers,
+        hardened_providers,
+    ) = _ensure_provider_registry(project)
     authorization_before = tuple(load_config(project).authorized_providers or ())
     requested_providers = tuple(dict.fromkeys(args.authorize_provider or ()))
     if requested_providers:
@@ -683,6 +700,7 @@ def command_init(args: argparse.Namespace) -> int:
                         "status": "updated" if providers_changed else "unchanged",
                         "registered": list(registered_providers),
                         "available": list(available_providers),
+                        "hardened": list(hardened_providers),
                         "authorized": list(config.authorized_providers or ()),
                         "inactive_available": [
                             name for name in available_providers if name not in (config.authorized_providers or ())
@@ -705,6 +723,11 @@ def command_init(args: argparse.Namespace) -> int:
         print(f"StageMesh setup needs attention at {runtime_dir(project)}{qualifier}")
     if configured_github_source:
         print("configured GitHub task source with safe issue classification")
+    if hardened_providers:
+        print(
+            "updated unsafe provider defaults saved by an older StageMesh release: "
+            + ", ".join(hardened_providers)
+        )
     if github_auth_source == "gh_cli":
         print("used the authenticated GitHub CLI for issue sync and bounded StageMesh label setup")
     if github_classification.status == "write_authorization_required":

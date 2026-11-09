@@ -32,6 +32,7 @@ def test_init_snapshots_discovered_providers_without_authorizing_or_invoking(
         "status": "updated",
         "registered": ["local-agent"],
         "available": ["local-agent"],
+        "hardened": [],
         "authorized": [],
         "inactive_available": ["local-agent"],
         "provider_calls": 0,
@@ -63,6 +64,93 @@ def test_init_preserves_an_existing_provider_registry_exactly(
     assert report["provider_registry"]["registered"] == ["my-agent"]
     assert report["provider_registry"]["available"] == []
     assert report["provider_registry"]["authorized"] == ["my-agent"]
+    assert json.loads(path.read_text(encoding="utf-8")) == original
+
+
+def test_init_migrates_only_exact_unsafe_bundled_defaults_without_provider_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / ".stagemesh/config.json"
+    path.parent.mkdir()
+    original = {
+        "providers": {
+            "codex": {
+                "command": "codex exec --sandbox workspace-write",
+                "capabilities": ["IMPLEMENT", "REVIEW"],
+            },
+            "claude": {
+                "command": (
+                    "claude -p --permission-mode acceptEdits --permission-prompts none "
+                    "--allowedTools 'Edit,Write,MultiEdit,Bash(git status*),Bash(git diff*),"
+                    "Bash(git log*),Bash(git show*),Bash(git rev-parse*),Bash(python *),"
+                    "Bash(pytest *),Bash(ruff *)'"
+                ),
+                "capabilities": ["IMPLEMENT", "REVIEW"],
+            },
+            "grok": {
+                "command": (
+                    "grok --permission-mode acceptEdits --always-approve --allow Edit --allow Write "
+                    "--allow MultiEdit --allow 'Bash(git status*)' --allow 'Bash(git diff*)' "
+                    "--allow 'Bash(git log*)' --allow 'Bash(git show*)' "
+                    "--allow 'Bash(git rev-parse*)' --allow 'Bash(python *)' "
+                    "--allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+                ),
+                "capabilities": ["IMPLEMENT", "REVIEW"],
+            },
+            "agy": {
+                "command": "agy --mode accept-edits",
+                "capabilities": ["IMPLEMENT", "REVIEW"],
+            },
+            "custom": {"command": "custom run --allow-browser", "capabilities": ["IMPLEMENT"]},
+        },
+        "authorization": {"unattended_providers": ["codex", "claude", "grok", "agy"]},
+    }
+    path.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "discovered_provider_entries", dict)
+
+    assert cli_module.main(["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]) == 0
+
+    report = json.loads(capsys.readouterr().out)["provider_registry"]
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert report["hardened"] == ["agy", "claude", "codex", "grok"]
+    assert data["providers"] == {
+        **original["providers"],
+        **{
+            name: {
+                **original["providers"][name],
+                "command": provider_catalog.PROVIDER_CATALOG[index].command,
+            }
+            for index, name in enumerate(("codex", "claude", "grok", "agy"))
+        },
+    }
+    assert data["authorization"] == original["authorization"]
+    assert "always-approve" not in data["providers"]["grok"]["command"]
+
+
+def test_init_preserves_customized_bundled_commands_and_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / ".stagemesh/config.json"
+    path.parent.mkdir()
+    original = {
+        "providers": {
+            "grok": {
+                "command": "grok --permission-mode acceptEdits --always-approve --custom-wrapper",
+                "capabilities": ["REVIEW"],
+            }
+        }
+    }
+    path.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "discovered_provider_entries", dict)
+
+    for _run in range(2):
+        assert cli_module.main(
+            ["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]
+        ) == 0
+        report = json.loads(capsys.readouterr().out)["provider_registry"]
+        assert report["status"] == "unchanged"
+        assert report["hardened"] == []
+
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 

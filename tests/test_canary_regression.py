@@ -316,7 +316,14 @@ def test_default_runtime_provider_commands_are_non_interactive(monkeypatch: pyte
 
     adapters = {adapter.name: adapter.command for adapter in approved_default_adapters()}
 
-    assert adapters["codex"] == ("codex", "exec", "--sandbox", "workspace-write")
+    assert adapters["codex"] == (
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--ignore-user-config",
+        "--ephemeral",
+    )
     assert adapters["claude"][:4] == ("claude", "-p", "--permission-mode", "acceptEdits")
     assert any("Edit,Write,MultiEdit" in part for part in adapters["claude"])
     assert not any("Bash(git *)" in part for part in adapters["claude"])
@@ -346,7 +353,14 @@ def test_legacy_builtin_provider_commands_are_upgraded_to_write_capable(tmp_path
 
     adapters = {adapter.name: adapter.command for adapter in adapters_from_config(load_config(project))}
 
-    assert adapters["codex"] == ("codex", "exec", "--sandbox", "workspace-write")
+    assert adapters["codex"] == (
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--ignore-user-config",
+        "--ephemeral",
+    )
     assert adapters["claude"][:4] == ("claude", "-p", "--permission-mode", "acceptEdits")
     assert not any("Bash(git *)" in part for part in adapters["claude"])
     assert any("Bash(git status*)" in part for part in adapters["claude"])
