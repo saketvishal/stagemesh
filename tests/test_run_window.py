@@ -247,6 +247,43 @@ def test_selection_reserves_continuation_resources_without_wasting_slots(tmp_pat
     assert all("conflicts with task 2" in deferred[t] for t in ("3", "5"))
 
 
+def test_window_materializes_plannable_contract_before_conflict_selection(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["9"])
+    contract = project / ".stagemesh/contracts/9.json"
+    contract.unlink()
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+
+    report = rw.run_window(
+        store,
+        project,
+        config,
+        options,
+        hooks,
+        base_ref="refs/heads/main",
+        staging_ref="refs/heads/wave/staging",
+        **kwargs,
+    )
+
+    assert report.ok and rig.runs == ["9"]
+    assert contract.is_file()
+    generated = [row for row in store.audit_events() if row["event_type"] == "contract.auto_generated"]
+    assert any(json.loads(row["payload"])["task_id"] == "9" for row in generated)
+    assert "9" not in report.not_selected
+
+
+def test_selection_preview_does_not_materialize_plannable_contract(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["9"])
+    contract = project / ".stagemesh/contracts/9.json"
+    contract.unlink()
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+
+    picked, skipped = rw.select_tasks(store, attempted=set(), limit=1, project=project)
+
+    assert picked == ["9"] and skipped == {}
+    assert not contract.exists()
+    assert all(row["event_type"] != "contract.auto_generated" for row in store.audit_events())
+
+
 @pytest.mark.parametrize("automatic", [False, True])
 def test_window_starts_five_compatible_workers_and_later_runs_deferred_tasks(tmp_path: Path, automatic: bool) -> None:
     import threading

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import outside_label_selector
+from .auto_plan import AutoPlanError, create_contract, outside_label_selector
 from .block_kinds import classify_block, reenter_blocked_task, reentry_refusal, runtime_fingerprint
 from .capabilities import CapabilityRegistryError, task_capability_summary
 from .concurrency import contract_conflict
@@ -367,6 +367,7 @@ def _task_source_reason(store: Store, task: Any, reason: str) -> str:
 def select_tasks(
     store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None,
     project: Path | None = None, compatible_with: list[str] | None = None, required_label: str | None = None,
+    materialize_contracts: bool = False,
 ) -> tuple[list[str], dict[str, str]]:
     """Up to `limit` runnable tasks (oldest first) and why the others were left alone.
 
@@ -383,21 +384,32 @@ def select_tasks(
     picked: list[str] = []
     if compatible_with is not None and project is None:
         raise ValueError("conflict-aware selection requires a project")
+    if materialize_contracts and project is None:
+        raise ValueError("contract materialization requires a project")
     contracts = {task_id: load_wave_contract(store, project, task_id) for task_id in (compatible_with or [])}
 
     def admit(task_id: str) -> bool:
-        if compatible_with is not None:
+        if materialize_contracts:
+            state = contract_state(store, project, task_id, auto_plan=True)
+            if state == "needs_auto_plan":
+                try:
+                    create_contract(store, project, task_id)
+                except AutoPlanError as exc:
+                    skipped[task_id] = f"auto_plan_failed: {exc.message}; next: {exc.next_action}"
+                    return False
+        if compatible_with is not None or materialize_contracts:
             try:
                 contract = load_wave_contract(store, project, task_id)
             except ContractError as exc:
                 skipped[task_id] = f"invalid_contract: {exc}"
                 return False
-            for other_id, other in contracts.items():
-                conflict = contract_conflict(contract, other)
-                if conflict is not None:
-                    skipped[task_id] = f"waiting for compatible slot: conflicts with task {other_id} ({conflict})"
-                    return False
-            contracts[task_id] = contract
+            if compatible_with is not None:
+                for other_id, other in contracts.items():
+                    conflict = contract_conflict(contract, other)
+                    if conflict is not None:
+                        skipped[task_id] = f"waiting for compatible slot: conflicts with task {other_id} ({conflict})"
+                        return False
+                contracts[task_id] = contract
         picked.append(task_id)
         return True
 
@@ -1194,7 +1206,7 @@ def run_window(
             # N queue entries that the wave would then have to serialize.
             continuing, deferred = select_tasks(
                 store, attempted=set(), limit=room, only=list(resume), fingerprint=fingerprint,
-                project=project, compatible_with=[], required_label=options.required_label,
+                project=project, compatible_with=[], required_label=options.required_label, materialize_contracts=True,
             )
             report.not_selected.update(deferred)
 
@@ -1225,6 +1237,7 @@ def run_window(
                     project=project,
                     compatible_with=continuing,
                     required_label=options.required_label,
+                    materialize_contracts=True,
                 )
                 if len(attempted) < options.max_tasks and room - len(continuing) > 0
                 else ([], {})
@@ -1268,6 +1281,7 @@ def run_window(
                 added, reasons = select_tasks(
                     store, attempted=attempted | set(resume) | set(fresh), limit=remaining,
                     only=options.tasks, fingerprint=fingerprint, project=project, required_label=options.required_label,
+                    materialize_contracts=True,
                 )
                 report.not_selected.update(reasons)
                 if options.auto_merge_ff:
