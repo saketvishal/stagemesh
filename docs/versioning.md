@@ -1,9 +1,10 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.11 isolates unattended Grok
-workers from unrelated capabilities in interactive agent homes.
-See the [0.6.11 release notes](releases/0.6.11.md),
+files as reinstallable package points. Version 0.6.12 enforces a bounded,
+headless tool surface for every built-in unattended provider invocation.
+See the [0.6.12 release notes](releases/0.6.12.md),
+[0.6.11 release notes](releases/0.6.11.md),
 [0.6.10 release notes](releases/0.6.10.md),
 [0.6.9 release notes](releases/0.6.9.md),
 [0.6.8 release notes](releases/0.6.8.md),
@@ -17,14 +18,14 @@ See the [0.6.11 release notes](releases/0.6.11.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.11` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.12` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.11
+python -m pip install --no-cache-dir stagemesh==0.6.12
 ```
 
-The preceding `0.6.10` release remains available for rollback. The older
+The preceding `0.6.11` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -33,6 +34,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.12`: invocation-time unattended provider tool and desktop isolation.
 - `0.6.11`: provider-home capability isolation for unattended Grok workers.
 - `0.6.10`: headless provider isolation from inherited desktop and browser session bridges.
 - `0.6.9`: provider-plugin discovery and activation reconciliation; StageMesh blocked-label cleanup.

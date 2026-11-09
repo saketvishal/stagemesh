@@ -244,7 +244,9 @@ def test_catalog_discovery_never_persists_command_environment_override(
 
     assert set(entries) == {"codex"}
     assert "SECRET_VALUE" not in str(entries)
-    assert entries["codex"]["command"] == "codex exec --sandbox workspace-write"
+    assert entries["codex"]["command"] == (
+        "codex exec --sandbox workspace-write --ignore-user-config --ephemeral"
+    )
 
 
 def test_catalog_discovers_an_independently_installed_provider_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
