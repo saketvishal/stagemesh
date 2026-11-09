@@ -193,6 +193,8 @@ def build_readiness(
         providers.append(
             {
                 "provider": name,
+                "authorized": config.authorized_providers is not None and name in config.authorized_providers,
+                "denied": None if adapter is None else adapter.denied,
                 "command_available": None if adapter is None else adapter.check_capacity() == "AVAILABLE",
                 "live_acceptance": live,
                 "cooldown": None
@@ -214,6 +216,34 @@ def build_readiness(
     data["attention"] = attention
     data["verdict"] = "attention" if attention else "ready"
     return data
+
+
+def format_provider_health(item: dict[str, Any]) -> str:
+    """Translate provider diagnostics into an operator-facing state and next action."""
+    name = str(item["provider"])
+    if not item.get("authorized"):
+        return f"{name}: installed but not active for unattended work; next: run `stagemesh init` and choose agents"
+    if item.get("command_available") is False:
+        return f"{name}: active, but its command was not found; next: install or repair the {name} CLI, then rerun `stagemesh init`"
+    if item.get("denied"):
+        return f"{name}: active but unavailable ({item['denied']})"
+    cooldown = item.get("cooldown")
+    if cooldown is not None:
+        return (
+            f"{name}: temporarily paused after {cooldown['failure_class']}; "
+            f"retry in {cooldown['seconds_remaining']}s or run `{cooldown['clear_command']}` after fixing the cause"
+        )
+    live = item["live_acceptance"]
+    state = live["state"]
+    if state == LIVE_PASSING:
+        age = "" if live["age_seconds"] is None else f"; verified {live['age_seconds'] / 3600:.1f}h ago"
+        return f"{name}: ready{age}"
+    if state == "missing":
+        return f"{name}: active and command found; first real task will verify sign-in and execution"
+    reason = str(live.get("reason") or state).split(": ", 1)[-1]
+    if state == "stale":
+        return f"{name}: active; previous live trial expired and will be repeated ({reason})"
+    return f"{name}: active but its last live trial failed ({reason})"
 
 
 def _duration(seconds: int) -> str:
@@ -313,11 +343,5 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
         f"a passing check stays fresh for {data['live_acceptance_ttl_seconds'] / 86400:g} days (routing.live_acceptance_ttl_seconds)"
     )
     for item in data["providers"]:
-        cooldown = item["cooldown"]
-        state = "ok" if cooldown is None else f"COOLING DOWN ({cooldown['failure_class']}, {cooldown['seconds_remaining']}s left; clear: {cooldown['clear_command']})"
-        live = item["live_acceptance"]
-        age = "" if live["age_seconds"] is None else f", checked {live['age_seconds'] / 3600:.1f}h ago"
-        command = {True: "available", False: "NOT FOUND", None: "unknown"}[item["command_available"]]
-        hint = "" if live["state"] == "passing" else f" ({live['reason'].split(': ', 1)[-1]})"
-        lines.append(f"provider {item['provider']}: {state}; command {command}; live check {live['state']}{age}{hint}")
+        lines.append("provider " + format_provider_health(item))
     return lines

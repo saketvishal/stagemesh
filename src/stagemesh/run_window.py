@@ -47,7 +47,7 @@ from .operator_actions import recover_stale
 from .persistence import Store
 from .queue_control import QueueStopControl
 from .queue_visibility import queue_control_report
-from .readiness import PrLister, build_readiness, gh_open_wave_prs
+from .readiness import PrLister, build_readiness, format_provider_health, gh_open_wave_prs
 from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .scheduling import Scheduler
@@ -1668,9 +1668,7 @@ def format_window_report(report: WindowReport) -> str:
     if ready.get("providers"):
         lines.append("provider health:")
         for item in ready["providers"]:
-            cooldown = item["cooldown"]
-            state = "ok" if cooldown is None else f"COOLING DOWN ({cooldown['failure_class']})"
-            lines.append(f"  {item['provider']}: {state}; command {'available' if item['command_available'] else 'NOT FOUND' if item['command_available'] is False else 'unknown'}; live check {item['live_acceptance']['state']}")
+            lines.append("  " + format_provider_health(item))
     if ready.get("ledger"):
         led = ready["ledger"]
         lines.append(

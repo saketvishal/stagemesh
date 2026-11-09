@@ -17,7 +17,25 @@ on:
         options: [full]
 
 jobs:
+  attribution:
+    name: Attribution policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Attribution and static range policy
+        env:
+          STAGEMESH_CI_EVENT: ${{ github.event_name }}
+          STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: python scripts/check_ci_range.py
+
   windows:
+    needs: attribution
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,12 +52,6 @@ jobs:
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: python scripts/ci_validation_plan.py --plan-file .stagemesh-ci-plan.json
-      - name: Attribution and static range policy
-        env:
-          STAGEMESH_CI_EVENT: ${{ github.event_name }}
-          STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-        run: python scripts/check_ci_range.py
       - run: python scripts/bootstrap_stagemesh.py --editable
       - name: Fail-closed repository quality gate
         env:
@@ -80,6 +92,7 @@ jobs:
           retention-days: 14
 
   linux:
+    needs: attribution
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,12 +109,6 @@ jobs:
           STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           STAGEMESH_CI_FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: python scripts/ci_validation_plan.py --plan-file .stagemesh-ci-plan.json
-      - name: Attribution and static range policy
-        env:
-          STAGEMESH_CI_EVENT: ${{ github.event_name }}
-          STAGEMESH_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          STAGEMESH_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-        run: python scripts/check_ci_range.py
       - run: python scripts/bootstrap_stagemesh.py --editable
       - name: Fail-closed repository quality gate
         env:

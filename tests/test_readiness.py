@@ -143,8 +143,38 @@ def test_provider_cooldowns_and_live_check_state_are_shown_per_provider(tmp_path
     assert by_name["codex"]["live_acceptance"]["state"] == "missing"  # never checked live: said so, not "ok"
     assert by_name["codex"]["command_available"] in (True, False)
     text = "\n".join(readiness.format_readiness(data))
-    assert "provider grok: COOLING DOWN (quota_rate_limit, 600s left; clear: stagemesh cooldown clear grok)" in text
+    assert "provider grok: installed but not active for unattended work" in text
     assert "provider grok is cooling down (quota_rate_limit)" in data["attention"]
+
+
+def test_provider_health_explains_inactive_and_untried_states() -> None:
+    inactive = {
+        "provider": "agy",
+        "authorized": False,
+        "denied": "not authorized",
+        "command_available": True,
+        "cooldown": None,
+        "live_acceptance": {"state": "missing", "age_seconds": None, "reason": "no check"},
+    }
+    active = {**inactive, "provider": "codex", "authorized": True, "denied": None}
+    cooling = {
+        **active,
+        "cooldown": {
+            "failure_class": "quota_rate_limit",
+            "seconds_remaining": 600,
+            "clear_command": "stagemesh cooldown clear codex",
+        },
+    }
+
+    assert readiness.format_provider_health(inactive) == (
+        "agy: installed but not active for unattended work; next: run `stagemesh init` and choose agents"
+    )
+    assert readiness.format_provider_health(active) == (
+        "codex: active and command found; first real task will verify sign-in and execution"
+    )
+    assert readiness.format_provider_health(cooling).startswith(
+        "codex: temporarily paused after quota_rate_limit; retry in 600s"
+    )
 
 
 def test_the_worktree_census_counts_a_plain_directory_as_other_not_as_a_dirty_worktree(tmp_path: Path) -> None:
