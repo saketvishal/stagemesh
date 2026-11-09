@@ -1,20 +1,21 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.0 adds the source-free public
-installation path and safe zero-config GitHub issue intake. See the
-[0.6.0 release notes](releases/0.6.0.md) and [PyPI publishing](pypi-publishing.md).
+files as reinstallable package points. Version 0.6.1 adds truthful initialization
+readiness, concise command discovery, and Windows deep-path package installation.
+See the [0.6.1 release notes](releases/0.6.1.md),
+[0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.0` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.1` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.0
+python -m pip install --no-cache-dir stagemesh==0.6.1
 ```
 
-Until then, verify the 0.5.0 GitHub release wheel against its `SHA256SUMS` and
-provenance manifest, or pin that annotated tag:
+The preceding `0.6.0` PyPI release remains available for rollback. The older
+0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
 python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.5.0"
@@ -22,8 +23,8 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
-- `0.6.1.dev0`: current development line; not a published release.
-- `0.6.0`: first PyPI release line and zero-config GitHub intake.
+- `0.6.1`: truthful init readiness, concise CLI discovery and Windows deep-path packaging.
+- `0.6.0`: first PyPI release line and zero-config GitHub intake; retained rollback release.
 - `0.5.0`: release line for operator visibility, scoped selection and reliability.
 - `v0.4.0`: previous published release and retained rollback package.
 - `v0.3.0`: focused-reading and relevant-test defaults.
