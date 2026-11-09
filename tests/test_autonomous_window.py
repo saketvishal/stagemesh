@@ -391,5 +391,8 @@ def test_a_recoverable_block_whose_source_issue_was_closed_is_not_picked_or_re_e
 
     picked, skipped = rw.select_tasks(store, attempted=set(), limit=5, fingerprint="new")
 
-    assert picked == [] and skipped["155"] == "source closed"
+    assert picked == []
+    assert skipped["155"] == (
+        "GitHub issue is closed; next: reopen it only if the work is still required, then rerun stagemesh init"
+    )
     assert reentries_used(store, "155") == 0
