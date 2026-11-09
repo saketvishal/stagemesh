@@ -98,7 +98,8 @@ def test_selection_picks_only_runnable_tasks_and_never_blocked_parked_or_claimed
 
     assert picked == ["2", "10"]  # numeric order: oldest first
     assert "T-blocked" not in skipped and "T-done" not in skipped  # blocked work is never news in automatic mode
-    assert skipped["T-parked"] == "source no longer eligible" or "eligible" in skipped["T-parked"]
+    assert "outside the configured task-source policy" in skipped["T-parked"]
+    assert "next: inspect its labels" in skipped["T-parked"]
     assert "T-claimed" in skipped
     assert rw.select_tasks(store, attempted={"2"}, limit=1)[0] == ["10"]  # a task attempted this window is not retried
     _, named = rw.select_tasks(store, attempted=set(), limit=10, only=["T-blocked", "T-nope"])
@@ -118,6 +119,98 @@ def test_named_ineligible_github_issue_reports_source_reason(tmp_path: Path) -> 
 
     assert picked == []
     assert skipped == {"298": "GitHub issue is not runnable: blocked by label: stagemesh:deferred"}
+
+
+def test_window_explains_missing_github_label_and_the_next_action(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["9", "10"])
+    for task_id in ("9", "10"):
+        with store.conn:
+            store.conn.execute(
+                "UPDATE tasks SET source='github', source_id=?, status='BLOCKED' WHERE id=?",
+                (task_id, task_id),
+            )
+        store.cache_source(
+            "github",
+            task_id,
+            {
+                "state": "OPEN",
+                "eligible": False,
+                "eligibility_reason": "missing required label(s): stagemesh:ready",
+            },
+            "OPEN",
+        )
+
+    report = rw.run_window(
+        store,
+        project,
+        config,
+        options,
+        hooks,
+        base_ref="refs/heads/main",
+        staging_ref="refs/heads/wave/staging",
+        **kwargs,
+    )
+
+    rendered = rw.format_window_report(report)
+    assert report.ok and rig.runs == []
+    assert "9, 10 (GitHub issue is open but missing required label(s): stagemesh:ready" in rendered
+    assert "add stagemesh:ready after confirming the issue is executable" in rendered
+    assert report.next_command.startswith("add stagemesh:ready")
+    assert "nothing to do: no eligible work left" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "expected"),
+    [
+        ({}, "source synchronization incomplete", "rerun stagemesh init"),
+        ({}, "source closed", "reopen it only if the work is still required"),
+        ({"eligibility_reason": "has excluded label(s): wontfix"}, "source no longer eligible", "remove the excluded label"),
+        ({"eligibility_reason": "blocked by label: stagemesh:deferred"}, "source no longer eligible", "remove the blocking label"),
+        ({"eligibility_reason": "source objective root"}, "source no longer eligible", "create or select executable child issues"),
+        (
+            {"eligibility_reason": "source validation failed: unknown dependency issue(s): #404"},
+            "source no longer eligible",
+            "correct its labels or dependencies",
+        ),
+        ({}, "source no longer eligible", "inspect its labels and the task-source selector"),
+    ],
+)
+def test_source_refusal_guidance_covers_each_admission_condition(
+    state: dict[str, object], reason: str, expected: str
+) -> None:
+    assert expected in rw._actionable_source_reason(state, reason)
+
+
+def test_window_with_different_ineligible_causes_points_to_each_listed_action(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["9", "10"])
+    states = {
+        "9": {"state": "OPEN", "eligible": False, "eligibility_reason": "missing required label(s): stagemesh:ready"},
+        "10": {"state": "CLOSED", "eligible": False},
+    }
+    for task_id, state in states.items():
+        with store.conn:
+            store.conn.execute(
+                "UPDATE tasks SET source='github', source_id=?, status='BLOCKED' WHERE id=?",
+                (task_id, task_id),
+            )
+        store.cache_source("github", task_id, state, str(state["state"]))
+
+    report = rw.run_window(
+        store,
+        project,
+        config,
+        options,
+        hooks,
+        base_ref="refs/heads/main",
+        staging_ref="refs/heads/wave/staging",
+        **kwargs,
+    )
+
+    rendered = rw.format_window_report(report)
+    assert report.ok and rig.runs == []
+    assert "9 (GitHub issue is open but missing required label" in rendered
+    assert "10 (GitHub issue is closed" in rendered
+    assert report.next_command == "review the left-alone reasons above and complete each listed next action"
 
 
 def _overlapping_prefix(project: Path, *, files: bool = False) -> None:
