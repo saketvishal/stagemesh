@@ -7,6 +7,7 @@ import platform
 import re
 import shlex
 import sqlite3
+import subprocess
 import sys
 import threading
 import uuid
@@ -115,7 +116,7 @@ from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
 from .profile import ProfileError, load_profile
-from .profile_default import ensure_profile, is_placeholder
+from .profile_default import ensure_profile, is_placeholder, suggested_test_command
 from .provider_acceptance import (
     _latest_live_acceptance_payload,
     live_acceptance_status,
@@ -274,6 +275,141 @@ def _ensure_provider_registry(project: Path) -> tuple[bool, tuple[str, ...]]:
     return True, tuple(sorted(providers))
 
 
+def _split_setup_command(raw: str) -> tuple[str, ...]:
+    """Split a user-confirmed command without treating shell operators as executable syntax."""
+    try:
+        parts = shlex.split(raw, posix=False)
+    except ValueError as exc:
+        raise ConfigValidationError(f"--test-command is not valid: {exc}") from exc
+    cleaned = tuple(
+        part[1:-1] if len(part) >= 2 and part[0] == part[-1] and part[0] in {"'", '"'} else part
+        for part in parts
+    )
+    if not cleaned or any(not part for part in cleaned):
+        raise ConfigValidationError("--test-command must contain an executable command")
+    return cleaned
+
+
+def _format_setup_command(command: tuple[str, ...]) -> str:
+    return subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+
+
+def _write_provider_authorization(project: Path, requested: tuple[str, ...]) -> tuple[str, ...]:
+    """Add explicitly selected providers to the project allowlist without changing its registry or routing policy."""
+    config_path = runtime_dir(project) / "config.json"
+    try:
+        original = config_path.read_bytes()
+        data = json.loads(original.decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ConfigValidationError("config file must be valid JSON") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("providers"), dict):
+        raise ConfigValidationError("provider registry must be initialized before authorization")
+    known = tuple(str(name) for name in data["providers"])
+    unknown = sorted(set(requested) - set(known))
+    if unknown:
+        raise ConfigValidationError(
+            f"cannot authorize provider(s) not detected in this project: {', '.join(unknown)}; detected: {', '.join(known) or 'none'}"
+        )
+    section = data.get("authorization", {})
+    if not isinstance(section, dict):
+        raise ConfigValidationError("authorization must be an object")
+    existing = section.get("unattended_providers", [])
+    if existing and (not isinstance(existing, list) or not all(isinstance(name, str) for name in existing)):
+        raise ConfigValidationError("authorization.unattended_providers must be a list of provider names")
+    names = tuple(dict.fromkeys([*(str(name) for name in existing), *requested]))
+    if not names:
+        return ()
+    section["unattended_providers"] = list(names)
+    data["authorization"] = section
+    tmp = config_path.with_name(f".config.json.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        if config_path.read_bytes() != original:
+            raise ConfigValidationError("config changed during provider authorization; rerun `stagemesh init`")
+        os.replace(tmp, config_path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return names
+
+
+def _interactive_init(args: argparse.Namespace) -> bool:
+    return not args.json and bool(sys.stdin) and sys.stdin.isatty()
+
+
+def _prompt_provider_authorization(project: Path, registered: tuple[str, ...]) -> tuple[str, ...]:
+    """Explain and collect unattended-provider consent. Login probes make no model call."""
+    if not registered:
+        return ()
+    from . import provider_auth
+
+    report = provider_auth.check(tuple(name for name in registered if name in provider_auth.PROVIDERS))
+    states = {str(item["provider"]): item for item in report["providers"]}
+    print("\nCoding-agent authorization")
+    print("StageMesh needs permission to start selected coding agents without asking again for every task.")
+    print("This permits project edits through the configured agent commands; StageMesh still enforces project scope and review policy.")
+    for number, name in enumerate(registered, start=1):
+        state = states.get(name)
+        detail = (
+            f"login: {state['auth_mode']}" + (" subscription" if state["subscription"] else "")
+            if state
+            else "login check unavailable; verify this agent before authorizing it"
+        )
+        print(f"  {number}. {name} ({detail})")
+    if report["api_billing_environment"]:
+        print("  warning: API-billing environment variables are present; subscription-only use is not verified")
+    print("Independent review normally needs at least two distinct authorized agents.")
+    recommended = (
+        tuple(name for name in registered if states.get(name, {}).get("subscription"))
+        if not report["api_billing_environment"]
+        else ()
+    )
+    recommendation = f"verified subscription agents {', '.join(recommended)}" if recommended else "selected agents"
+    try:
+        answer = input(
+            f"Authorize {recommendation}? [y/N, or enter names/numbers separated by commas]: "
+        ).strip()
+    except EOFError:
+        return ()
+    if not answer:
+        return ()
+    if answer.casefold() in {"y", "yes"}:
+        if not recommended:
+            print("authorization not saved: no subscription login could be verified; enter explicit agent names after checking them")
+            return ()
+        return _write_provider_authorization(project, recommended)
+    selected: list[str] = []
+    for token in (part.strip() for part in answer.split(",")):
+        name = registered[int(token) - 1] if token.isdigit() and 1 <= int(token) <= len(registered) else token
+        if name not in registered:
+            print(f"authorization not saved: {token!r} is not one of the detected agents")
+            return ()
+        selected.append(name)
+    return _write_provider_authorization(project, tuple(selected))
+
+
+def _prompt_test_command(project: Path) -> tuple[str, ...] | None:
+    suggestion = suggested_test_command(project)
+    print("\nProject validation")
+    if suggestion is not None:
+        shown = _format_setup_command(suggestion)
+        print(f"StageMesh found test files but no test configuration. Suggested command: {shown}")
+        print("StageMesh will record this command but will not run it during setup. Confirm only if it is the project's normal safe test command.")
+        try:
+            answer = input("Use this validation command? [y/N]: ").strip().casefold()
+        except EOFError:
+            return None
+        if answer in {"y", "yes"}:
+            return suggestion
+    else:
+        print("StageMesh could not safely detect a project test command.")
+        print("Examples: python -m pytest -q, npm test, cargo test, or go test ./...")
+    try:
+        custom = input("Enter the command your team normally uses to test this project (Enter to leave setup incomplete): ").strip()
+    except EOFError:
+        return None
+    return _split_setup_command(custom) if custom else None
+
+
 def _missing_github_task_source_check(config, project: Path) -> dict[str, object] | None:
     if not (config.github.owner and config.github.repo):
         return None
@@ -331,11 +467,19 @@ def _init_readiness(
         if profile is not None and real_gates
         else "no project test configuration was detected; `git diff --check` alone cannot validate development work"
     )
+    suggested = suggested_test_command(project)
+    gate_fix = (
+        f"confirm the detected test command with `stagemesh init --test-command \"{_format_setup_command(suggested)}\"`, "
+        "or rerun `stagemesh init` in a terminal and accept the setup prompt"
+        if suggested
+        else "rerun `stagemesh init --test-command \"<the command your team normally uses to test this project>\"`; "
+        "StageMesh will create the profile safely"
+    )
     add(
         "validation_gates",
         real_gates,
         gate_detail,
-        "add a conventional test configuration or explicit gates to .stagemesh/profile.json, then rerun `stagemesh init`",
+        gate_fix,
     )
     add(
         "provider_registry",
@@ -380,7 +524,13 @@ def _init_readiness(
                 else "no available provider is explicitly authorized for implementation"
             )
         ),
-        "install and authorize enough distinct providers in authorization.unattended_providers, or explicitly change the review policy",
+        (
+            "rerun `stagemesh init` in a terminal to choose from detected agents "
+            f"({', '.join(registered_providers)}), or pass `--authorize-provider NAME` once per agent; "
+            "independent review needs two distinct agents"
+            if registered_providers
+            else "install at least one coding-agent CLI, then rerun `stagemesh init`"
+        ),
     )
     from .baseline import resolve_integration_ref
     from .run_window import INTEGRATION_PR, repository_preflight_checks
@@ -427,6 +577,11 @@ def command_init(args: argparse.Namespace) -> int:
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
     configured_github_source = _ensure_default_github_task_source(project)
     initialized_providers, registered_providers = _ensure_provider_registry(project)
+    requested_providers = tuple(dict.fromkeys(args.authorize_provider or ()))
+    if requested_providers:
+        _write_provider_authorization(project, requested_providers)
+    elif _interactive_init(args) and load_config(project).authorized_providers is None:
+        _prompt_provider_authorization(project, registered_providers)
     store = Store(db_path(project))
     store.migrate()
     if args.task:
@@ -439,7 +594,14 @@ def command_init(args: argparse.Namespace) -> int:
         source_sync = {"status": "deferred", "error_type": type(exc).__name__[:80]}
     schema_version = store.schema_version()
     store.close()
-    profile_status, profile_detail = ensure_profile(project)
+    requested_test_command = _split_setup_command(args.test_command) if args.test_command else None
+    profile_status, profile_detail = ensure_profile(project, requested_test_command)
+    if requested_test_command is None and _interactive_init(args):
+        profile = load_profile(project) if profile_status != "invalid" else None
+        if profile is not None and is_placeholder(profile):
+            confirmed = _prompt_test_command(project)
+            if confirmed:
+                profile_status, profile_detail = ensure_profile(project, confirmed)
     github_classification = GitHubBootstrapResult("source_sync_deferred")
     if source_sync["status"] == "synced":
         store = Store(db_path(project))
@@ -524,6 +686,8 @@ def command_init(args: argparse.Namespace) -> int:
         print(f"initialized provider registry (registered: {names}; authorized: {authorized}; provider calls: 0)")
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
+    elif profile_status == "configured":
+        print(f"configured project validation in {profile_detail}")
     if readiness["status"] != "ready":
         print("readiness blockers:")
         for blocker in readiness["blockers"]:
@@ -3301,6 +3465,44 @@ def command_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_validation_bootstrap(args: argparse.Namespace) -> int:
+    """Run a fixed Python unittest discovery gate and refuse a zero-test success."""
+    import unittest
+
+    project = Path(args.project).resolve()
+    tests = project / "tests"
+    if not tests.is_dir():
+        print(
+            "validation bootstrap failed: add at least one unittest-compatible test under tests/; "
+            "the first implementation cannot complete with zero tests",
+            file=sys.stderr,
+        )
+        return 2
+    project_path = str(project)
+    inserted = project_path not in sys.path
+    if inserted:
+        sys.path.insert(0, project_path)
+    try:
+        suite = unittest.TestLoader().discover(str(tests), pattern="test*.py")
+    except (ImportError, OSError, ValueError) as exc:
+        print(f"validation bootstrap failed: test discovery could not start ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return 2
+    finally:
+        if inserted:
+            sys.path.remove(project_path)
+    count = suite.countTestCases()
+    if count < 1:
+        print(
+            "validation bootstrap failed: no unittest-compatible tests were discovered under tests/; "
+            "add a TestCase before completing this implementation",
+            file=sys.stderr,
+        )
+        return 2
+    print(f"validation bootstrap: running {count} discovered test(s)")
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
 def command_recover_stale(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -5468,6 +5670,16 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--register", action="store_true")
     init.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
     init.add_argument(
+        "--test-command",
+        help="Safely create or replace only the generated placeholder profile with this explicitly confirmed test command",
+    )
+    init.add_argument(
+        "--authorize-provider",
+        action="append",
+        metavar="NAME",
+        help="Authorize one detected coding agent for unattended project work; repeat for additional agents",
+    )
+    init.add_argument(
         "--allow-incomplete",
         action="store_true",
         help="Create setup files but return success even when readiness blockers remain; never claims the project is ready",
@@ -5996,6 +6208,8 @@ def build_parser() -> argparse.ArgumentParser:
     profile_cmd.add_argument("--task", help="Task id to explain (read-only)")
     profile_cmd.add_argument("--json", action="store_true")
     profile_cmd.set_defaults(func=command_profile)
+    validation_bootstrap = sub.add_parser("validation-bootstrap", help=argparse.SUPPRESS)
+    validation_bootstrap.set_defaults(func=command_validation_bootstrap)
     recover = sub.add_parser("recover-stale", help="Release stale claims/executions whose process is provably dead (--release-unknown for an inspected unknown one)")
     recover.add_argument("--task", required=True)
     recover.add_argument(

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,11 @@ from .profile import PROFILE_FILE, ProfileError, load_profile, parse_profile, pr
 FORBIDDEN_FILES = (*AUTO_PLAN_FORBIDDEN, "*.sqlite", "*.sqlite3", "*.db", ".venv/**", "**/node_modules/**", "**/__pycache__/**")
 PLACEHOLDER_GATE = "default-acceptance-diff-check"  # project-smoke warns while this is the only gate
 _FALLBACK_GATE = {"name": PLACEHOLDER_GATE, "command": ["git", "diff", "--check"], "timeout_seconds": 120}
+_PYTHON_BOOTSTRAP_GATE = {
+    "name": "project-acceptance-python-bootstrap",
+    "command": ["stagemesh", "validation-bootstrap"],
+    "timeout_seconds": 1800,
+}
 
 
 def _gate_id(name: str) -> str:
@@ -41,14 +47,63 @@ def is_placeholder(profile: Any) -> bool:
     return {_gate_id(PLACEHOLDER_GATE)} == set(profile.gates)
 
 
-def default_profile(project: Path) -> dict[str, Any]:
-    detected = [_argv(g) for g in detect_gates(project)]
+def suggested_test_command(project: Path) -> tuple[str, ...] | None:
+    """A reviewable suggestion for projects that have test files but no conventional test configuration.
+
+    The suggestion is never persisted or executed without explicit operator confirmation. A single direct Python test script is
+    safer to suggest than inventing a framework dependency; multiple pytest-shaped files get the conventional pytest command.
+    """
+    tests = project / "tests"
+    if not tests.is_dir() or tests.is_symlink():
+        return None
+    candidates = sorted(
+        path
+        for pattern in ("test_*.py", "*_test.py")
+        for path in tests.glob(pattern)
+        if path.is_file() and not path.is_symlink()
+    )
+    unique = list(dict.fromkeys(candidates))
+    if len(unique) == 1:
+        return ("python", unique[0].relative_to(project).as_posix())
+    if unique:
+        return ("python", "-m", "pytest", "-q")
+    return None
+
+
+def _python_project_needs_test_bootstrap(project: Path) -> bool:
+    """Recognize Python source without walking private/dependency trees; the fixed gate, not init, runs candidate tests."""
+    if any(path.is_file() and not path.is_symlink() for path in project.glob("*.py")):
+        return True
+    ignored = {".git", ".stagemesh", ".venv", "venv", "node_modules", "dist", "build"}
+    try:
+        children = tuple(project.iterdir())
+    except OSError:
+        return False
+    return any(
+        any(path.is_file() and not path.is_symlink() for path in child.glob("*.py"))
+        for child in children
+        if child.name not in ignored and child.is_dir() and not child.is_symlink()
+    )
+
+
+def default_profile(project: Path, test_command: Sequence[str] | None = None) -> dict[str, Any]:
+    explicit = [str(part) for part in test_command or () if str(part)]
+    detected = [{"name": "project-acceptance-user", "command": explicit, "timeout_seconds": 1800}] if explicit else [
+        _argv(g) for g in detect_gates(project)
+    ]
+    bootstrap = not detected and _python_project_needs_test_bootstrap(project)
+    if bootstrap:
+        detected = [dict(_PYTHON_BOOTSTRAP_GATE)]
     gates = list(detected)
     if not any("acceptance" in g["name"].casefold() for g in gates):
         gates.append(dict(_FALLBACK_GATE))  # a `full` task type needs a broad gate; detected gates (e.g. a narrow smoke) may not be one
     ids = {_gate_id(g["name"]): g for g in gates}
     summary = (
-        "Generated default: runs the gates detected at the project root."
+        "Generated default: runs the explicitly confirmed project test command."
+        if explicit
+        else "Generated default: the first implementation must add at least one passing Python unittest under tests/."
+        if bootstrap
+        else "Generated default: runs the gates detected at the project root."
         if detected
         else "Generated default: no test gate was detected, so this only runs `git diff --check`; add real gates to .stagemesh/profile.json."
     )
@@ -64,20 +119,35 @@ def default_profile(project: Path) -> dict[str, Any]:
     }
 
 
-def ensure_profile(project: Path) -> tuple[str, str]:
-    """('kept' | 'created' | 'invalid', detail). Never overwrites or repairs an existing profile file."""
+def ensure_profile(project: Path, test_command: Sequence[str] | None = None) -> tuple[str, str]:
+    """Create a profile or replace only StageMesh's exact placeholder after explicit test-command confirmation."""
     path = profile_path(project)
     if path.exists():
         if not path.is_file():
             return "invalid", f"{PROFILE_FILE} exists but is not a file and was left unchanged"
         try:
-            load_profile(project)
+            existing = load_profile(project)
         except ProfileError as exc:
             return "invalid", f"{PROFILE_FILE} exists but is not usable and was left unchanged: {exc}"
+        if test_command and existing is not None and is_placeholder(existing):
+            tmp = path.with_name(f".profile.json.{os.getpid()}.tmp")
+            try:
+                original = path.read_bytes()
+                payload = default_profile(project, test_command)
+                parse_profile(payload)
+                tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+                if path.read_bytes() != original:
+                    return "kept", str(path)
+                os.replace(tmp, path)
+                return "configured", str(path)
+            except (OSError, ProfileError) as exc:
+                return "invalid", f"could not configure {PROFILE_FILE}: {exc}"
+            finally:
+                tmp.unlink(missing_ok=True)
         return "kept", str(path)
     tmp = path.with_name(f".profile.json.{os.getpid()}.tmp")
     try:
-        payload = default_profile(project)
+        payload = default_profile(project, test_command)
         parse_profile(payload)  # never write a profile this version would reject
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

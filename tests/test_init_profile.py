@@ -6,12 +6,13 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_survivor_wave import _git, _with_origin
 
 from stagemesh.cli import main
-from stagemesh.profile import load_profile, profile_path
+from stagemesh.profile import TypeDecision, build_contract, load_profile, profile_path
 
 
 def _init(project: Path, capsys, *, strict: bool = False) -> tuple[int, str, str]:
@@ -58,6 +59,34 @@ def test_default_profile_uses_detected_root_gates(tmp_path: Path, capsys) -> Non
     _init(tmp_path, capsys)
     profile = load_profile(tmp_path)
     assert any(g["command"][:3] == ["python", "-m", "pytest"] for g in profile.gates.values())
+
+
+def test_python_project_without_tests_gets_first_task_bootstrap_gate(tmp_path: Path, capsys) -> None:
+    (tmp_path / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    code, _, _ = _init(tmp_path, capsys)
+
+    assert code == 0
+    profile = load_profile(tmp_path)
+    assert profile is not None
+    assert [gate["command"] for gate in profile.gates.values()] == [["stagemesh", "validation-bootstrap"]]
+    contract = build_contract(profile, TypeDecision("default", "default", ()), "Implement feature", "1", "test")
+    assert any("standard-library unittest" in criterion for criterion in contract["acceptance_criteria"])
+    assert main(["--project", str(tmp_path), "validation-bootstrap"]) == 2
+    assert "first implementation cannot complete with zero tests" in capsys.readouterr().err
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_app.py").write_text(
+        "import unittest\n\n"
+        "from app import answer\n\n"
+        "class AppTest(unittest.TestCase):\n"
+        "    def test_answer(self):\n"
+        "        self.assertEqual(answer(), 42)\n",
+        encoding="utf-8",
+    )
+    assert main(["--project", str(tmp_path), "validation-bootstrap"]) == 0
+    assert "running 1 discovered test" in capsys.readouterr().out
 
 
 def test_existing_project_without_profile_gets_one_and_keeps_state(tmp_path: Path, capsys) -> None:
@@ -143,9 +172,95 @@ def test_project_smoke_passes_for_every_detected_gate_kind(tmp_path: Path, capsy
 def test_placeholder_gate_is_called_out(tmp_path: Path, capsys) -> None:
     _, out, _ = _init(tmp_path, capsys)
     assert "validation_gates: no project test configuration was detected" in out
+    assert 'stagemesh init --test-command "<the command your team normally uses to test this project>"' in out
     main(["--project", str(tmp_path), "project-smoke", "--json"])
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
     assert checks["validation gates are real"]["status"] == "warn"
+
+
+def test_init_test_command_replaces_only_generated_placeholder(tmp_path: Path, capsys) -> None:
+    _init(tmp_path, capsys)
+
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "init",
+            "--test-command",
+            "python tests/test_project.py",
+            "--allow-incomplete",
+        ]
+    ) == 0
+
+    profile = load_profile(tmp_path)
+    assert profile is not None and profile.default_type != ""
+    assert [gate["command"] for gate in profile.gates.values()] == [["python", "tests/test_project.py"]]
+    assert "configured project validation" in capsys.readouterr().out
+
+    before = profile_path(tmp_path).read_bytes()
+    assert main(
+        [
+            "--project",
+            str(tmp_path),
+            "init",
+            "--test-command",
+            "python destructive.py",
+            "--allow-incomplete",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert profile_path(tmp_path).read_bytes() == before
+
+
+def test_interactive_init_collects_provider_choices_and_bootstraps_python_tests(tmp_path: Path, monkeypatch, capsys) -> None:
+    import builtins
+
+    import stagemesh.cli as cli_module
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_project.py").write_text("print('ok')\n", encoding="utf-8")
+    executable = f'"{sys.executable}"'
+    monkeypatch.setattr(
+        cli_module,
+        "discovered_provider_entries",
+        lambda: {
+            "agent-one": {"command": executable, "capabilities": ["IMPLEMENT", "REVIEW"]},
+            "agent-two": {"command": executable, "capabilities": ["IMPLEMENT", "REVIEW"]},
+        },
+    )
+    monkeypatch.setattr(cli_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    answers = iter(["1,2"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(answers))
+
+    assert main(["--project", str(tmp_path), "init", "--allow-incomplete"]) == 0
+
+    config = json.loads((tmp_path / ".stagemesh/config.json").read_text(encoding="utf-8"))
+    assert config["authorization"]["unattended_providers"] == ["agent-one", "agent-two"]
+    profile = load_profile(tmp_path)
+    assert profile is not None
+    assert [gate["command"] for gate in profile.gates.values()] == [["stagemesh", "validation-bootstrap"]]
+    output = capsys.readouterr().out
+    assert "Coding-agent authorization" in output and "Project validation" not in output
+
+
+def test_interactive_init_accepts_custom_test_command_when_nothing_is_detected(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import builtins
+
+    import stagemesh.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "discovered_provider_entries", dict)
+    monkeypatch.setattr(cli_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "python scripts/project_smoke.py")
+
+    assert main(["--project", str(tmp_path), "init", "--allow-incomplete"]) == 0
+
+    profile = load_profile(tmp_path)
+    assert profile is not None
+    assert [gate["command"] for gate in profile.gates.values()] == [["python", "scripts/project_smoke.py"]]
+    assert "could not safely detect" in capsys.readouterr().out
 
 
 def test_init_does_not_claim_success_when_readiness_blockers_remain(tmp_path: Path, capsys) -> None:
@@ -222,7 +337,7 @@ def test_init_refuses_ready_when_default_pr_window_would_refuse_repository(tmp_p
     assert "git pull cannot remove local-only commits" in repo["detail"]
 
 
-def test_tests_directory_without_safe_test_configuration_is_reported_during_init(tmp_path: Path, capsys) -> None:
+def test_python_tests_without_configuration_get_bootstrap_without_running_during_init(tmp_path: Path, capsys) -> None:
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "test_database_pipeline.py").write_text("raise SystemExit('requires a live database')\n", encoding="utf-8")
@@ -232,9 +347,12 @@ def test_tests_directory_without_safe_test_configuration_is_reported_during_init
 
     assert main(["--project", str(tmp_path), "init", "--json"]) == 2
     report = json.loads(capsys.readouterr().out)
-    validation = next(item for item in report["readiness"]["blockers"] if item["name"] == "validation_gates")
-    assert "no project test configuration was detected" in validation["detail"]
-    assert "test_database_pipeline.py" not in str(report)  # init never guesses or runs an unsafe standalone test
+    validation = next(item for item in report["readiness"]["checks"] if item["name"] == "validation_gates")
+    assert validation["status"] == "ready"
+    profile = load_profile(tmp_path)
+    assert profile is not None and [gate["command"] for gate in profile.gates.values()] == [
+        ["stagemesh", "validation-bootstrap"]
+    ]
 
 
 def test_init_accepts_distinct_available_implementation_and_review_providers(tmp_path: Path, capsys) -> None:
