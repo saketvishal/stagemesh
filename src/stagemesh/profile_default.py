@@ -120,7 +120,7 @@ def default_profile(project: Path, test_command: Sequence[str] | None = None) ->
 
 
 def ensure_profile(project: Path, test_command: Sequence[str] | None = None) -> tuple[str, str]:
-    """Create a profile or replace only StageMesh's exact placeholder after explicit test-command confirmation."""
+    """Create a profile or upgrade only StageMesh's exact placeholder when a real gate becomes available."""
     path = profile_path(project)
     if path.exists():
         if not path.is_file():
@@ -129,12 +129,14 @@ def ensure_profile(project: Path, test_command: Sequence[str] | None = None) -> 
             existing = load_profile(project)
         except ProfileError as exc:
             return "invalid", f"{PROFILE_FILE} exists but is not usable and was left unchanged: {exc}"
-        if test_command and existing is not None and is_placeholder(existing):
+        if existing is not None and is_placeholder(existing):
             tmp = path.with_name(f".profile.json.{os.getpid()}.tmp")
             try:
                 original = path.read_bytes()
                 payload = default_profile(project, test_command)
-                parse_profile(payload)
+                replacement = parse_profile(payload)
+                if is_placeholder(replacement):
+                    return "kept", str(path)
                 tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
                 if path.read_bytes() != original:
                     return "kept", str(path)

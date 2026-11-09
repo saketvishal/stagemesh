@@ -16,6 +16,7 @@ Most users do not need to write this JSON. `stagemesh init` detects conventional
 projects the fixed first-task bootstrap gate, and asks for the team's command only for an unknown stack. For non-interactive setup, run
 `stagemesh init --test-command "python -m pytest -q"` (substitute the project's real command). StageMesh creates or replaces
 only its own generated placeholder profile; it never overwrites an existing real profile, and it does not run the command during setup.
+Rerunning init also upgrades that exact generated placeholder automatically when the repository has since gained a safely detected gate.
 For a Python repository without recognized test configuration, init instead creates a fixed bootstrap profile. Work may start, but
 `stagemesh validation-bootstrap` rejects zero tests and runs standard-library `unittest` discovery, so the first candidate must add or
 retain a passing `tests/test*.py` test before it can satisfy validation.

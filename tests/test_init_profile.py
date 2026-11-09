@@ -131,6 +131,23 @@ def test_init_is_idempotent(tmp_path: Path, capsys) -> None:
     assert list((tmp_path / ".stagemesh").glob(".profile.json.*")) == []  # no temp leftovers
 
 
+def test_rerun_upgrades_generated_placeholder_when_python_source_appears(tmp_path: Path, capsys) -> None:
+    _init(tmp_path, capsys)
+    placeholder = load_profile(tmp_path)
+    assert placeholder is not None and [gate["command"] for gate in placeholder.gates.values()] == [
+        ["git", "diff", "--check"]
+    ]
+    (tmp_path / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    code, out, _ = _init(tmp_path, capsys)
+
+    assert code == 0 and "configured project validation" in out
+    upgraded = load_profile(tmp_path)
+    assert upgraded is not None and [gate["command"] for gate in upgraded.gates.values()] == [
+        ["stagemesh", "validation-bootstrap"]
+    ]
+
+
 def test_project_smoke_passes_after_init(tmp_path: Path, capsys) -> None:
     _init(tmp_path, capsys)
     code = main(["--project", str(tmp_path), "project-smoke", "--json"])
@@ -261,6 +278,26 @@ def test_interactive_init_accepts_custom_test_command_when_nothing_is_detected(
     assert profile is not None
     assert [gate["command"] for gate in profile.gates.values()] == [["python", "scripts/project_smoke.py"]]
     assert "could not safely detect" in capsys.readouterr().out
+
+
+def test_interactive_init_offers_validation_bootstrap_when_nothing_is_detected(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import builtins
+
+    import stagemesh.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "discovered_provider_entries", dict)
+    monkeypatch.setattr(cli_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "1")
+
+    assert main(["--project", str(tmp_path), "init", "--allow-incomplete"]) == 0
+
+    profile = load_profile(tmp_path)
+    assert profile is not None
+    assert [gate["command"] for gate in profile.gates.values()] == [["stagemesh", "validation-bootstrap"]]
+    output = capsys.readouterr().out
+    assert "Let StageMesh add basic Python unittest validation with the first task" in output
 
 
 def test_init_does_not_claim_success_when_readiness_blockers_remain(tmp_path: Path, capsys) -> None:
