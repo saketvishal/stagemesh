@@ -525,7 +525,7 @@ def test_runtime_records_redacted_observed_load_receipt_before_candidate(
     monkeypatch.setattr(providers, "remediation_context", lambda *_: None)
     monkeypatch.setattr(providers, "_provider_budget_refusal", lambda *_: None)
     monkeypatch.setattr(providers, "_authorization_refusal", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(providers, "provider_environment", lambda *_: {})
+    monkeypatch.setattr(providers, "provider_environment", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(providers.subprocess, "Popen", popen)
     monkeypatch.setattr(
         providers,
@@ -647,7 +647,7 @@ def test_runtime_activates_claude_plugin_skill_and_requires_load_evidence(
     monkeypatch.setattr(providers, "remediation_context", lambda *_: None)
     monkeypatch.setattr(providers, "_provider_budget_refusal", lambda *_: None)
     monkeypatch.setattr(providers, "_authorization_refusal", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(providers, "provider_environment", lambda *_: {})
+    monkeypatch.setattr(providers, "provider_environment", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(providers.subprocess, "Popen", popen)
     monkeypatch.setattr(
         providers,
@@ -798,7 +798,7 @@ def test_runtime_configures_codex_mcp_and_requires_invocation_receipt(
     monkeypatch.setattr(providers, "remediation_context", lambda *_: None)
     monkeypatch.setattr(providers, "_provider_budget_refusal", lambda *_: None)
     monkeypatch.setattr(providers, "_authorization_refusal", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(providers, "provider_environment", lambda *_: {})
+    monkeypatch.setattr(providers, "provider_environment", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(providers.subprocess, "Popen", popen)
     monkeypatch.setattr(
         providers,

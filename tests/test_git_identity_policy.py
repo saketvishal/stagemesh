@@ -356,6 +356,30 @@ def test_provider_environment_removes_desktop_bridges_and_is_headless() -> None:
     assert env["STAGEMESH_PROVIDER_PROCESS"] == "1"
 
 
+def test_grok_provider_environment_disables_unattached_agent_home_capabilities() -> None:
+    from stagemesh.git_identity import provider_environment
+
+    inherited = {
+        "PATH": "provider-path",
+        "GROK_AUTH_PATH": "persistent-auth",
+        "GROK_CLAUDE_SKILLS_ENABLED": "true",
+        "GROK_CURSOR_MCPS_ENABLED": "true",
+        "GROK_CODEX_SESSIONS_ENABLED": "true",
+    }
+
+    grok = provider_environment(None, inherited, provider_name="grok")
+    claude = provider_environment(None, inherited, provider_name="claude")
+
+    assert grok["GROK_AUTH_PATH"] == "persistent-auth"
+    assert all(
+        grok[f"GROK_{vendor}_{surface}_ENABLED"] == "false"
+        for vendor in ("CLAUDE", "CODEX", "CURSOR")
+        for surface in ("AGENTS", "HOOKS", "MCPS", "RULES", "SESSIONS", "SKILLS")
+    )
+    assert claude["GROK_CLAUDE_SKILLS_ENABLED"] == "true"
+    assert claude["GROK_CURSOR_MCPS_ENABLED"] == "true"
+
+
 def test_doctor_reports_the_effective_identity(tmp_path: Path) -> None:
     from stagemesh.git_identity import identity_report
 

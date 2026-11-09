@@ -453,7 +453,7 @@ def test_reviewer_receives_skill_guidance_and_keeps_structured_response(
     monkeypatch.setattr(providers, "_prepare_review_checkout", lambda *_: "")
     monkeypatch.setattr(providers, "_git_output", lambda *_: "candidate")
     monkeypatch.setattr(providers, "_tracked_content_changed", lambda *_: False)
-    monkeypatch.setattr(providers, "provider_environment", lambda *_: {})
+    monkeypatch.setattr(providers, "provider_environment", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         providers.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
     )

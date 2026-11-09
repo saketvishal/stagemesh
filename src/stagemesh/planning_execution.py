@@ -302,7 +302,7 @@ def _run_role(
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=_review_provider_environment(checkout, checkout),
+                env=_review_provider_environment(checkout, checkout, adapter.name),
                 **popen_session_kwargs(),
             )
         except OSError as exc:
