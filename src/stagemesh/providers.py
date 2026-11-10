@@ -67,6 +67,7 @@ from .provider_catalog import catalog_commands, catalog_definitions, write_capab
 from .provider_events import (
     CAPABILITY_EVIDENCE_MISSING,
     CAPABILITY_POLICY_VIOLATION,
+    SUCCESSFUL_REVIEW_STOP_REASONS,
     ProviderEventError,
     event_stream_command,
     loaded_receipts,
@@ -1190,6 +1191,9 @@ REVIEW_JSON_SCHEMA = json.dumps(
 )
 
 _GROK_UNATTENDED_TOOLS = "Read,Grep,Edit,Bash"
+# Internal read-only ids. Compatibility names such as Read/Grep/Bash are not
+# preserved: an unknown allowlist entry does not remove the other tools.
+_GROK_READ_ONLY_TOOL_IDS = frozenset({"read_file", "grep", "list_dir", "hashline_read", "hashline_grep"})
 _GROK_DESKTOP_DENY_RULES = (
     "Bash(start *)",
     "Bash(explorer *)",
@@ -1219,6 +1223,33 @@ def _ensure_flag(args: list[str], flag: str) -> list[str]:
     return args if flag in args else [*args, flag]
 
 
+def _explicit_grok_tool_values(args: list[str]) -> list[str]:
+    """Every ``--tools`` value in order. A missing value is ignored."""
+    values: list[str] = []
+    index = 0
+    while index < len(args):
+        if args[index] == "--tools" and index + 1 < len(args):
+            values.append(args[index + 1])
+            index += 2
+            continue
+        index += 1
+    return values
+
+
+def _restricted_grok_tools(values: list[str]) -> str | None:
+    """A single explicit read-only tool list, or None when the command must use the default set.
+
+    Older saved commands named shells and editors. Those stay on the unattended
+    default. A narrower read-only list is kept so review isolation is not widened.
+    """
+    if len(values) != 1:
+        return None
+    parts = [part.strip() for part in values[0].split(",")]
+    if not parts or any(part not in _GROK_READ_ONLY_TOOL_IDS for part in parts):
+        return None
+    return ",".join(parts)
+
+
 def _harden_unattended_command(args: list[str]) -> list[str]:
     """Enforce provider-owned headless isolation even for commands saved by older StageMesh releases."""
     executable = Path(args[0]).name.lower() if args else ""
@@ -1242,6 +1273,7 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
             return _without_option(args, "--safe-mode")
         return _ensure_flag(args, "--safe-mode")
     if executable in {"grok", "grok.exe"}:
+        restricted_tools = _restricted_grok_tools(_explicit_grok_tool_values(args))
         args = _without_option(args, "--always-approve")
         args = _without_option(args, "--tools", takes_value=True)
         if "--permission-mode" in args:
@@ -1250,7 +1282,7 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
                 args[mode_index] = "dontAsk"
         else:
             args.extend(("--permission-mode", "dontAsk"))
-        args.extend(("--tools", _GROK_UNATTENDED_TOOLS))
+        args.extend(("--tools", restricted_tools or _GROK_UNATTENDED_TOOLS))
         for flag in ("--disable-web-search", "--no-subagents"):
             args = _ensure_flag(args, flag)
         for rule in _GROK_DESKTOP_DENY_RULES:
@@ -1321,10 +1353,20 @@ def _provider_stop_reason(stdout: str) -> str | None:
     return reason if isinstance(reason, str) and reason else None
 
 
+def _review_stop_failure_reason(reason: str) -> str:
+    """Stable infrastructure reason for a headless stop that did not finish the turn."""
+    if reason == "cancelled":
+        return "review_provider_cancelled"
+    if reason and len(reason) <= 64 and all(character.isalnum() or character in "_-" for character in reason):
+        return f"review_provider_stopped:{reason}"
+    return "review_provider_stopped:unknown"
+
+
 def _review_provider_response(stdout: str) -> str:
-    """Unwrap a review answer. A cancelled turn is infrastructure failure, never a verdict."""
-    if _provider_stop_reason(stdout) == "cancelled":
-        return _review_infrastructure_failure("review_provider_cancelled")
+    """Unwrap a review answer. An unfinished headless turn is never a verdict."""
+    reason = _provider_stop_reason(stdout)
+    if reason is not None and reason not in SUCCESSFUL_REVIEW_STOP_REASONS:
+        return _review_infrastructure_failure(_review_stop_failure_reason(reason))
     return _provider_text_response(stdout)
 
 

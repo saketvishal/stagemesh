@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from stagemesh.providers import (
     _command_and_input,
     _provider_permission_denial,
@@ -63,6 +65,48 @@ def test_completed_grok_review_envelope_still_unwraps_its_verdict() -> None:
 
     assert response == '{"decision":"PASS"}'
     assert classify_review_response(response).kind == "PASS"
+
+
+@pytest.mark.parametrize("stop_reason", ["max_turn_requests", "max_tokens", "refusal", "cancelled"])
+def test_unfinished_grok_review_stop_cannot_pass(stop_reason: str) -> None:
+    response = _review_provider_response(
+        '{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"' + stop_reason + '"}'
+    )
+
+    parsed = json.loads(response)
+    assert parsed["decision"] == "INFRASTRUCTURE_FAILURE"
+    assert parsed["decision"] != "PASS"
+    verdict = classify_review_response(response)
+    assert verdict.kind != "PASS"
+    assert verdict.kind == VERDICT_REVIEW_INCOMPLETE
+    assert verdict.provider_failure is True
+    if stop_reason == "cancelled":
+        assert verdict.reason == "review_provider_cancelled"
+    else:
+        assert verdict.reason == f"review_provider_stopped:{stop_reason}"
+
+
+def test_restricted_grok_read_only_tools_are_not_widened() -> None:
+    command, stdin = _command_and_input(
+        ("grok", "--permission-mode", "dontAsk", "--tools", "read_file,grep,list_dir"),
+        "review the packet",
+        structured_review=True,
+    )
+
+    assert stdin == ""
+    assert command[command.index("--tools") + 1] == "read_file,grep,list_dir"
+    assert "Edit" not in command[command.index("--tools") + 1]
+    assert "Bash" not in command[command.index("--tools") + 1]
+    assert "--json-schema" in command
+
+
+def test_unsafe_grok_tool_selection_stays_on_the_unattended_default() -> None:
+    command, _ = _command_and_input(
+        ("grok", "--tools", "read_file,grep,list_dir,run_terminal_cmd"),
+        "work",
+    )
+
+    assert command[command.index("--tools") + 1] == "Read,Grep,Edit,Bash"
 
 
 def test_agy_provider_prompt_is_passed_as_print_argument() -> None:
