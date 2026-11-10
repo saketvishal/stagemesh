@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 GITHUB_SOURCE = "github"
@@ -17,6 +18,15 @@ DIRECT_EXECUTION_LABELS = frozenset(
         "stagemesh:implementation-task",
         "type:task",
     }
+)
+
+_PROGRAM_MARKER = re.compile(r"<!--\s*stagemesh-program:v\d+\s*-->", re.IGNORECASE)
+_OPERATIONS_GATE_MARKER = re.compile(r"<!--\s*stagemesh-operations-gate:v\d+\s*-->", re.IGNORECASE)
+_DECLARED_BLOCKED = re.compile(r"^\s*StageMesh\s+status\s*:\s*BLOCKED\b", re.IGNORECASE | re.MULTILINE)
+_NO_REPOSITORY_EDITS = re.compile(
+    r"(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?Allowed files(?:\*\*)?\s*:\s*(?:\r?\n\s*)?"
+    r"(?:[-*]\s*)?(?:\*\*)?No repository file edits\.?(?:\*\*)?\s*(?:\n|$)",
+    re.IGNORECASE,
 )
 
 
@@ -37,6 +47,19 @@ def source_issue_is_objective(labels: tuple[str, ...]) -> bool:
     """
     folded = folded_labels(labels)
     return _has_objective_label(folded) and not bool(folded & DIRECT_EXECUTION_LABELS)
+
+
+def source_contract_refusal_reason(body: str) -> str | None:
+    """Return an explicit issue-contract reason that makes a task non-runnable."""
+    if _PROGRAM_MARKER.search(body):
+        return "source program/tracking container"
+    if _OPERATIONS_GATE_MARKER.search(body):
+        return "source operations gate requires a non-code adapter"
+    if _DECLARED_BLOCKED.search(body):
+        return "source contract declares BLOCKED"
+    if _NO_REPOSITORY_EDITS.search(body):
+        return "source task permits no repository file edits"
+    return None
 
 
 def task_source_state(store: Any, task: Any) -> dict[str, Any]:
@@ -67,6 +90,11 @@ def objective_root_reason(store: Any, task: Any) -> str | None:
     state = task_source_state(store, task)
     labels = tuple(str(label) for label in state.get("labels", ()) if isinstance(label, str))
     folded = folded_labels(labels)
+    body = state.get("objective")
+    if isinstance(body, str):
+        refusal = source_contract_refusal_reason(body)
+        if refusal is not None:
+            return refusal
     if folded & DIRECT_EXECUTION_LABELS:
         return None
     if _has_objective_label(folded) or state.get("objective_root") is True:
