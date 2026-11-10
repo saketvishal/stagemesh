@@ -157,6 +157,7 @@ def test_provider_health_explains_inactive_and_untried_states() -> None:
         "live_acceptance": {"state": "missing", "age_seconds": None, "reason": "no check"},
     }
     active = {**inactive, "provider": "codex", "authorized": True, "denied": None}
+    agy_permission = {**inactive, "authorized": True, "denied": None, "stage_capacity": "PERMISSION"}
     cooling = {
         **active,
         "cooldown": {
@@ -171,6 +172,9 @@ def test_provider_health_explains_inactive_and_untried_states() -> None:
     )
     assert readiness.format_provider_health(active) == (
         "codex: active and command found; first real task will verify sign-in and execution"
+    )
+    assert readiness.format_provider_health(agy_permission).startswith(
+        "agy: installed and active, but unattended file access is not configured"
     )
     assert readiness.format_provider_health(cooling).startswith(
         "codex: temporarily paused after quota_rate_limit; retry in 600s"
