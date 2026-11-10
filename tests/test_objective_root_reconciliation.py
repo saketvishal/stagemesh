@@ -168,3 +168,25 @@ def test_cached_program_contract_is_refused_before_scheduling(tmp_path: Path) ->
         assert Scheduler(store).decision(task_id).reason == "source program/tracking container"
     finally:
         store.close()
+
+
+def test_cached_markdown_heading_no_edit_contract_is_refused_before_scheduling(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    try:
+        task_id = store.upsert_task("review and approve architecture", source="github", source_id="3")
+        store.cache_source(
+            "github",
+            "3",
+            {
+                "eligible": True,
+                "state": "OPEN",
+                "labels": ["stagemesh:ready"],
+                "objective": "## Allowed files\n\n- No repository file edits. Review evidence is GitHub metadata.",
+            },
+            "OPEN",
+        )
+
+        assert Scheduler(store).decision(task_id).reason == "source task permits no repository file edits"
+    finally:
+        store.close()

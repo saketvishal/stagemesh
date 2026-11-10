@@ -107,6 +107,10 @@ def test_github_issue_source_blocks_deferred_and_blocked_labels():
             "source operations gate requires a non-code adapter",
         ),
         ("Allowed files: No repository file edits.", "source task permits no repository file edits"),
+        (
+            "## Allowed files\n\n- No repository file edits. Review evidence is recorded as GitHub metadata.",
+            "source task permits no repository file edits",
+        ),
     ],
 )
 def test_github_issue_contract_overrides_a_stale_ready_label(body, reason):

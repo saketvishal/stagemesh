@@ -529,8 +529,15 @@ def classify_review_response(response: object) -> ReviewVerdict:
         return _incomplete("malformed_review_output")
     if not objects:
         return _incomplete("preliminary_review_output" if looks_preliminary(text) else "malformed_review_output")
-    if len(objects) > 1:  # one final verdict only: conflicting or merely repeated verdict objects are both ambiguous
-        return _incomplete("ambiguous_review_output")
+    if len(objects) > 1:
+        # Some headless providers emit structured REVIEW_INCOMPLETE progress
+        # records while using tools, followed by one terminal verdict. Those
+        # records are not competing decisions. Still fail closed when there is
+        # no terminal verdict or more than one terminal verdict.
+        terminal = [item for item in objects if item.get("decision") != VERDICT_REVIEW_INCOMPLETE]
+        if len(terminal) != 1:
+            return _incomplete("ambiguous_review_output")
+        objects = terminal
     parsed = objects[0]
     decision = parsed.get("decision")
     if not isinstance(decision, str):

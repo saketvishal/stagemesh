@@ -93,6 +93,9 @@ def poll_task(conn: sqlite3.Connection, task_id: str, cursor: TaskCursor) -> lis
             order = payload.get("order") or []
             if order:
                 cursor.provider[label] = str(order[0])
+                for execution_id, (kind, started_at, _actor) in tuple(cursor.running.items()):
+                    if _STAGE_LABEL.get(kind, kind.lower()) == label:
+                        cursor.running[execution_id] = (kind, started_at, str(order[0]))
                 events.append((row["created_at"], f"task {task_id}: {label} provider {order[0]} (order: {' > '.join(map(str, order))})"))
         else:
             provider = str(payload.get("provider") or "")
@@ -103,10 +106,16 @@ def poll_task(conn: sqlite3.Connection, task_id: str, cursor: TaskCursor) -> lis
         (task_id, cursor.since),
     ):
         label = _STAGE_LABEL.get(row["kind"], row["kind"].lower())
-        actor = str(row["actor"] or cursor.provider.get(label) or "")
+        stored_actor = str(row["actor"] or "")
+        if label == "review" and stored_actor == "builtin-deterministic-fallback":
+            actor = str(cursor.provider.get(label) or "")
+        else:
+            actor = stored_actor or str(cursor.provider.get(label) or "")
         by = f" (provider {actor})" if actor else ""
         if fresh(f"start:{row['id']}"):
             events.append((row["started_at"], f"task {task_id}: {label} started{by}"))
+            cursor.running[row["id"]] = (row["kind"], row["started_at"], actor)
+        elif row["status"] == "RUNNING" and row["id"] in cursor.running:
             cursor.running[row["id"]] = (row["kind"], row["started_at"], actor)
         if row["status"] != "RUNNING" and row["id"] in cursor.running:
             del cursor.running[row["id"]]

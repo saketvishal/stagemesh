@@ -364,7 +364,7 @@ def test_legacy_builtin_provider_commands_are_upgraded_to_write_capable(tmp_path
     assert adapters["claude"][:4] == ("claude", "-p", "--permission-mode", "acceptEdits")
     assert not any("Bash(git *)" in part for part in adapters["claude"])
     assert any("Bash(git status*)" in part for part in adapters["claude"])
-    assert adapters["grok"][:3] == ("grok", "--permission-mode", "acceptEdits")
+    assert adapters["grok"][:3] == ("grok", "--permission-mode", "dontAsk")
 
 
 def test_runtime_provider_prompt_leaves_git_commits_to_stagemesh() -> None:

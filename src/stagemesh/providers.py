@@ -1035,6 +1035,10 @@ class RuntimeCommandAdapter:
                     output, retry_after = capacity_evidence(stdout, stderr)
                     return _review_infrastructure_failure(reason, output, retry_after)
                 return _review_infrastructure_failure(reason)
+            permission_denial = _provider_permission_denial(stdout, stderr)
+            if permission_denial:
+                output, _ = capacity_evidence(stdout, stderr)
+                return _review_infrastructure_failure(permission_denial, output)
             if event_stream:
                 if evidence_mode == OBSERVED_LOAD_REQUIRED:
                     observation = observe_skill_loads(stdout, capability_audit)
@@ -1185,7 +1189,7 @@ REVIEW_JSON_SCHEMA = json.dumps(
     separators=(",", ":"),
 )
 
-_GROK_UNATTENDED_TOOLS = "read_file,list_dir,grep,run_terminal_command"
+_GROK_UNATTENDED_TOOLS = "Read,Grep,Edit,Bash"
 _GROK_DESKTOP_DENY_RULES = (
     "Bash(start *)",
     "Bash(explorer *)",
@@ -1242,8 +1246,10 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
         args = _without_option(args, "--tools", takes_value=True)
         if "--permission-mode" in args:
             mode_index = args.index("--permission-mode") + 1
-            if mode_index < len(args) and args[mode_index] == "bypassPermissions":
-                args[mode_index] = "acceptEdits"
+            if mode_index < len(args):
+                args[mode_index] = "dontAsk"
+        else:
+            args.extend(("--permission-mode", "dontAsk"))
         args.extend(("--tools", _GROK_UNATTENDED_TOOLS))
         for flag in ("--disable-web-search", "--no-subagents"):
             args = _ensure_flag(args, flag)
@@ -1307,6 +1313,12 @@ def _provider_permission_denial(stdout: str, stderr: str) -> str | None:
     if "headless mode cannot prompt" in text and "auto-denied" in text:
         return PROVIDER_PERMISSION_DENIED
     if "tool required" in text and "permission" in text and "auto-denied" in text:
+        return PROVIDER_PERMISSION_DENIED
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict) and payload.get("denied_actions"):
         return PROVIDER_PERMISSION_DENIED
     return None
 
