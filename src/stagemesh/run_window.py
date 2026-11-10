@@ -1458,6 +1458,10 @@ def run_window(
             if wave.time_limit_reached:
                 report.time_limit_reached = True
                 break
+    except KeyboardInterrupt:
+        report.interrupted = True
+        report.stop_reason = "interrupted: KeyboardInterrupt"
+        return _finish(store, project, config, report, None, clock, journal=True)
     except BaseException as exc:
         report.interrupted = True
         report.stop_reason = f"interrupted: {type(exc).__name__}"
