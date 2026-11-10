@@ -927,6 +927,45 @@ def test_queue_stop_at_publication_boundary_is_not_reported_as_success(tmp_path:
     assert store.get_task("T-1")["stage"] == Stage.INTEGRATE
 
 
+def test_keyboard_interrupt_requests_provider_termination_before_waiting_for_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import survivor_wave
+    from stagemesh.queue_control import QueueStopControl, latest_queue_control
+
+    store, project = make_store(tmp_path, ["T-1"])
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def work(rig, task_id):
+        worker_store = rig.worker_store()
+        try:
+            control = QueueStopControl(worker_store, task_id)
+            started.set()
+            deadline = time.monotonic() + 3
+            while not control.blocks_admission() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if control.blocks_admission():
+                stopped.set()
+            return RunResult("STOPPED")
+        finally:
+            worker_store.close()
+
+    def interrupt_wait(*_args, **_kwargs):
+        assert started.wait(timeout=2)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(survivor_wave, "wait", interrupt_wait)
+    with pytest.raises(KeyboardInterrupt):
+        run_wave(store, ["T-1"], Rig(project, {"T-1": work}).hooks(), open_prs=False)
+
+    assert stopped.is_set()
+    control = latest_queue_control(store)
+    assert control is not None
+    assert control["state"] == "stopping"
+    assert control["terminate_running"] is True
+
+
 @pytest.mark.parametrize("conflicting_fallback", [False, True])
 def test_fallback_branch_retry_reuses_exact_ref_or_refuses_conflict(tmp_path: Path, monkeypatch, conflicting_fallback) -> None:
     import subprocess as sp

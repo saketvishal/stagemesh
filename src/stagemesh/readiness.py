@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .baseline import resolve_integration_ref
+from .capacity import CapacityKind
 from .config import StageMeshConfig
 from .config_migration import legacy_review_config_hint
 from .diagnosis import latest_tool_failure
@@ -185,6 +186,7 @@ def build_readiness(
     for name in sorted(adapters) or sorted(cooldowns):
         adapter = adapters.get(name)
         capability = "code" if adapter is None or "code" in adapter.capabilities else "review"
+        stage_capacity = None if adapter is None else adapter.check_stage_capacity(capability)
         live = live_acceptance_status(store, name, capability, ttl_seconds=config.live_acceptance_ttl_seconds)
         cooldown = cooldowns.get(name)
         # Strict mode (release gating) requires a fresh passing live check; otherwise a missing one is only information.
@@ -195,7 +197,8 @@ def build_readiness(
                 "provider": name,
                 "authorized": config.authorized_providers is not None and name in config.authorized_providers,
                 "denied": None if adapter is None else adapter.denied,
-                "command_available": None if adapter is None else adapter.check_capacity() == "AVAILABLE",
+                "command_available": None if adapter is None else adapter.check_capacity() == CapacityKind.AVAILABLE,
+                "stage_capacity": stage_capacity,
                 "live_acceptance": live,
                 "cooldown": None
                 if cooldown is None
@@ -225,6 +228,13 @@ def format_provider_health(item: dict[str, Any]) -> str:
         return f"{name}: installed but not active for unattended work; next: run `stagemesh init` and choose agents"
     if item.get("command_available") is False:
         return f"{name}: active, but its command was not found; next: install or repair the {name} CLI, then rerun `stagemesh init`"
+    if item.get("stage_capacity") == CapacityKind.PERMISSION:
+        if name.casefold() == "agy":
+            return (
+                "agy: installed and active, but unattended file access is not configured; next: set an explicit "
+                "project-scoped AGY --settings permissions file (StageMesh will not use the dangerous bypass)"
+            )
+        return f"{name}: active, but unattended permissions are not configured"
     if item.get("denied"):
         return f"{name}: active but unavailable ({item['denied']})"
     cooldown = item.get("cooldown")

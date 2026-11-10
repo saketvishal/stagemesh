@@ -736,6 +736,11 @@ def run_wave(
                     owners.discard(task_id)
             discover()
             capacity_notice()
+    except KeyboardInterrupt:
+        control.request_stop("run-window interrupted", terminate_running=True)
+        for future in running:
+            future.cancel()
+        raise
     finally:
         pool_cm.__exit__(None, None, None)
         set_window_deadline(None)

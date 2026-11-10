@@ -734,7 +734,7 @@ def command_init(args: argparse.Namespace) -> int:
         print(f"GitHub issue classification deferred: {github_classification.reason}")
     elif github_classification.changed:
         print(
-            "classified GitHub issues "
+            "classified previously-unlabeled GitHub issues in this init pass "
             f"(ready: {github_classification.ready_labeled}; needs triage: {github_classification.triage_labeled}; "
             f"failed: {github_classification.failed})"
         )

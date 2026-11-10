@@ -265,7 +265,7 @@ def test_interactive_init_uses_authenticated_gh_cli_without_persisting_its_token
 
     output = capsys.readouterr().out
     assert "used the authenticated GitHub CLI" in output
-    assert "classified GitHub issues (ready: 1; needs triage: 0; failed: 0)" in output
+    assert "classified previously-unlabeled GitHub issues in this init pass (ready: 1; needs triage: 0; failed: 0)" in output
     assert labels == ["team:owned", "stagemesh:ready"]
     config = json.loads((project / ".stagemesh/config.json").read_text(encoding="utf-8"))
     assert "token" not in config["github"]

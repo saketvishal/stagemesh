@@ -87,6 +87,21 @@ class QueueStopControl:
     def state_label(self):
         return "stopping" if self.request and self.state == "running" else self.state
 
+    def request_stop(self, reason: str, *, terminate_running: bool = True, source: str = "runner") -> None:
+        """Publish a project-scoped stop that active provider waits can observe."""
+        record_audit(
+            self.store,
+            QUEUE_CONTROL_EVENT,
+            {
+                "state": "stopping",
+                "reason": reason,
+                "source": source,
+                "terminate_running": terminate_running,
+                "at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            },
+        )
+        self.poll()
+
     def note(self, event, **detail):
         if event not in self._noted:
             record_audit(self.store, event, {"task_id": self.task_id, **detail})

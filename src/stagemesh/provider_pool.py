@@ -148,6 +148,11 @@ def _capacity_reason(adapter: RuntimeCommandAdapter, capacity: str, capability: 
     if capacity == CapacityKind.UNKNOWN:
         return f"cli_not_installed: '{executable}' is not callable on PATH"
     if capacity == CapacityKind.PERMISSION:
+        if adapter.name.casefold() == "agy":
+            return (
+                "provider_permission_denied: configure AGY with an explicit project-scoped --settings permissions file; "
+                "StageMesh will not use the dangerous permission bypass"
+            )
         return "provider_permission_denied: command refused unattended permissions"
     if capacity == CapacityKind.AUTH:
         return "authentication_failure: provider command is not authenticated"
@@ -598,7 +603,9 @@ class ProviderPool:
         reasons: dict[str, str] = {}
         if not base:
             return [], reasons
-        active_note = lambda a: f"{active_counts.get(a.name, 0)} active selection(s), " if active_counts.get(a.name, 0) else ""
+        def active_note(adapter: RuntimeCommandAdapter) -> str:
+            count = active_counts.get(adapter.name, 0)
+            return f"{count} active selection(s), " if count else ""
         if self.policy == "priority":
             ordered = sorted(base, key=lambda a: (active_counts.get(a.name, 0), self.priorities.get(a.name, DEFAULT_PRIORITY), index.get(a.name, len(pool))))
             for a in ordered:
@@ -633,8 +640,11 @@ class ProviderPool:
         counts: dict[str, int] = {}
         for name, _ in uses:
             counts[name] = counts.get(name, 0) + 1
-        weight = lambda a: max(1, self.weights.get(a.name, 1))
-        score = lambda a: Fraction(counts.get(a.name, 0) + active_counts.get(a.name, 0) + 1, weight(a))
+        def weight(adapter: RuntimeCommandAdapter) -> int:
+            return max(1, self.weights.get(adapter.name, 1))
+
+        def score(adapter: RuntimeCommandAdapter) -> Fraction:
+            return Fraction(counts.get(adapter.name, 0) + active_counts.get(adapter.name, 0) + 1, weight(adapter))
         ordered = sorted(base, key=score)  # stable: ties keep priority/pool order
         for a in ordered:
             reasons[a.name] = (
@@ -653,7 +663,8 @@ class ProviderPool:
         if self.require_independent and not any(
             _distinct(r, i) for i in implementers for r in reviewers
         ):
-            names = lambda items: ", ".join(a.name for a in items) or "none"
+            def names(items: list[RuntimeCommandAdapter]) -> str:
+                return ", ".join(adapter.name for adapter in items) or "none"
             message = (
                 "independent review is required but cannot be satisfied: no eligible reviewer is distinct from any "
                 f"eligible implementer (not_independent). Eligible implementers: {names(implementers)}; eligible reviewers: "

@@ -98,6 +98,42 @@ def test_github_issue_source_blocks_deferred_and_blocked_labels():
     ]
 
 
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ("<!-- stagemesh-program:v2 -->\nThis parent is tracking-only.", "source program/tracking container"),
+        (
+            "<!-- stagemesh-operations-gate:v1 -->\nStageMesh status: BLOCKED",
+            "source operations gate requires a non-code adapter",
+        ),
+        ("Allowed files: No repository file edits.", "source task permits no repository file edits"),
+    ],
+)
+def test_github_issue_contract_overrides_a_stale_ready_label(body, reason):
+    tasks, status = GitHubIssueSource(
+        [{"number": 2, "title": "not executable", "body": body, "labels": [{"name": "stagemesh:ready"}]}]
+    ).discover()
+
+    assert status == "OK"
+    assert tasks[0].eligible is False
+    assert tasks[0].eligibility_reason == reason
+
+
+def test_github_dependency_parser_does_not_treat_pull_requests_as_issue_dependencies():
+    tasks, _status = GitHubIssueSource(
+        [
+            {
+                "number": 122,
+                "title": "mixed dependencies",
+                "body": "Depends on: PR #1, #3, #46\nRequires: pull request #70 and #71",
+                "labels": [{"name": "stagemesh:ready"}],
+            }
+        ]
+    ).discover()
+
+    assert tasks[0].dependencies == ("3", "46", "71")
+
+
 class _FakeIssueSource:
     def __init__(self, tasks):
         self.tasks = tasks

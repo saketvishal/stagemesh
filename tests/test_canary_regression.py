@@ -1267,6 +1267,10 @@ def test_failure_classification_categories() -> None:
     assert is_cap is False
     assert reason == "implementation_failure"
 
+    is_cap, reason = classify_failure(1, stdout="The requested architecture was not found in the repository.")
+    assert is_cap is False
+    assert reason == "implementation_failure"
+
     # 6. Tool execution failure
     is_cap, reason = classify_failure(1, stderr="Error: browser executable doesn't exist. Please run npx playwright install")
     assert is_cap is False
