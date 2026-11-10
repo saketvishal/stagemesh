@@ -83,6 +83,11 @@ _TOOL_FAILURE = re.compile(
     r"No tests found",
     re.IGNORECASE,
 )
+_MISSING_COMMAND = re.compile(
+    r"(?:^|\n)\s*(?:/bin/(?:ba)?sh:\s*)?[^:\n]+:\s*(?:command not found|no such file or directory)\s*$|"
+    r"(?:^|\n).*?is not recognized as an internal or external command(?:,|\.|\s|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def capacity_evidence(stdout: str, stderr: str) -> tuple[str, str | None]:
@@ -112,7 +117,7 @@ def classify_failure(
     if _TOOL_FAILURE.search(f"{stdout}\n{stderr}"):
         return False, TOOL_EXECUTION_FAILURE
 
-    if any(m in combined for m in ["not found", "no such file or directory", "command not found", "cannot find"]):
+    if returncode == 127 or _MISSING_COMMAND.search(f"{stdout}\n{stderr}"):
         return True, "provider_unavailable"
 
     if _PAYMENT_MARKER.search(combined) and _PAYMENT_EXHAUSTED.search(combined):
