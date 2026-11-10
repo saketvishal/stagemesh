@@ -1111,7 +1111,7 @@ class RuntimeCommandAdapter:
                         "provider_event_response_missing"
                     )
                 return response
-            return _provider_text_response(stdout)
+            return _review_provider_response(stdout)
         except BaseException as exc:
             if not cleanup_confirmed:
                 if isinstance(exc, OperatorStopRequested) and exc.cleanup_complete:
@@ -1306,6 +1306,26 @@ def _provider_text_response(stdout: str) -> str:
     if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):
         return json.dumps(payload["structured_output"], separators=(",", ":"))
     return text
+
+
+def _provider_stop_reason(stdout: str) -> str | None:
+    """The headless stop token on a single JSON result, when the provider supplied one."""
+    text = stdout.strip()
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    reason = payload.get("stopReason", payload.get("stop_reason"))
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _review_provider_response(stdout: str) -> str:
+    """Unwrap a review answer. A cancelled turn is infrastructure failure, never a verdict."""
+    if _provider_stop_reason(stdout) == "cancelled":
+        return _review_infrastructure_failure("review_provider_cancelled")
+    return _provider_text_response(stdout)
 
 
 def _provider_permission_denial(stdout: str, stderr: str) -> str | None:

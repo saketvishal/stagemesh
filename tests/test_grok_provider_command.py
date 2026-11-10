@@ -6,8 +6,10 @@ from stagemesh.providers import (
     _command_and_input,
     _provider_permission_denial,
     _provider_text_response,
+    _review_provider_response,
     approved_default_adapters,
 )
+from stagemesh.review import VERDICT_REVIEW_INCOMPLETE, classify_review_response
 
 
 def test_grok_provider_prompt_is_passed_as_single_turn_argument() -> None:
@@ -40,6 +42,27 @@ def test_grok_json_mode_wrapper_is_normalized_to_review_json() -> None:
     response = _provider_text_response('{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"end_turn"}')
 
     assert response == '{"decision":"PASS"}'
+
+
+def test_cancelled_grok_review_envelope_is_not_a_verdict() -> None:
+    response = _review_provider_response('{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"cancelled"}')
+
+    parsed = json.loads(response)
+    assert parsed["decision"] == "INFRASTRUCTURE_FAILURE"
+    assert parsed["decision"] != "PASS"
+    assert parsed["reason"] == "review_provider_cancelled"
+    verdict = classify_review_response(response)
+    assert verdict.kind != "PASS"
+    assert verdict.kind == VERDICT_REVIEW_INCOMPLETE
+    assert verdict.provider_failure is True
+    assert verdict.reason == "review_provider_cancelled"
+
+
+def test_completed_grok_review_envelope_still_unwraps_its_verdict() -> None:
+    response = _review_provider_response('{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"end_turn"}')
+
+    assert response == '{"decision":"PASS"}'
+    assert classify_review_response(response).kind == "PASS"
 
 
 def test_agy_provider_prompt_is_passed_as_print_argument() -> None:
