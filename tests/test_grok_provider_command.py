@@ -86,6 +86,10 @@ def test_unfinished_grok_review_stop_cannot_pass(stop_reason: str) -> None:
         assert verdict.reason == f"review_provider_stopped:{stop_reason}"
 
 
+def _grok_tool_values(command: list[str]) -> list[str]:
+    return [command[index + 1] for index, token in enumerate(command[:-1]) if token == "--tools"]
+
+
 def test_restricted_grok_read_only_tools_are_not_widened() -> None:
     command, stdin = _command_and_input(
         ("grok", "--permission-mode", "dontAsk", "--tools", "read_file,grep,list_dir"),
@@ -94,10 +98,50 @@ def test_restricted_grok_read_only_tools_are_not_widened() -> None:
     )
 
     assert stdin == ""
-    assert command[command.index("--tools") + 1] == "read_file,grep,list_dir"
-    assert "Edit" not in command[command.index("--tools") + 1]
-    assert "Bash" not in command[command.index("--tools") + 1]
+    assert _grok_tool_values(command) == ["read_file,grep,list_dir"]
     assert "--json-schema" in command
+
+
+def test_equals_form_read_only_grok_tools_are_not_replaced_with_edit_or_bash() -> None:
+    command, _stdin = _command_and_input(
+        ("grok", "--permission-mode", "dontAsk", "--tools=read_file,grep,list_dir"),
+        "review the packet",
+        structured_review=True,
+    )
+
+    assert not any(token.startswith("--tools=") for token in command)
+    assert _grok_tool_values(command) == ["read_file,grep,list_dir"]
+
+
+def test_equals_form_unsafe_grok_tools_still_use_the_unattended_default() -> None:
+    command, _stdin = _command_and_input(
+        ("grok", "--tools=read_file,grep,list_dir,run_terminal_cmd"),
+        "work",
+    )
+
+    assert not any(token.startswith("--tools=") for token in command)
+    assert _grok_tool_values(command) == ["Read,Grep,Edit,Bash"]
+
+
+def test_allow_rules_do_not_widen_a_read_only_grok_tool_list() -> None:
+    command, _stdin = _command_and_input(
+        (
+            "grok",
+            "--tools",
+            "read_file,grep,list_dir",
+            "--allow",
+            "Edit",
+            "--allow",
+            "Bash(git status*)",
+            "--allowedTools",
+            "Write",
+        ),
+        "review the packet",
+        structured_review=True,
+    )
+
+    assert _grok_tool_values(command) == ["read_file,grep,list_dir"]
+    assert command.count("--tools") == 1
 
 
 def test_unsafe_grok_tool_selection_stays_on_the_unattended_default() -> None:

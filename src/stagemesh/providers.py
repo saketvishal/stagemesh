@@ -1224,16 +1224,38 @@ def _ensure_flag(args: list[str], flag: str) -> list[str]:
 
 
 def _explicit_grok_tool_values(args: list[str]) -> list[str]:
-    """Every ``--tools`` value in order. A missing value is ignored."""
+    """Every ``--tools`` value in order, including the ``--tools=value`` spelling."""
     values: list[str] = []
     index = 0
     while index < len(args):
-        if args[index] == "--tools" and index + 1 < len(args):
+        token = args[index]
+        if token == "--tools" and index + 1 < len(args):
             values.append(args[index + 1])
             index += 2
             continue
+        if token.startswith("--tools="):
+            values.append(token.split("=", 1)[1])
+            index += 1
+            continue
         index += 1
     return values
+
+
+def _without_grok_tools(args: list[str]) -> list[str]:
+    """Remove both ``--tools VALUE`` and ``--tools=VALUE`` before one canonical list is added."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--tools":
+            index += 2 if index + 1 < len(args) else 1
+            continue
+        if token.startswith("--tools="):
+            index += 1
+            continue
+        cleaned.append(token)
+        index += 1
+    return cleaned
 
 
 def _restricted_grok_tools(values: list[str]) -> str | None:
@@ -1275,7 +1297,7 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
     if executable in {"grok", "grok.exe"}:
         restricted_tools = _restricted_grok_tools(_explicit_grok_tool_values(args))
         args = _without_option(args, "--always-approve")
-        args = _without_option(args, "--tools", takes_value=True)
+        args = _without_grok_tools(args)
         if "--permission-mode" in args:
             mode_index = args.index("--permission-mode") + 1
             if mode_index < len(args):
