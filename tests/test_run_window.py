@@ -869,10 +869,13 @@ def test_an_interrupt_during_the_window_still_writes_the_finished_journal_entry(
         raise KeyboardInterrupt
 
     store, project, _rig, hooks, options, config, kwargs = window(tmp_path, ["1"], {"1": interrupt}, concurrency=1)
+    kwargs["list_prs"] = lambda _project: (_ for _ in ()).throw(AssertionError("interrupt cleanup must not call GitHub"))
 
-    with pytest.raises(KeyboardInterrupt):
-        rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", **kwargs)
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", **kwargs)
 
+    assert report.interrupted is True
+    assert report.exit_code != 0
+    assert report.stop_reason == "interrupted: KeyboardInterrupt"
     entry = last_window(store)
     assert entry["state"] == "finished" and entry["ok"] is False and "interrupted: KeyboardInterrupt" in entry["stop_reason"]
 
