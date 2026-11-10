@@ -281,14 +281,24 @@ class RuntimeCommandAdapter:
     def check_stage_capacity(self, capability: str) -> str:
         """Is the command this provider would run for that stage callable? (check_capacity() only looks at the default command.)"""
         command = self.command_for(capability)
-        return CapacityKind.AVAILABLE if command and shutil.which(command[0]) else CapacityKind.UNKNOWN
+        if not command or not shutil.which(command[0]):
+            return CapacityKind.UNKNOWN
+        has_settings = any(argument == "--settings" or argument.startswith("--settings=") for argument in command[1:])
+        if Path(command[0]).stem.casefold() == "agy" and not has_settings:
+            # AGY denies file tools in unattended/headless sessions unless an
+            # explicit settings file grants project-scoped permissions. Never
+            # substitute its dangerous global permission bypass.
+            return CapacityKind.PERMISSION
+        return CapacityKind.AVAILABLE
 
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         refused = _authorization_refusal(self, project, "code")
         if refused:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"provider_not_authorized: {refused}")
-        if self.check_stage_capacity("code") != CapacityKind.AVAILABLE:
-            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
+        capacity = self.check_stage_capacity("code")
+        if capacity != CapacityKind.AVAILABLE:
+            reason = "provider_permission_denied" if capacity == CapacityKind.PERMISSION else "provider_unavailable"
+            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason=reason)
         try:
             with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
                 return self._execute_owned(store, task_id, claim_id, project, lease)
@@ -860,8 +870,10 @@ class RuntimeCommandAdapter:
         refused = _authorization_refusal(self, project, "review")
         if refused:
             return _review_infrastructure_failure("provider_not_authorized", refused)
-        if self.check_stage_capacity("review") != CapacityKind.AVAILABLE:
-            return _review_infrastructure_failure("provider_unavailable")
+        capacity = self.check_stage_capacity("review")
+        if capacity != CapacityKind.AVAILABLE:
+            reason = "provider_permission_denied" if capacity == CapacityKind.PERMISSION else "provider_unavailable"
+            return _review_infrastructure_failure(reason)
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
         review_path = Path(temp_dir) / "candidate"
         cleanup_confirmed = True  # no provider owns the checkout until Popen succeeds
