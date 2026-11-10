@@ -717,10 +717,13 @@ def serialize_operator_report(report: OperatorReport) -> dict[str, Any]:
                 "task_id": _safe_text(row.get("task_id")),
                 "stage": _safe_text(row.get("stage"), 40) or "UNKNOWN",
                 "provider": _safe_text(row.get("provider"), 80) or "unknown",
+                "started_at": _safe_number(row.get("started_at")),
+                "updated_at": _safe_number(row.get("updated_at")),
                 "process_state": _safe_text(row.get("process_state"), 40) or "UNKNOWN",
                 "parent_process_state": _safe_text(row.get("parent_process_state"), 40) or "UNKNOWN",
                 "cleanup_state": _safe_text(row.get("cleanup_state"), 80),
                 "stale": bool(row.get("stale")),
+                "release_unknown_allowed": bool(row.get("release_unknown_allowed")),
             }
             for row in sections.get("Active Executions", ())
         ],
