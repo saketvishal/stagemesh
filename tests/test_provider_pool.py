@@ -526,6 +526,28 @@ def test_no_implementation_provider_available_lists_every_provider(tmp_path: Pat
     assert rig.pool.preflight(rig.store)[0] is False
 
 
+def test_agy_requires_explicit_project_scoped_settings_for_unattended_work(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("stagemesh.providers.shutil.which", lambda executable: f"/tools/{executable}")
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    try:
+        unsafe_default = RuntimeCommandAdapter("agy", ("agy", "--mode", "accept-edits", "--sandbox"))
+        configured = RuntimeCommandAdapter("agy", ("agy", "--settings", "project-settings.json"))
+
+        assert unsafe_default.check_stage_capacity("code") == CapacityKind.PERMISSION
+        verdict = ProviderPool(
+            [unsafe_default],
+            {IMPLEMENT: ("agy",), REVIEW: ("agy",)},
+            require_independent=False,
+            log=ProviderLog(echo=False),
+        ).evaluate(store, IMPLEMENT)[0]
+        assert verdict.eligible is False
+        assert "project-scoped --settings" in verdict.reason
+        assert configured.check_stage_capacity("code") == CapacityKind.AVAILABLE
+    finally:
+        store.close()
+
+
 def test_concurrent_implementation_tasks_reserve_different_providers(tmp_path: Path) -> None:
     project = tmp_path / "repo"
     project.mkdir()
