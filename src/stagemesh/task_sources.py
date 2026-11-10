@@ -19,6 +19,7 @@ from .objective_roots import (
     DIRECT_EXECUTION_LABELS,
     folded_labels,
     objective_payload,
+    source_contract_refusal_reason,
     source_issue_is_objective,
 )
 from .persistence import Store
@@ -296,18 +297,21 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
         raise TaskSourceValidationError(f"github issue {number} state must be a string")
     body = issue.get("body") if isinstance(issue.get("body"), str) else ""
     objective_root = source_issue_is_objective(tuple(label_names))
+    contract_refusal = source_contract_refusal_reason(body)
     blocked = {
         "stagemesh:deferred",
         "stagemesh:blocked",
         "status:blocked",
         "status:remediating",
     }.intersection(label.casefold() for label in label_names)
-    eligible = not blocked and not objective_root and state.lower() == "open"
+    eligible = not blocked and not objective_root and contract_refusal is None and state.lower() == "open"
     reason = ""
     if state.lower() != "open":
         reason = f"source issue is {state.lower()}"
     elif objective_root:
         reason = "source objective root"
+    elif contract_refusal is not None:
+        reason = contract_refusal
     elif blocked:
         reason = f"blocked by label: {', '.join(sorted(blocked))}"
     return DiscoveredTask(
@@ -329,7 +333,8 @@ def _github_dependencies(body: str) -> tuple[str, ...]:
     for line in body.splitlines():
         if not re.match(r"^\s*(depends on|blocked by|requires)\s*:", line, re.IGNORECASE):
             continue
-        dependencies.extend(match.group(1) for match in re.finditer(r"#(\d+)", line))
+        issue_only = re.sub(r"\b(?:PR|pull\s+request)\s*#\d+", "", line, flags=re.IGNORECASE)
+        dependencies.extend(match.group(1) for match in re.finditer(r"#(\d+)", issue_only))
     return tuple(dict.fromkeys(dependencies))
 
 
@@ -502,6 +507,9 @@ def _github_validation_errors(tasks: list[DiscoveredTask], known_github_ids: set
             task_errors.append("ready label conflicts with a blocked or deferred label")
         if READY_LABEL in labels and source_issue_is_objective(task.labels):
             task_errors.append("ready label conflicts with objective label")
+        contract_refusal = source_contract_refusal_reason(task.body)
+        if READY_LABEL in labels and contract_refusal is not None:
+            task_errors.append(f"ready label conflicts with issue contract: {contract_refusal}")
         if task.source_id in task.dependencies:
             task_errors.append("task depends on itself")
         missing = sorted(set(task.dependencies) - known_github_ids, key=lambda value: int(value) if value.isdigit() else value)
