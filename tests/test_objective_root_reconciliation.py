@@ -146,3 +146,25 @@ def test_direct_execution_label_keeps_github_issue_runnable(tmp_path: Path) -> N
         assert store.get_task("72")["status"] == TaskStatus.OPEN
     finally:
         store.close()
+
+
+def test_cached_program_contract_is_refused_before_scheduling(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    try:
+        task_id = store.upsert_task("tracking parent", source="github", source_id="2")
+        store.cache_source(
+            "github",
+            "2",
+            {
+                "eligible": True,
+                "state": "OPEN",
+                "labels": ["stagemesh:ready"],
+                "objective": "<!-- stagemesh-program:v2 -->\nThis parent is tracking-only.",
+            },
+            "OPEN",
+        )
+
+        assert Scheduler(store).decision(task_id).reason == "source program/tracking container"
+    finally:
+        store.close()
