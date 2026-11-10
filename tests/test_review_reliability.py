@@ -293,6 +293,22 @@ def test_wrapped_verdicts_still_parse() -> None:
     assert mixed.kind == VERDICT_FAIL_WITH_FINDINGS and [f["message"] for f in mixed.findings] == [FINDING["message"]]  # placeholders dropped
 
 
+def test_structured_progress_before_one_terminal_verdict_is_not_ambiguous() -> None:
+    progress = '{"decision":"REVIEW_INCOMPLETE","reason":"inspecting candidate"}'
+    passed = classify_review_response(progress + '{"decision":"PASS"}')
+    failed = classify_review_response(
+        progress + progress + json.dumps({"decision": "FAIL_WITH_FINDINGS", "findings": [FINDING]})
+    )
+
+    assert passed.kind == VERDICT_PASS
+    assert failed.kind == VERDICT_FAIL_WITH_FINDINGS
+    assert failed.findings == (FINDING,)
+    assert classify_review_response(progress + progress).reason == "ambiguous_review_output"
+    assert classify_review_response(progress + '{"decision":"PASS"}{"decision":"PASS"}').reason == (
+        "ambiguous_review_output"
+    )
+
+
 def test_concrete_findings_that_mention_progress_words_are_kept() -> None:
     for message in (
         "Spinner remains in progress forever on failed upload.",

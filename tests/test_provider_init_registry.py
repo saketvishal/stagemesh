@@ -154,6 +154,25 @@ def test_init_preserves_customized_bundled_commands_and_is_idempotent(
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 
+def test_exact_0614_grok_default_migrates_to_headless_valid_tool_configuration() -> None:
+    providers: dict[str, object] = {
+        "grok": {
+            "command": (
+                "grok --permission-mode acceptEdits --disable-web-search --no-subagents "
+                "--tools read_file,list_dir,grep,run_terminal_command "
+                "--allow Edit --allow Write --allow MultiEdit "
+                "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
+                "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
+                "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+            ),
+            "capabilities": ["IMPLEMENT", "REVIEW"],
+        }
+    }
+
+    assert provider_catalog.migrate_unsafe_bundled_provider_commands(providers) == ("grok",)
+    assert providers["grok"]["command"] == provider_catalog.PROVIDER_CATALOG[2].command
+
+
 def test_init_merges_a_newly_installed_provider_plugin_without_replacing_existing_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

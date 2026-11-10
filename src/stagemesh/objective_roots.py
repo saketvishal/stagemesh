@@ -24,8 +24,8 @@ _PROGRAM_MARKER = re.compile(r"<!--\s*stagemesh-program:v\d+\s*-->", re.IGNORECA
 _OPERATIONS_GATE_MARKER = re.compile(r"<!--\s*stagemesh-operations-gate:v\d+\s*-->", re.IGNORECASE)
 _DECLARED_BLOCKED = re.compile(r"^\s*StageMesh\s+status\s*:\s*BLOCKED\b", re.IGNORECASE | re.MULTILINE)
 _NO_REPOSITORY_EDITS = re.compile(
-    r"(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?Allowed files(?:\*\*)?\s*:\s*(?:\r?\n\s*)?"
-    r"(?:[-*]\s*)?(?:\*\*)?No repository file edits\.?(?:\*\*)?\s*(?:\n|$)",
+    r"(?:^|\n)\s*(?:(?:#{1,6}|[-*])\s*)?(?:\*\*)?Allowed files(?:\*\*)?\s*:?\s*(?:\r?\n\s*)?"
+    r"(?:[-*]\s*)?(?:\*\*)?No repository file edits\.?(?:\*\*)?(?=\s|$)",
     re.IGNORECASE,
 )
 

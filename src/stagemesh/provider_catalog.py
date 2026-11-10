@@ -59,9 +59,8 @@ PROVIDER_CATALOG = (
     ProviderDefinition(
         "grok", "grok",
         (
-            "grok --permission-mode acceptEdits --disable-web-search --no-subagents "
-            "--tools read_file,list_dir,grep,run_terminal_command "
-            "--allow Edit --allow Write --allow MultiEdit "
+            "grok --permission-mode dontAsk --disable-web-search --no-subagents "
+            "--tools Read,Grep,Edit,Bash --allow Edit "
             "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
             "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
             "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
@@ -75,20 +74,32 @@ PROVIDER_CATALOG = (
 )
 
 PREVIOUS_UNSAFE_BUNDLED_COMMANDS = {
-    "codex": "codex exec --sandbox workspace-write",
+    "codex": ("codex exec --sandbox workspace-write",),
     "claude": (
-        "claude -p --permission-mode acceptEdits --permission-prompts none "
-        f"--allowedTools 'Edit,Write,MultiEdit,{READ_ONLY_GIT_TOOLS},"
-        "Bash(python *),Bash(pytest *),Bash(ruff *)'"
+        (
+            "claude -p --permission-mode acceptEdits --permission-prompts none "
+            f"--allowedTools 'Edit,Write,MultiEdit,{READ_ONLY_GIT_TOOLS},"
+            "Bash(python *),Bash(pytest *),Bash(ruff *)'"
+        ),
     ),
     "grok": (
-        "grok --permission-mode acceptEdits --always-approve "
-        "--allow Edit --allow Write --allow MultiEdit "
-        "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
-        "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
-        "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+        (
+            "grok --permission-mode acceptEdits --always-approve "
+            "--allow Edit --allow Write --allow MultiEdit "
+            "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
+            "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
+            "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+        ),
+        (
+            "grok --permission-mode acceptEdits --disable-web-search --no-subagents "
+            "--tools read_file,list_dir,grep,run_terminal_command "
+            "--allow Edit --allow Write --allow MultiEdit "
+            "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
+            "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
+            "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+        ),
     ),
-    "agy": "agy --mode accept-edits",
+    "agy": ("agy --mode accept-edits",),
 }
 
 PROVIDER_PLUGIN_GROUP = "stagemesh.providers"
@@ -192,7 +203,7 @@ def migrate_unsafe_bundled_provider_commands(providers: dict[str, object]) -> tu
     changed: list[str] = []
     for name, previous in PREVIOUS_UNSAFE_BUNDLED_COMMANDS.items():
         entry = providers.get(name)
-        if not isinstance(entry, dict) or entry.get("command") != previous:
+        if not isinstance(entry, dict) or entry.get("command") not in previous:
             continue
         entry["command"] = current[name]
         changed.append(name)

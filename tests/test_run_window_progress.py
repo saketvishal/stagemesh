@@ -129,6 +129,28 @@ def test_fallback_heartbeat_uses_execution_actor_not_preferred_provider(tmp_path
     store.close()
 
 
+def test_review_heartbeat_replaces_internal_fallback_actor_with_selected_provider(tmp_path: Path) -> None:
+    from stagemesh.progress import TaskCursor, heartbeat_lines, poll_task
+
+    store, _project = make_store(tmp_path, ["T-1"])
+    cursor = TaskCursor(since=0)
+    store.start_execution(
+        task_id="T-1",
+        claim_id=None,
+        kind=ExecutionKind.REVIEW,
+        actor="builtin-deterministic-fallback",
+    )
+    assert any(line == "task T-1: review started" for line in poll_task(store.conn, "T-1", cursor))
+
+    store.add_audit_event(
+        "provider.selection",
+        {"task_id": "T-1", "stage": "REVIEW", "order": ["codex", "grok", "agy"]},
+    )
+    assert any("review provider codex" in line for line in poll_task(store.conn, "T-1", cursor))
+    assert all("provider codex" in line for line in heartbeat_lines("T-1", cursor, 1e12))
+    store.close()
+
+
 def test_cli_json_stdout_stays_valid_and_progress_is_on_stderr(tmp_path: Path, capsys, monkeypatch) -> None:
     import stagemesh.cli as cli_module
     import stagemesh.run_window as rw
