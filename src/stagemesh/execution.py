@@ -84,6 +84,7 @@ _TOOL_FAILURE = re.compile(
     re.IGNORECASE,
 )
 _MISSING_COMMAND = re.compile(
+    r"(?:^|\n)\s*provider executable not found\s*$|"
     r"(?:^|\n)\s*(?:/bin/(?:ba)?sh:\s*)?[^:\n]+:\s*(?:command not found|no such file or directory)\s*$|"
     r"(?:^|\n).*?is not recognized as an internal or external command(?:,|\.|\s|$)",
     re.IGNORECASE | re.MULTILINE,
