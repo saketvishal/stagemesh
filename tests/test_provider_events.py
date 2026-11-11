@@ -187,6 +187,148 @@ def test_assistant_pass_without_a_successful_terminal_event_is_incomplete() -> N
     assert provider_event_response(stdout) is None
 
 
+def _assistant_line(text: str) -> str:
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]},
+        }
+    )
+
+
+def test_prior_completed_turn_does_not_authorize_a_later_incomplete_assistant() -> None:
+    """A completed turn cannot prove the next assistant message."""
+    stdout = "\n".join(
+        [
+            _assistant_line('{"decision":"FAIL_WITH_FINDINGS"}'),
+            json.dumps({"type": "turn_ended", "outcome": "completed"}),
+            _assistant_pass_line(),
+        ]
+    )
+
+    assert provider_event_response(stdout) is None
+
+
+def test_multi_turn_completed_stream_keeps_the_latest_answer() -> None:
+    stdout = "\n".join(
+        [
+            _assistant_line('{"decision":"FAIL_WITH_FINDINGS"}'),
+            json.dumps({"type": "usage", "stopReason": "tool_use"}),
+            json.dumps({"type": "end", "stopReason": "end_turn"}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "Read", "input": {"path": "src/stagemesh/provider_events.py"}},
+                            {"type": "text", "text": '{"decision":"PASS"}'},
+                        ]
+                    },
+                }
+            ),
+            json.dumps({"type": "turn_ended", "outcome": "completed"}),
+        ]
+    )
+
+    assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
+def test_completed_turn_followed_by_cancellation_discards_the_verdict() -> None:
+    stdout = "\n".join(
+        [
+            _assistant_pass_line(),
+            json.dumps({"type": "turn_ended", "outcome": "completed"}),
+            _assistant_pass_line(),
+            json.dumps(
+                {
+                    "type": "turn_ended",
+                    "outcome": "cancelled",
+                    "cancellation_category": "permission_cancelled",
+                }
+            ),
+        ]
+    )
+
+    assert provider_event_response(stdout) is None
+
+
+def test_later_completed_turn_can_follow_an_earlier_cancellation() -> None:
+    stdout = "\n".join(
+        [
+            _assistant_pass_line(),
+            json.dumps({"type": "turn_ended", "outcome": "cancelled"}),
+            _assistant_line('{"decision":"PASS"}'),
+            json.dumps({"type": "result", "result": '{"decision":"PASS"}', "stop_reason": "end_turn"}),
+        ]
+    )
+
+    assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
+def test_self_contained_final_answers_still_count_after_an_assistant_draft() -> None:
+    stdout = "\n".join(
+        [
+            _assistant_line("draft"),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": '{"decision":"PASS"}'}}),
+        ]
+    )
+
+    assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
+def test_truncated_stream_does_not_keep_an_earlier_completed_answer() -> None:
+    stdout = "\n".join(
+        [
+            _assistant_pass_line(),
+            json.dumps({"type": "end", "stopReason": "end_turn"}),
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"{\\"decision\\":\\"PASS\\"}"}]',
+        ]
+    )
+
+    assert provider_event_response(stdout) is None
+
+
+def test_malformed_line_before_completion_does_not_discard_the_answer() -> None:
+    stdout = "\n".join(
+        [
+            _assistant_pass_line(),
+            "not-json",
+            json.dumps({"type": "end", "stopReason": "end_turn"}),
+        ]
+    )
+
+    assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
+def test_truncated_terminal_line_is_not_completion() -> None:
+    stdout = _assistant_pass_line() + '\n{"type":"turn_ended","outcome":"completed"'
+
+    assert provider_event_response(stdout) is None
+
+
+def test_tool_use_after_a_completed_turn_does_not_prove_the_next_answer() -> None:
+    stdout = "\n".join(
+        [
+            _assistant_line('{"decision":"FAIL_WITH_FINDINGS"}'),
+            json.dumps({"type": "turn_ended", "outcome": "completed"}),
+            json.dumps({"type": "usage", "stopReason": "tool_use"}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "grep", "input": {"pattern": "provider_event_response"}}
+                        ]
+                    },
+                }
+            ),
+            _assistant_pass_line(),
+        ]
+    )
+
+    assert provider_event_response(stdout) is None
+
+
 @pytest.mark.parametrize(
     "event",
     [
