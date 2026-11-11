@@ -127,6 +127,9 @@ def test_operator_snapshot_projects_current_status_without_raw_process_or_payloa
     assert "provider.exe" not in encoded and "example.invalid" not in encoded
     active, = body["sections"]["active_executions"]
     assert active["task_id"] == task and active["provider"] == "codex"
+    assert active["process_state"] == "UNKNOWN"
+    assert active["release_unknown_allowed"] is True
+    assert active["started_at"] > 0 and active["updated_at"] >= active["started_at"]
     assert "pid" not in active
     worker, = body["sections"]["workers"]
     assert worker == {
