@@ -68,14 +68,6 @@ def test_event_stream_command_is_provider_specific(
         },
         {"type": "result", "result": '{"decision":"PASS"}'},
         {"type": "result", "structured_output": {"decision": "PASS"}},
-        {
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "text", "text": '{"decision":"PASS"}'}
-                ]
-            },
-        },
     ],
 )
 def test_provider_event_response_extracts_supported_final_answers(
@@ -127,6 +119,72 @@ def test_provider_event_response_keeps_a_verdict_when_the_turn_completes() -> No
     )
 
     assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
+def _assistant_pass_line() -> str:
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": '{"decision":"PASS"}'}]},
+        }
+    )
+
+
+def test_grok_turn_ended_cancellation_does_not_keep_pass() -> None:
+    """Actual Grok session shape: turn_ended outcome cancelled, permission_cancelled."""
+    stdout = "\n".join(
+        [
+            _assistant_pass_line(),
+            json.dumps(
+                {
+                    "type": "turn_ended",
+                    "outcome": "cancelled",
+                    "cancellation_category": "permission_cancelled",
+                }
+            ),
+        ]
+    )
+
+    assert provider_event_response(stdout) is None
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        {"type": "turn_ended", "outcome": "cancelled", "cancellation_context": {"reason": "max_turns_reached", "limit": 8}},
+        {"type": "turn_ended", "outcome": "error"},
+        {"type": "turn-ended", "outcome": "cancelled"},
+        {"type": "result", "result": '{"decision":"PASS"}', "stop_reason": "cancelled"},
+    ],
+)
+def test_unsuccessful_terminal_events_discard_an_earlier_pass(terminal: dict[str, object]) -> None:
+    stdout = "\n".join([_assistant_pass_line(), json.dumps(terminal)])
+
+    assert provider_event_response(stdout) is None
+
+
+def test_completed_grok_turn_ended_keeps_the_verdict() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "usage", "stopReason": "tool_use"}),
+            _assistant_pass_line(),
+            json.dumps({"type": "turn_ended", "outcome": "completed"}),
+        ]
+    )
+
+    assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
+def test_assistant_pass_without_a_successful_terminal_event_is_incomplete() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "thread.started"}),
+            json.dumps({"type": "usage", "stopReason": "tool_use"}),
+            _assistant_pass_line(),
+        ]
+    )
+
+    assert provider_event_response(stdout) is None
 
 
 @pytest.mark.parametrize(

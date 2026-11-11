@@ -95,10 +95,17 @@ def provider_event_response(stdout: str) -> str | None:
     persisted by this projection. Unknown events cannot masquerade as a review
     verdict: callers fail closed when this returns ``None``. A terminal event
     whose stop reason is not a completed turn discards any earlier answer.
-    Per-response reasons such as ``tool_use`` are not terminal.
+    Grok's session ``turn_ended`` event is terminal: only ``outcome``
+    ``completed`` keeps an earlier answer. An ``assistant`` message is
+    intermediate, so a stream that ends without a successful terminal event
+    is incomplete. Per-response reasons such as ``tool_use`` are not terminal.
+    ``result`` and Codex ``item.completed`` agent messages remain final
+    answers on their own.
     """
     answer: str | None = None
+    answer_needs_terminal = False
     terminal_failure = False
+    successful_terminal = False
     for line in stdout.splitlines():
         if not line.strip():
             continue
@@ -106,25 +113,54 @@ def provider_event_response(stdout: str) -> str | None:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and _terminal_review_stop_failed(event):
+        if not isinstance(event, dict):
+            continue
+        if _terminal_review_stop_failed(event):
             terminal_failure = True
+        elif _successful_terminal_event(event):
+            successful_terminal = True
         candidate = _event_answer(event)
         if candidate:
             answer = candidate.strip()
-    if terminal_failure:
+            answer_needs_terminal = _answer_needs_successful_terminal(event)
+            if not answer_needs_terminal:
+                successful_terminal = True
+    if terminal_failure or (answer_needs_terminal and not successful_terminal):
         return None
     return answer
 
 
+def _event_type(event: dict[str, Any]) -> str:
+    return str(event.get("type") or "").casefold().replace("-", "_")
+
+
 def _terminal_review_stop_failed(event: dict[str, Any]) -> bool:
     """True when this event closes the run without a completed turn."""
-    event_type = str(event.get("type") or "").casefold().replace("-", "_")
+    event_type = _event_type(event)
     if event_type == "error":
         return True
+    if event_type == "turn_ended":
+        return str(event.get("outcome") or "").casefold() != "completed"
     if event_type not in {"end", "result"}:
         return False
     reason = event.get("stopReason", event.get("stop_reason"))
     return isinstance(reason, str) and bool(reason) and reason not in SUCCESSFUL_REVIEW_STOP_REASONS
+
+
+def _successful_terminal_event(event: dict[str, Any]) -> bool:
+    """True when this event closes a turn that the provider finished."""
+    event_type = _event_type(event)
+    if event_type == "turn_ended":
+        return str(event.get("outcome") or "").casefold() == "completed"
+    if event_type != "end":
+        return False
+    reason = event.get("stopReason", event.get("stop_reason"))
+    return reason in SUCCESSFUL_REVIEW_STOP_REASONS
+
+
+def _answer_needs_successful_terminal(event: dict[str, Any]) -> bool:
+    """Assistant text is not final until a later successful terminal event."""
+    return _event_type(event) == "assistant"
 
 
 def _event_answer(event: object) -> str | None:
