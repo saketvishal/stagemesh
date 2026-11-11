@@ -98,34 +98,46 @@ def provider_event_response(stdout: str) -> str | None:
     Grok's session ``turn_ended`` event is terminal: only ``outcome``
     ``completed`` keeps an earlier answer. An ``assistant`` message is
     intermediate, so a stream that ends without a successful terminal event
-    is incomplete. Per-response reasons such as ``tool_use`` are not terminal.
-    ``result`` and Codex ``item.completed`` agent messages remain final
-    answers on their own.
+    is incomplete. Completion belongs to the latest answer: an earlier
+    successful terminal does not prove a later assistant message, and a
+    trailing truncated line does not preserve an earlier verdict. Per-response
+    reasons such as ``tool_use`` are not terminal. ``result`` and Codex
+    ``item.completed`` agent messages remain final answers on their own.
     """
     answer: str | None = None
     answer_needs_terminal = False
     terminal_failure = False
     successful_terminal = False
+    truncated = False
     for line in stdout.splitlines():
         if not line.strip():
             continue
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            truncated = True
             continue
+        truncated = False
         if not isinstance(event, dict):
             continue
-        if _terminal_review_stop_failed(event):
-            terminal_failure = True
-        elif _successful_terminal_event(event):
-            successful_terminal = True
         candidate = _event_answer(event)
-        if candidate:
+        if candidate and candidate.strip():
+            # A new answer starts a new proof. Prior terminals do not apply.
             answer = candidate.strip()
             answer_needs_terminal = _answer_needs_successful_terminal(event)
-            if not answer_needs_terminal:
-                successful_terminal = True
-    if terminal_failure or (answer_needs_terminal and not successful_terminal):
+            terminal_failure = False
+            successful_terminal = not answer_needs_terminal
+        if _terminal_review_stop_failed(event):
+            terminal_failure = True
+            successful_terminal = False
+        elif _successful_terminal_event(event):
+            successful_terminal = True
+    if (
+        truncated
+        or answer is None
+        or terminal_failure
+        or (answer_needs_terminal and not successful_terminal)
+    ):
         return None
     return answer
 
