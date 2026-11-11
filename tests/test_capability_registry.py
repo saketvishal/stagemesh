@@ -1201,20 +1201,25 @@ def test_claude_review_mcp_is_isolated_invoked_and_audited(
         seen_commands.append(command)
         return SimpleNamespace(returncode=0)
 
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "name": "mcp__serena__find_symbol",
-                        "input": {"name_path_pattern": "Target"},
+    event = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "mcp__serena__find_symbol",
+                                "input": {"name_path_pattern": "Target"},
+                            },
+                            {"type": "text", "text": '{"decision":"PASS"}'},
+                        ]
                     },
-                    {"type": "text", "text": '{"decision":"PASS"}'},
-                ]
-            },
-        }
+                }
+            ),
+            json.dumps({"type": "end", "stopReason": "end_turn"}),
+        ]
     )
     monkeypatch.setattr(providers_module, "_prepare_review_checkout", prepare_review)
     monkeypatch.setattr(providers_module, "_git_output", lambda *_args: candidate)
