@@ -4,8 +4,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 from stagemesh.block_kinds import (
     BlockKind,
     classify_block,
@@ -13,7 +11,7 @@ from stagemesh.block_kinds import (
     reentry_refusal,
     runtime_fingerprint,
 )
-from stagemesh.contract_binding import bind_task_contract, contract_for_candidate
+from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.execution import SubprocessExecutor
