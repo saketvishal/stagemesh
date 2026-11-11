@@ -595,7 +595,7 @@ def test_component_planner_fail_closed_boundaries_preserved() -> None:
 
 def test_catalog_completeness_and_canonical_bijection() -> None:
     """Every test file in the repository must be classified in exactly one tier."""
-    assert len(FILE_TIER_MAP) == 214
+    assert len(FILE_TIER_MAP) == 215
 
     # All tiers must have represented tests
     tiers_represented = set(FILE_TIER_MAP.values())
