@@ -211,6 +211,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_spec_integrity_adapter.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_spec_audit.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_adverse_review_policy.py": TestTier.DETERMINISTIC_UNIT,
+    "tests/test_review_evidence_report.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_adverse_review_gate.py": TestTier.DETERMINISTIC_UNIT,
 
     # -------------------------------------------------------------------------
@@ -783,6 +784,7 @@ FILE_RUNTIME_SECONDS: dict[str, float] = {
     'tests/test_research_scope_gate.py': 9.760,
     'tests/test_research_stage.py': 155.420,
     'tests/test_research_tree_recovery.py': 9.540,
+    'tests/test_review_evidence_report.py': 0.400,
     'tests/test_review_disposition.py': 395.380,
     'tests/test_review_recovery.py': 133.340,
     'tests/test_review_reliability.py': 785.160,
