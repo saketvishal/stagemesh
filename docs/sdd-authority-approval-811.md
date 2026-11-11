@@ -9,8 +9,9 @@ This package asks for decisions. It does not activate a governed profile, change
 | Audit record | Pull request 814, head `3275fccae02aa01b29728e045895ec2dab6df2fc`, merge `edf7930e7fd04160cb231dae18c5ff4b827bdc24` |
 | Audit document | `docs/sdd-governance-audit-811.md` |
 | Proposed requirements | `SDD-AUTH-001` through `SDD-AUTH-015`, still `PROPOSED` |
-| Recommended next baseline | `sdd-authority-1`, in force only after the founder accepts the decisions below |
-| This file | Decision package. An agent must not edit it to imitate approval. |
+| Recommended next baseline | `sdd-authority-1`, status `AWAITING_FOUNDER_APPROVAL` |
+| Direction recorded | D1, D2, D6, D7, D8, D9, and D10 follow the recommendation below. D3, D4, and D5 do not. Their original text stays as history. The signoff package at the end is the amended candidate. |
+| This file | One decision package. An agent must not edit it to imitate approval. |
 
 ## Reconciliation
 
@@ -52,7 +53,7 @@ No requirement in `SDD-AUTH-001` through `SDD-AUTH-015` needs to be deleted. SDD
 
 Version `sdd-authority-1`. Owner: founder. Status of this recommendation: `AWAITING_FOUNDER_APPROVAL`.
 
-Until the founder accepts it, `sdd-authority-0` remains the unapproved proposal in the audit, and runtime behavior stays as it is. Accepting `sdd-authority-1` means the decisions D1 through D10 below. It still does not flip the live config by itself. A later, separate authorization implements them.
+Until the founder accepts it, `sdd-authority-0` remains the unapproved proposal in the audit, and runtime behavior stays as it is. Accepting `sdd-authority-1` means the signoff package, including the recorded direction and the D3, D4, and D5 amendments. It still does not flip the live config by itself. A later, separate authorization implements them.
 
 The baseline reuses the current control plane:
 
@@ -71,7 +72,7 @@ It does not add a second specification engine, a second reviewer lifecycle, or a
 
 Name: `governed-sdd`.
 
-Not enabled by this document.
+Not enabled by this document. The path rule and the Claude/Antigravity pair in this section are the original proposal. The signoff package amends both. Do not implement from this section.
 
 A project is governed only when its config explicitly sets that profile. Detecting `saketvishal/stagemesh` and turning the profile on automatically is rejected, because a fork or a historical checkout would change behavior without a decision. The StageMesh repository's own nontrivial development becomes mandatory only when the founder later authorizes the config change for `C:\development\stagemesh\main`.
 
@@ -104,7 +105,7 @@ Existing directories under `C:\development\stagemesh\main\.stagemesh\worktrees` 
 
 ## Decisions for the founder
 
-Each item is open. The recommended default is the one this package will treat as `sdd-authority-1` if the founder accepts the package as a whole. Rejecting one item keeps the package at `AWAITING_FOUNDER_APPROVAL` until that item is rewritten.
+The text under each decision is the original recommendation and stays as history. Direction on D1, D2, D6, D7, D8, D9, and D10 matches that recommendation. D3, D4, and D5 were sent back for amendment. The package remains `AWAITING_FOUNDER_APPROVAL`.
 
 ### D1. Record this package as the candidate baseline
 
@@ -120,19 +121,25 @@ Accept: StageMesh development can be held to the profile without changing Cavent
 
 ### D3. Define nontrivial as product, script, workflow, and policy files
 
-Recommendation: the path intersection in the governed-profile section. Docs-only records that do not change `SDD-AUTH-*` text may skip the plan challenge.
+Original recommendation, not accepted: the path intersection in the governed-profile section. Docs-only records that do not change `SDD-AUTH-*` text may skip the plan challenge.
+
+Amendment required before signoff: classify by behavioral and policy impact, including architecture docs, agent instructions, build configuration, tests, and protected governance files. The amendment is in the signoff package. This paragraph stays as the record of the first recommendation.
 
 Accept: audit and approval documents can land without a false implementation gate. Reject the docs exception: every markdown edit waits for a challenge. Widen nontrivial to all files: generated evidence and lockfiles enter the gate.
 
 ### D4. Require an independent challenge before implementation
 
-Recommendation: `require_approved_spec` and `require_plan_challenge` together, with distinct executed planner and challenger providers. Recommended names: `claude` then `agy`.
+Original recommendation, not accepted as an architectural dependency: `require_approved_spec` and `require_plan_challenge` together, with distinct executed planner and challenger providers. Recommended names: `claude` then `agy`.
+
+Amendment required before signoff: require independent authorized planner and challenger identities. Claude and Antigravity are preferred providers, not immutable dependencies. The amendment is in the signoff package. This paragraph stays as the record of the first recommendation.
 
 Accept: a missing, stale, self-reviewed, or non-accept challenge blocks dispatch. Reject: a spec can be approved with no independent challenge, which fails issue 811's pre-code challenge requirement. Requiring Codex as one of the roles conflicts with Codex remaining optional.
 
 ### D5. Require an accountable approver on the existing approval file
 
-Recommendation: extend the current `.approval.json` consumed by `evaluate_planning_gate` with `approver_name` and `approver_role`. Authority-baseline changes require role `founder`. Ordinary task specs require role `scope-owner`. The gate rejects a missing approver and an approver whose provider identity matches the planner, challenger, or implementer. The planner and challenger still cannot write that file. Do not add signatures or a second approval store in the first slice.
+Original recommendation, not accepted: extend the current `.approval.json` consumed by `evaluate_planning_gate` with `approver_name` and `approver_role`. Authority-baseline changes require role `founder`. Ordinary task specs require role `scope-owner`. The gate rejects a missing approver and an approver whose provider identity matches the planner, challenger, or implementer. The planner and challenger still cannot write that file. Do not add signatures or a second approval store in the first slice.
+
+Amendment required before signoff: a self-written name or role in a JSON file is not approval. Approval must be an independently verified operator act, bound to the frozen specification digest and the applicable authority version. The amendment is in the signoff package. This paragraph stays as the record of the first recommendation.
 
 Accept: self-approval by digest flag stops being sufficient. A person who can write files locally can still type a false name; the process receipts catch the known provider identities, not every local writer. Reject: the documented human-approval rule stays unenforced. Choose signatures now: the first slice becomes a new trust subsystem, which this package rejects.
 
@@ -168,7 +175,7 @@ Accept: admission and delivery policy stay where they are. Reject and disable au
 
 ## Bounded implementation plan
 
-Not authorized. After the founder accepts the decisions, each slice is a separate reviewed change. None of these slices creates a new subsystem.
+Historical plan from the first package. Not authorized. Slice 1 below repeats the rejected D5 mechanism and is not the signoff boundary. The signoff package replaces this table for any later implementation. The rows stay so the first proposal remains visible.
 
 | Slice | Reuse | Change | Proof | Does not include |
 | --- | --- | --- | --- | --- |
@@ -181,10 +188,69 @@ Not authorized. After the founder accepts the decisions, each slice is a separat
 
 The issue 769 wording fix is a separate documentation correction. It is not a slice of this baseline.
 
+## Founder signoff package
+
+Status of `sdd-authority-1`: `AWAITING_FOUNDER_APPROVAL`.
+
+This is the amended candidate. It is not a second architecture. `SDD-AUTH-001` through `SDD-AUTH-015` remain the requirements, with the provenance in the reconciliation table. Direction on D1, D2, D6, D7, D8, D9, and D10 is the recommendation already written above. D3, D4, and D5 apply only as amended here. Nothing in this section enables the profile or changes live configuration.
+
+### Authority requirements
+
+| Rule | Statement |
+| --- | --- |
+| Baseline | `sdd-authority-1` becomes authoritative only when the founder approves this signoff package. `sdd-authority-0` stays `PROPOSED`. The audit file is not edited to simulate that approval. |
+| Profile | `governed-sdd` is an explicit config value. It is the intended rule for nontrivial StageMesh development. Other projects stay on today's opt-in defaults. The repository name does not turn the profile on. |
+| Governed change | A change is governed when it can alter behavior or policy. That class includes architecture documents, agent instructions, build configuration, tests, and protected governance files, as well as product source and scripts. Path filters that cover only `src/**` are not sufficient. A change whose impact is unclassified is governed. |
+| Not a governed behavior change | Generated evidence, dependency lockfiles that do not change policy, and historical release notes that do not amend architecture, agent instructions, or `SDD-AUTH-*` text. When a file mixes those with a governed class, the whole change is governed. |
+| Challenge | Implementation of a governed change waits for an independent challenge whose verdict is `accept`. The planner and challenger are two different authorized provider identities, with different command identities. Claude and Antigravity are the preferred pair when both are authorized and available. Their names are not required forever, and this package does not add or remove any provider authorization. Codex is not required. |
+| Approval | An operator approval is accepted only when it is independently verified and binds the frozen planning-spec digest, the challenge digest when a challenge is required, the contract digest, the baseline SHA, and the applicable authority version. A name or role written by the planner, challenger, implementer, or the same agent into `.approval.json` is not approval. |
+| Task and objective | A task may reach `DONE` through its contract, validation, review, and integration. The original objective remains a separate verdict. `ACHIEVED` is the only product-complete claim. `NOT_ACHIEVED` and `INCONCLUSIVE` must not be reported as delivery. |
+| Workspace | Runner worktrees stay under `<project>/.stagemesh/worktrees`. A configured root in the process temp directory or `%LOCALAPPDATA%\Temp` is refused. Operator worktrees for this repository stay under `C:\development\stagemesh\worktrees\issue-<id>`. Existing runtime worktrees are not moved. |
+| Authority corpus | Planning specs cite `SDD-AUTH-*` and the accepted baseline. OpenSpec is not adopted. |
+| No bypass | The first governed profile has no waiver for the challenge, independent review, or required validation. |
+| Unchanged controls | Auto-label, PR-only landing, the GitHub ruleset, provider authorization, and the unmet Founder Hands-Off gate stay as they are. |
+
+### Enforcement sequence
+
+This sequence is the required order after a later implementation authorization. It is not enabled now.
+
+1. Classify the change by behavioral and policy impact. Unclassified impact fails closed as governed.
+2. For a governed change, require a frozen planning spec bound to the contract digest and baseline SHA, citing the applicable `SDD-AUTH-*` identifiers and the authority version.
+3. Require a challenge from a second authorized provider identity. Prefer Claude and Antigravity. Accept another distinct authorized pair when a preferred provider is unavailable. A missing, stale, same-identity, or non-`accept` challenge blocks dispatch.
+4. Require operator approval verified outside the planner, challenger, and implementer. Bind it to the frozen spec digest and the applicable authority. Reject a self-written JSON name or role.
+5. Admit implementation only inside an explicit `STRICT` or `BOUNDED` contract. The existing agent policy, quality policy, and worktree-root rules apply.
+6. Validate and independently review the exact candidate SHA. The reviewer is not the implementer.
+7. The task may then reach `DONE`. Report the objective verdict separately. Do not report the objective delivered when that verdict is `NOT_ACHIEVED` or `INCONCLUSIVE`.
+
+### Unresolved choice
+
+One choice remains inside the amended D5, and it blocks implementation of the approval check until the founder selects it. A self-written JSON role is already rejected.
+
+Recommendation: reuse `git_identity.py` and the existing attribution identity check. Accept the approval only when its author and committer are the configured operator identity, those identities are not tool or provider identities, and the recorded payload contains the frozen spec digest, the challenge digest when required, and the authority version. Planner, challenger, and implementer processes cannot create that record.
+
+Consequence of accepting that recommendation: an operator git commit is the verification channel, and a stolen operator identity can approve. Consequence of rejecting it: a stronger channel, such as an out-of-band signature, has to be chosen before any approval slice is written. This package does not add that channel.
+
+No other decision in D1 through D10 remains open except final approval of this package and that D5 channel.
+
+### Implementation boundaries
+
+Not authorized. After founder approval of this package and of the D5 channel, later changes stay inside these bounds. They reuse the modules named in the first package. They do not add a specification engine.
+
+| Allowed later | Forbidden |
+| --- | --- |
+| Impact classification ahead of `evaluate_planning_gate`, failing closed when unclassified | A path list limited to `src/**`, `scripts/**`, `.github/**`, and policy JSON |
+| Distinct authorized planner and challenger identities, with Claude and Antigravity as preference only | Hard-coding Claude or Antigravity as the only legal roles, or changing the authorized provider list |
+| Operator approval bound to the spec digest, challenge digest, and authority version, verified by the chosen D5 channel | Treating `approver_name` or `approver_role` in agent-written JSON as approval |
+| Objective verdict reported beside task `DONE` | Making task `DONE` mean the product objective is complete, or blocking every child because the objective is open |
+| Temp-root refusal in `_validate_worktree_root` | Retargeting `runtime.worktree_root` or moving existing `.stagemesh/worktrees` |
+| Explicit `governed-sdd` config, default absent | Enabling it in the live project config, auto-enabling it by repository name, or editing provider authorization |
+| One synthetic canary after those checks exist | New GitHub issues, coding agents, a batch, Caventra edits, an OpenSpec import, or a ruleset change |
+
 ## What this package does not do
 
 - It does not mark `sdd-authority-0` or `sdd-authority-1` approved.
-- It does not change `C:\development\stagemesh\main\.stagemesh\config.json`.
-- It does not start a worker, label an issue ready, or merge an implementation change.
-- It does not invoke Codex or alter provider authorization.
+- It does not enable `governed-sdd` or change `C:\development\stagemesh\main\.stagemesh\config.json`.
+- It does not change provider authorization or require Codex.
+- It does not create an implementation issue, start a worker, or label an issue ready.
+- It does not invoke a coding agent.
 - It does not move the shared checkout or any existing task worktree.
