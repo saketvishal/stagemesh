@@ -95,6 +95,40 @@ def test_provider_event_response_fails_closed_on_unknown_or_malformed_events() -
     assert provider_event_response('{"type":"turn.completed"}\nnot-json') is None
 
 
+@pytest.mark.parametrize("stop_reason", ["cancelled", "max_turn_requests", "max_tokens", "refusal"])
+def test_provider_event_response_discards_a_verdict_after_an_unfinished_turn(stop_reason: str) -> None:
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": '{"decision":"PASS"}'}]},
+                }
+            ),
+            json.dumps({"type": "end", "stopReason": stop_reason}),
+        ]
+    )
+
+    assert provider_event_response(stdout) is None
+
+
+def test_provider_event_response_keeps_a_verdict_when_the_turn_completes() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "usage", "stopReason": "tool_use"}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": '{"decision":"PASS"}'}]},
+                }
+            ),
+            json.dumps({"type": "end", "stopReason": "end_turn"}),
+        ]
+    )
+
+    assert provider_event_response(stdout) == '{"decision":"PASS"}'
+
+
 @pytest.mark.parametrize(
     "event",
     [

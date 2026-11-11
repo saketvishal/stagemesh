@@ -16,6 +16,9 @@ class ProviderEventError(RuntimeError):
 
 CAPABILITY_EVIDENCE_MISSING = "capability_evidence_missing"
 CAPABILITY_POLICY_VIOLATION = "capability_policy_violation"
+# A headless review is complete only when the provider finished the turn.
+# max_turn_requests, max_tokens, refusal, and cancelled are terminal failures.
+SUCCESSFUL_REVIEW_STOP_REASONS = frozenset({"end_turn"})
 
 
 @dataclass(frozen=True)
@@ -90,9 +93,12 @@ def provider_event_response(stdout: str) -> str | None:
 
     The raw stream remains available to the evidence observers but is never
     persisted by this projection. Unknown events cannot masquerade as a review
-    verdict: callers fail closed when this returns ``None``.
+    verdict: callers fail closed when this returns ``None``. A terminal event
+    whose stop reason is not a completed turn discards any earlier answer.
+    Per-response reasons such as ``tool_use`` are not terminal.
     """
     answer: str | None = None
+    terminal_failure = False
     for line in stdout.splitlines():
         if not line.strip():
             continue
@@ -100,10 +106,25 @@ def provider_event_response(stdout: str) -> str | None:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(event, dict) and _terminal_review_stop_failed(event):
+            terminal_failure = True
         candidate = _event_answer(event)
         if candidate:
             answer = candidate.strip()
+    if terminal_failure:
+        return None
     return answer
+
+
+def _terminal_review_stop_failed(event: dict[str, Any]) -> bool:
+    """True when this event closes the run without a completed turn."""
+    event_type = str(event.get("type") or "").casefold().replace("-", "_")
+    if event_type == "error":
+        return True
+    if event_type not in {"end", "result"}:
+        return False
+    reason = event.get("stopReason", event.get("stop_reason"))
+    return isinstance(reason, str) and bool(reason) and reason not in SUCCESSFUL_REVIEW_STOP_REASONS
 
 
 def _event_answer(event: object) -> str | None:

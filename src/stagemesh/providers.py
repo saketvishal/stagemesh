@@ -67,6 +67,7 @@ from .provider_catalog import catalog_commands, catalog_definitions, write_capab
 from .provider_events import (
     CAPABILITY_EVIDENCE_MISSING,
     CAPABILITY_POLICY_VIOLATION,
+    SUCCESSFUL_REVIEW_STOP_REASONS,
     ProviderEventError,
     event_stream_command,
     loaded_receipts,
@@ -1111,7 +1112,7 @@ class RuntimeCommandAdapter:
                         "provider_event_response_missing"
                     )
                 return response
-            return _provider_text_response(stdout)
+            return _review_provider_response(stdout)
         except BaseException as exc:
             if not cleanup_confirmed:
                 if isinstance(exc, OperatorStopRequested) and exc.cleanup_complete:
@@ -1190,6 +1191,9 @@ REVIEW_JSON_SCHEMA = json.dumps(
 )
 
 _GROK_UNATTENDED_TOOLS = "Read,Grep,Edit,Bash"
+# Internal read-only ids. Compatibility names such as Read/Grep/Bash are not
+# preserved: an unknown allowlist entry does not remove the other tools.
+_GROK_READ_ONLY_TOOL_IDS = frozenset({"read_file", "grep", "list_dir", "hashline_read", "hashline_grep"})
 _GROK_DESKTOP_DENY_RULES = (
     "Bash(start *)",
     "Bash(explorer *)",
@@ -1219,6 +1223,55 @@ def _ensure_flag(args: list[str], flag: str) -> list[str]:
     return args if flag in args else [*args, flag]
 
 
+def _explicit_grok_tool_values(args: list[str]) -> list[str]:
+    """Every ``--tools`` value in order, including the ``--tools=value`` spelling."""
+    values: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--tools" and index + 1 < len(args):
+            values.append(args[index + 1])
+            index += 2
+            continue
+        if token.startswith("--tools="):
+            values.append(token.split("=", 1)[1])
+            index += 1
+            continue
+        index += 1
+    return values
+
+
+def _without_grok_tools(args: list[str]) -> list[str]:
+    """Remove both ``--tools VALUE`` and ``--tools=VALUE`` before one canonical list is added."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--tools":
+            index += 2 if index + 1 < len(args) else 1
+            continue
+        if token.startswith("--tools="):
+            index += 1
+            continue
+        cleaned.append(token)
+        index += 1
+    return cleaned
+
+
+def _restricted_grok_tools(values: list[str]) -> str | None:
+    """A single explicit read-only tool list, or None when the command must use the default set.
+
+    Older saved commands named shells and editors. Those stay on the unattended
+    default. A narrower read-only list is kept so review isolation is not widened.
+    """
+    if len(values) != 1:
+        return None
+    parts = [part.strip() for part in values[0].split(",")]
+    if not parts or any(part not in _GROK_READ_ONLY_TOOL_IDS for part in parts):
+        return None
+    return ",".join(parts)
+
+
 def _harden_unattended_command(args: list[str]) -> list[str]:
     """Enforce provider-owned headless isolation even for commands saved by older StageMesh releases."""
     executable = Path(args[0]).name.lower() if args else ""
@@ -1242,15 +1295,16 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
             return _without_option(args, "--safe-mode")
         return _ensure_flag(args, "--safe-mode")
     if executable in {"grok", "grok.exe"}:
+        restricted_tools = _restricted_grok_tools(_explicit_grok_tool_values(args))
         args = _without_option(args, "--always-approve")
-        args = _without_option(args, "--tools", takes_value=True)
+        args = _without_grok_tools(args)
         if "--permission-mode" in args:
             mode_index = args.index("--permission-mode") + 1
             if mode_index < len(args):
                 args[mode_index] = "dontAsk"
         else:
             args.extend(("--permission-mode", "dontAsk"))
-        args.extend(("--tools", _GROK_UNATTENDED_TOOLS))
+        args.extend(("--tools", restricted_tools or _GROK_UNATTENDED_TOOLS))
         for flag in ("--disable-web-search", "--no-subagents"):
             args = _ensure_flag(args, flag)
         for rule in _GROK_DESKTOP_DENY_RULES:
@@ -1306,6 +1360,36 @@ def _provider_text_response(stdout: str) -> str:
     if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):
         return json.dumps(payload["structured_output"], separators=(",", ":"))
     return text
+
+
+def _provider_stop_reason(stdout: str) -> str | None:
+    """The headless stop token on a single JSON result, when the provider supplied one."""
+    text = stdout.strip()
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    reason = payload.get("stopReason", payload.get("stop_reason"))
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _review_stop_failure_reason(reason: str) -> str:
+    """Stable infrastructure reason for a headless stop that did not finish the turn."""
+    if reason == "cancelled":
+        return "review_provider_cancelled"
+    if reason and len(reason) <= 64 and all(character.isalnum() or character in "_-" for character in reason):
+        return f"review_provider_stopped:{reason}"
+    return "review_provider_stopped:unknown"
+
+
+def _review_provider_response(stdout: str) -> str:
+    """Unwrap a review answer. An unfinished headless turn is never a verdict."""
+    reason = _provider_stop_reason(stdout)
+    if reason is not None and reason not in SUCCESSFUL_REVIEW_STOP_REASONS:
+        return _review_infrastructure_failure(_review_stop_failure_reason(reason))
+    return _provider_text_response(stdout)
 
 
 def _provider_permission_denial(stdout: str, stderr: str) -> str | None:
