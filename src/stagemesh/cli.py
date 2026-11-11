@@ -4220,13 +4220,23 @@ def command_capacity(args: argparse.Namespace) -> int:
     config = load_config(project)
     adapters = adapters_from_config(config)
     if args.primary_down or args.secondary_down:
+        primary = args.primary if isinstance(args.primary, str) else ""
+        secondary = args.secondary if isinstance(args.secondary, str) else ""
+        if not primary.strip() or not secondary.strip():
+            print(
+                "capacity error: legacy fallback requires --primary and --secondary",
+                file=sys.stderr,
+            )
+            return 2
         registry = CapacityRegistry()
-        registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
-        registry.record(args.secondary, CapacityKind.AVAILABLE if not args.secondary_down else CapacityKind.CAPACITY)
-        chosen = registry.choose_primary_secondary(args.primary, args.secondary)
+        primary_kind = CapacityKind.CAPACITY if args.primary_down else CapacityKind.AVAILABLE
+        secondary_kind = CapacityKind.CAPACITY if args.secondary_down else CapacityKind.AVAILABLE
+        registry.record(primary, primary_kind)
+        registry.record(secondary, secondary_kind)
+        chosen = registry.choose_primary_secondary(primary, secondary)
         payload = {
             "chosen": chosen,
-            "providers": registry.snapshot((args.primary, args.secondary)),
+            "providers": registry.snapshot((primary, secondary)),
         }
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -4880,7 +4890,8 @@ def command_provider_profile(args: argparse.Namespace) -> int:
         return 2
     routing["provider_profile"] = "balanced"
     routing.setdefault("provider_selection_policy", "least_recently_used")
-    configured = {adapter.name for adapter in adapters_from_config(load_config(project))}
+    loaded = load_config(project)
+    configured = {adapter.name for adapter in adapters_from_config(loaded)}
     if not configured:
         print(
             "provider profile cannot be enabled: the project provider registry is empty; "
@@ -4888,8 +4899,11 @@ def command_provider_profile(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    priorities = {
+        name: spec.priority for name, spec in loaded.provider_specs.items() if spec.priority is not None
+    }
     routing["pools"] = {
-        stage: list(names) for stage, names in balanced_provider_pools(configured).items()
+        stage: list(names) for stage, names in balanced_provider_pools(configured, priorities).items()
     }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -4993,11 +5007,30 @@ def command_provider_authorization(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def _authorized_verifiable_providers(project: Path, verifiable: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Allowlisted providers whose login can be checked. None when the project has no allowlist."""
+    from .config import load_config
+
+    allowed = load_config(project).authorized_providers
+    if allowed is None:
+        return None
+    return tuple(name for name in allowed if name in verifiable)
+
+
 def command_provider_auth(args: argparse.Namespace) -> int:
     """Report coding-CLI login state and API-billing environment variables. Makes no model call; prints no credential."""
     from . import provider_auth
 
-    report = provider_auth.check(require_installed=bool(getattr(args, "require_installed", False)))
+    require_installed = bool(getattr(args, "require_installed", False))
+    authorized = (
+        _authorized_verifiable_providers(Path(args.project), provider_auth.PROVIDERS)
+        if require_installed
+        else None
+    )
+    if authorized is None:
+        report = provider_auth.check(require_installed=require_installed)
+    else:
+        report = provider_auth.check(authorized, require_installed=require_installed)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
@@ -6309,8 +6342,16 @@ def build_parser() -> argparse.ArgumentParser:
     health_cmd.add_argument("--json", action="store_true")
     health_cmd.set_defaults(func=command_health)
     capacity = sub.add_parser("capacity")
-    capacity.add_argument("--primary", default="codex")
-    capacity.add_argument("--secondary", default="claude")
+    capacity.add_argument(
+        "--primary",
+        default=None,
+        help="Legacy fallback provider. Required with --primary-down or --secondary-down.",
+    )
+    capacity.add_argument(
+        "--secondary",
+        default=None,
+        help="Legacy fallback provider. Required with --primary-down or --secondary-down.",
+    )
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
     capacity.add_argument("--task", help="Evaluate task-scoped provider cooldowns and review independence")
@@ -6482,7 +6523,14 @@ def build_parser() -> argparse.ArgumentParser:
         "provider-auth", help="Check coding-CLI login state and API-billing variables without any model call"
     )
     provider_auth_parser.add_argument("--json", action="store_true")
-    provider_auth_parser.add_argument("--require-installed", action="store_true", help="Block unless both claude and codex are installed")
+    provider_auth_parser.add_argument(
+        "--require-installed",
+        action="store_true",
+        help=(
+            "Block unless each verifiable CLI authorized for this project is installed. "
+            "Without an allowlist, claude and codex are both required."
+        ),
+    )
     provider_auth_parser.set_defaults(func=command_provider_auth)
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.add_argument("--provider", help="Configured provider name to exercise with --live")

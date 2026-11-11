@@ -552,8 +552,12 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     provider_pools = _provider_pools(_optional_mapping(routing_data, "pools"))
     known = set(provider_commands) if providers_explicit else set(BUILTIN_PROVIDERS) | set(provider_commands)
     if provider_profile == "balanced":
+        # Explicit routing.pools replace a stage after this spread, so they keep configured order.
+        balanced_priorities = {
+            name: spec.priority for name, spec in provider_specs.items() if spec.priority is not None
+        }
         provider_pools = {
-            **balanced_provider_pools(known),
+            **balanced_provider_pools(known, balanced_priorities),
             **provider_pools,
         }
     provider_weights = _provider_weights(_optional_mapping(routing_data, "provider_weights"))
