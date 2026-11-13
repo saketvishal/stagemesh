@@ -7,6 +7,7 @@ __pycache__/
 .stagemesh/*
 !.stagemesh/quality-policy.json
 !.stagemesh/agent-policy.json
+!.stagemesh/approval-trust.json
 dist/
 build/
 *.egg-info/
