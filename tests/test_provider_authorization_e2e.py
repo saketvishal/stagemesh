@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -71,9 +72,11 @@ def world(tmp_path, monkeypatch):
     from stagemesh import providers as _providers
 
     rig.spawn_errors = []
+    rig.spawned_argv = []
     real_popen = _subprocess.Popen
 
     def recording_popen(*args, **kwargs):
+        rig.spawned_argv.append(args[0] if args else kwargs.get("args"))
         try:
             return real_popen(*args, **kwargs)
         except Exception as exc:  # recorded for diagnosis, then re-raised unchanged
@@ -133,9 +136,9 @@ def test_authorized_pair_completes_a_task_with_independent_review(world):
 
 
 def test_claude_and_agy_complete_after_restart_with_no_codex_available(world, monkeypatch):
-    from stagemesh import providers as providers_module
-    from stagemesh.domain import EvidenceKind, EvidenceStatus
+    from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
     from stagemesh.persistence import Store
+    from stagemesh.provider_authorization import program_name
 
     rig, calls = world
     bin_dir = calls.parent / "bin"
@@ -143,12 +146,20 @@ def test_claude_and_agy_complete_after_restart_with_no_codex_available(world, mo
     codex.unlink()
     grok = shim_path(bin_dir, "grok")
     grok.unlink()
-    real_which = providers_module.shutil.which
-    monkeypatch.setattr(
-        providers_module.shutil,
-        "which",
-        lambda executable: None if Path(str(executable)).stem.casefold() == "codex" else real_which(executable),
+
+    def contains_codex(directory: str) -> bool:
+        root = Path(directory.strip().strip('"'))
+        extensions = [
+            "",
+            *(item.lower() for item in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if item),
+        ]
+        return any((root / f"codex{extension}").is_file() for extension in extensions)
+
+    safe_path = os.pathsep.join(
+        directory for directory in os.environ["PATH"].split(os.pathsep) if directory and not contains_codex(directory)
     )
+    monkeypatch.setenv("PATH", safe_path)
+    assert shutil.which("codex") is None
 
     settings = rig.project / ".stagemesh" / "agy-test.settings.json"
     settings.write_text("{}\n", encoding="utf-8")
@@ -201,9 +212,20 @@ def test_claude_and_agy_complete_after_restart_with_no_codex_available(world, mo
     assert candidate is not None and candidate["produced_by"] == "claude"
     candidate_sha = candidate["sha"]
     assert rig.stage == Stage.REVIEW
-    assert "codex" not in invoked(calls)
     calls_before_restart = invoked(calls)
     assert calls_before_restart == ["claude"]
+    assert rig.store.has_evidence(TASK, candidate_sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+    interrupted_review = rig.store.start_execution(
+        task_id=TASK,
+        claim_id=None,
+        kind=ExecutionKind.REVIEW,
+        pid=2_147_483_647,
+        process_create_time=1.0,
+        boot_id="synthetic-dead-process",
+        executable=str(shim_path(bin_dir, "agy")),
+        candidate_sha=candidate_sha,
+        actor="agy",
+    )
 
     database = rig.project / ".stagemesh" / "stagemesh.sqlite3"
     rig.store.close()
@@ -216,13 +238,34 @@ def test_claude_and_agy_complete_after_restart_with_no_codex_available(world, mo
     assert rig.store.latest_candidate(TASK)["sha"] == candidate_sha
     assert invoked(calls).count("claude") == calls_before_restart.count("claude") == 1
     assert invoked(calls).count("agy") == calls_before_restart.count("agy") + 1
-    assert "codex" not in invoked(calls)
+    recovered = rig.store.conn.execute(
+        "SELECT status, result FROM executions WHERE id=?", (interrupted_review,)
+    ).fetchone()
+    assert recovered["status"] == ExecutionStatus.FAILED
+    assert recovered["result"] == "orphaned"
+    recovery_event = rig.store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type='recovery.orphan_execution_failed' "
+        "ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert json.loads(recovery_event["payload"])["reason"] == "INACTIVE_CLAIM_DEAD_PROCESS"
+    launched_programs = {
+        program_name(str(argv[0] if isinstance(argv, (list, tuple)) else argv).split()[0])
+        for argv in rig.spawned_argv
+        if argv
+    }
+    assert "codex" not in launched_programs
     for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION):
         assert rig.store.has_evidence(TASK, candidate_sha, kind, EvidenceStatus.PASSED)
-    review = rig.review_payload()
+    review_row = rig.store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
+        "ORDER BY rowid DESC LIMIT 1",
+        (TASK, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED),
+    ).fetchone()
+    review = json.loads(review_row["payload"])
     assert review["implementer_provider"] == "claude"
     assert review["review_provider"] == "agy"
     assert review["independent_reviewer"] is True
+    assert rig.git.run("merge-base", "--is-ancestor", candidate_sha, "refs/heads/integration", check=False).returncode == 0
 
 
 def test_stand_in_cli_is_runnable_on_this_platform(world):
