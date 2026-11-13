@@ -29,7 +29,7 @@ import os, pathlib, sys
 name, mode_var = sys.argv[1], "SHIM_MODE_" + sys.argv[1].upper()
 with open(os.environ["SHIM_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(name + "\n")
-prompt = sys.stdin.read()
+prompt = sys.stdin.read() or " ".join(sys.argv[2:])
 mode = os.environ.get(mode_var, "ok")
 if mode == "down":
     sys.stderr.write("authentication_error: not logged in"); sys.exit(1)
