@@ -138,7 +138,7 @@ def test_init_persists_detected_github_origin_as_the_ready_issue_source(
     assert data["github"] == {
         "owner": "acme",
         "repo": "widgets",
-        "auto_label_unlabeled": True,
+        "auto_label_unlabeled": False,
     }
     assert data["task_sources"] == [
         {
@@ -162,6 +162,10 @@ def test_init_classifies_unclassified_issues_preserves_team_labels_and_resyncs_r
 
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
+    (project / ".stagemesh/config.json").write_text(
+        json.dumps({"github": {"auto_label_unlabeled": True}}),
+        encoding="utf-8",
+    )
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     contracts = project / ".stagemesh/contracts"
     contracts.mkdir()
@@ -237,6 +241,11 @@ def test_interactive_init_uses_authenticated_gh_cli_without_persisting_its_token
     from stagemesh.github import GitHubClient, GitHubResult
 
     project = _github_project(tmp_path)
+    (project / ".stagemesh").mkdir()
+    (project / ".stagemesh/config.json").write_text(
+        json.dumps({"github": {"auto_label_unlabeled": True}}),
+        encoding="utf-8",
+    )
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     labels = ["team:owned"]
 
@@ -300,6 +309,11 @@ def test_init_defers_unlabeled_issue_writes_without_github_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = _github_project(tmp_path)
+    (project / ".stagemesh").mkdir()
+    (project / ".stagemesh/config.json").write_text(
+        json.dumps({"github": {"auto_label_unlabeled": True}}),
+        encoding="utf-8",
+    )
     monkeypatch.delenv("STAGEMESH_GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(
         GitHubApiIssueSource,
@@ -441,7 +455,7 @@ def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, mo
     assert json.loads(capsys.readouterr().out)["would_run"] == ["3"]
     migrated = json.loads(config_path.read_text(encoding="utf-8"))
     assert migrated["task_sources"][0]["labels"] == ["stagemesh:ready"]
-    assert migrated["github"]["auto_label_unlabeled"] is True
+    assert migrated["github"]["auto_label_unlabeled"] is False
     assert config_path.read_bytes() == before
 
 
@@ -506,12 +520,14 @@ def test_init_preserves_explicit_github_source_policy(
     source["labels"] = expected
     migrated = json.loads(config_path.read_text(encoding="utf-8"))
     assert migrated["task_sources"] == [source]
-    assert migrated["github"]["auto_label_unlabeled"] is True
+    assert migrated["github"]["auto_label_unlabeled"] is False
 
 
-def test_init_migrates_existing_github_admission_and_refuses_ready_without_write_auth(
+def test_init_migrates_existing_github_admission_without_enabling_issue_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    from stagemesh.github import GitHubClient
+
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
@@ -526,7 +542,16 @@ def test_init_migrates_existing_github_admission_and_refuses_ready_without_write
         json.dumps({"github": {"owner": "acme", "repo": "widgets"}, "task_sources": [source]}),
         encoding="utf-8",
     )
-    monkeypatch.delenv("STAGEMESH_GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("STAGEMESH_GITHUB_TOKEN", "TEST_ONLY_NOT_A_CREDENTIAL")
+
+    def reject_label_write(*args: object, **kwargs: object) -> None:
+        raise AssertionError("init must not write labels without opt-in")
+
+    monkeypatch.setattr(
+        GitHubClient,
+        "add_issue_labels",
+        reject_label_write,
+    )
     monkeypatch.setattr(
         GitHubApiIssueSource,
         "discover",
@@ -538,9 +563,16 @@ def test_init_migrates_existing_github_admission_and_refuses_ready_without_write
     report = json.loads(capsys.readouterr().out)
     migrated = json.loads(config_path.read_text(encoding="utf-8"))
     assert migrated["task_sources"] == [source]
-    assert migrated["github"]["auto_label_unlabeled"] is True
-    assert report["github_issue_classification"]["status"] == "write_authorization_required"
-    assert "github_issue_classification" in {item["name"] for item in report["readiness"]["blockers"]}
+    assert migrated["github"]["auto_label_unlabeled"] is False
+    assert report["github_issue_classification"] == {
+        "status": "disabled",
+        "scanned": 0,
+        "ready_labeled": 0,
+        "triage_labeled": 0,
+        "failed": 0,
+        "reason": "not enabled by project configuration",
+    }
+    assert "github_issue_classification" not in {item["name"] for item in report["readiness"]["blockers"]}
 
 
 def test_init_preserves_explicit_github_classification_opt_out(tmp_path: Path) -> None:

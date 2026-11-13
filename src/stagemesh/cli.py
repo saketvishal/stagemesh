@@ -241,7 +241,7 @@ def _ensure_default_github_task_source(project: Path) -> bool:
             config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return changed
     if "auto_label_unlabeled" not in github:
-        github["auto_label_unlabeled"] = True
+        github["auto_label_unlabeled"] = False
         changed = True
     if "task_sources" not in data:
         data["task_sources"] = [{
