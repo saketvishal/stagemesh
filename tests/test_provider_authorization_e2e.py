@@ -132,6 +132,99 @@ def test_authorized_pair_completes_a_task_with_independent_review(world):
     assert rig.store.latest_candidate(TASK)["produced_by"] != "unused"
 
 
+def test_claude_and_agy_complete_after_restart_with_no_codex_available(world, monkeypatch):
+    from stagemesh import providers as providers_module
+    from stagemesh.domain import EvidenceKind, EvidenceStatus
+    from stagemesh.persistence import Store
+
+    rig, calls = world
+    bin_dir = calls.parent / "bin"
+    codex = shim_path(bin_dir, "codex")
+    codex.unlink()
+    grok = shim_path(bin_dir, "grok")
+    grok.unlink()
+    real_which = providers_module.shutil.which
+    monkeypatch.setattr(
+        providers_module.shutil,
+        "which",
+        lambda executable: None if Path(str(executable)).stem.casefold() == "codex" else real_which(executable),
+    )
+
+    settings = rig.project / ".stagemesh" / "agy-test.settings.json"
+    settings.write_text("{}\n", encoding="utf-8")
+    config_path = rig.project / ".stagemesh" / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "authorization": {"unattended_providers": ["claude", "agy"]},
+                "providers": {
+                    "claude": {
+                        "command": f"{shim_path(bin_dir, 'claude').as_posix()} -p",
+                        "capabilities": ["IMPLEMENT", "REVIEW"],
+                    },
+                    "agy": {
+                        "command": f"{shim_path(bin_dir, 'agy').as_posix()} --settings {settings.as_posix()}",
+                        "capabilities": ["IMPLEMENT", "REVIEW"],
+                    },
+                },
+                "routing": {
+                    "pools": {"IMPLEMENT": ["claude", "agy"], "REVIEW": ["agy", "claude"]},
+                    "require_independent_review": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def coordinator(store: Store) -> Coordinator:
+        config = load_config(rig.project)
+        adapters = adapters_from_config(config)
+        assert {adapter.name for adapter in adapters} == {"claude", "agy"}
+        pool = ProviderPool(
+            adapters,
+            default_pools([adapter.name for adapter in adapters], config.stage_routes, config.provider_pools),
+            require_independent=True,
+            log=rig.log,
+        )
+        return Coordinator(
+            store,
+            rig.project,
+            executor=PooledExecutor(pool),
+            reviewer=Reviewer(require_independent=True, review_pool=pool),
+            integrator=Integrator(integration_ref="refs/heads/integration", require_independent_review=True),
+            require_independent_review=True,
+        )
+
+    rig.coordinator = coordinator(rig.store)
+    rig.tick(3)
+    candidate = rig.store.latest_candidate(TASK)
+    assert candidate is not None and candidate["produced_by"] == "claude"
+    candidate_sha = candidate["sha"]
+    assert rig.stage == Stage.REVIEW
+    assert "codex" not in invoked(calls)
+    calls_before_restart = invoked(calls)
+    assert calls_before_restart == ["claude"]
+
+    database = rig.project / ".stagemesh" / "stagemesh.sqlite3"
+    rig.store.close()
+    rig.store = Store(database)
+    rig.store.migrate()
+    rig.coordinator = coordinator(rig.store)
+    rig.tick(4)
+
+    assert rig.stage == Stage.DONE, rig.text() + failures(rig)
+    assert rig.store.latest_candidate(TASK)["sha"] == candidate_sha
+    assert invoked(calls).count("claude") == calls_before_restart.count("claude") == 1
+    assert invoked(calls).count("agy") == calls_before_restart.count("agy") + 1
+    assert "codex" not in invoked(calls)
+    for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION):
+        assert rig.store.has_evidence(TASK, candidate_sha, kind, EvidenceStatus.PASSED)
+    review = rig.review_payload()
+    assert review["implementer_provider"] == "claude"
+    assert review["review_provider"] == "agy"
+    assert review["independent_reviewer"] is True
+
+
 def test_stand_in_cli_is_runnable_on_this_platform(world):
     """Diagnostic for the harness itself: the stand-in must start and answer through subprocess exactly as StageMesh starts it."""
     import shutil
