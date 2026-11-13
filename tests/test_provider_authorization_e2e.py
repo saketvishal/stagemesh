@@ -1,7 +1,7 @@
-"""End to end through the real coordinator, pool and adapters with stand-in CLIs named codex, claude, grok and agy on PATH.
+"""End to end through the real coordinator, pool and adapters with recorded stand-in CLI invocations.
 
-The stand-ins record every invocation. Whatever the failure pattern, `grok` and `agy` must never be started, and review must stay
-independent (an authorized-but-unavailable reviewer is a blocker, not a reason to substitute).
+The default fixture authorizes Codex and Claude and proves Grok/Antigravity cannot become implicit fallbacks. The no-Codex recovery
+case explicitly authorizes Claude and Antigravity, removes Codex, and keeps review independent across a durable restart.
 """
 from __future__ import annotations
 
@@ -215,15 +215,17 @@ def test_claude_and_agy_complete_after_restart_with_no_codex_available(world, mo
     calls_before_restart = invoked(calls)
     assert calls_before_restart == ["claude"]
     assert rig.store.has_evidence(TASK, candidate_sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+    recovery_task = rig.store.upsert_task("completed recovery sentinel")
+    rig.store.advance_task(recovery_task, Stage.DONE)
     interrupted_review = rig.store.start_execution(
-        task_id=TASK,
+        task_id=recovery_task,
         claim_id=None,
         kind=ExecutionKind.REVIEW,
         pid=2_147_483_647,
         process_create_time=1.0,
         boot_id="synthetic-dead-process",
         executable=str(shim_path(bin_dir, "agy")),
-        candidate_sha=candidate_sha,
+        candidate_sha=None,
         actor="agy",
     )
 
@@ -243,16 +245,22 @@ def test_claude_and_agy_complete_after_restart_with_no_codex_available(world, mo
     ).fetchone()
     assert recovered["status"] == ExecutionStatus.FAILED
     assert recovered["result"] == "orphaned"
-    recovery_event = rig.store.conn.execute(
-        "SELECT payload FROM audit_events WHERE event_type='recovery.orphan_execution_failed' "
-        "ORDER BY rowid DESC LIMIT 1"
-    ).fetchone()
-    assert json.loads(recovery_event["payload"])["reason"] == "INACTIVE_CLAIM_DEAD_PROCESS"
-    launched_programs = {
-        program_name(str(argv[0] if isinstance(argv, (list, tuple)) else argv).split()[0])
-        for argv in rig.spawned_argv
-        if argv
-    }
+    recovery_events = [
+        json.loads(row["payload"])
+        for row in rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='recovery.orphan_execution_failed' ORDER BY rowid"
+        )
+    ]
+    recovery_event = next(item for item in recovery_events if item["execution_id"] == interrupted_review)
+    assert recovery_event["execution_kind"] == ExecutionKind.REVIEW
+    assert recovery_event["reason"] == "TASK_ALREADY_DONE"
+
+    def launched_program(argv: object) -> str:
+        token = argv[0] if isinstance(argv, (list, tuple)) and argv else str(argv).split(maxsplit=1)[0]
+        return program_name(str(token))
+
+    launched_programs = {launched_program(argv) for argv in rig.spawned_argv if argv}
+    assert {"claude", "agy"} <= launched_programs
     assert "codex" not in launched_programs
     for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION):
         assert rig.store.has_evidence(TASK, candidate_sha, kind, EvidenceStatus.PASSED)
