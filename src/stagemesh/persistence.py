@@ -5,6 +5,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ SCHEMA_VERSION = latest_schema_version()
 
 MAX_CANONICAL_CONTRACT_CHARS = 10000
 MAX_CAPABILITY_POLICY_CHARS = 10000
+PLANNING_APPROVAL_EVENT = "planning_approval_recorded"  # equals spec_planning.APPROVAL_RECEIPT_EVENT (tested)
 RETRY_EVENT_KINDS = {
     "task.auto_retried_provider_failure": "automatic_provider",
     "task.block_reentered": "blocked_reentry",
@@ -1926,6 +1928,45 @@ class Store:
             "ORDER BY created_at, rowid",
             (event_type, task_id),
         )
+
+    def record_planning_approval(self, receipt: dict[str, Any]) -> str:
+        """Append one planning_approval_recorded event; an existing receipt id is never rewritten or duplicated."""
+        receipt = _validate_payload(receipt)
+        task_id = _validate_text(receipt.get("task_id"), "task id")
+        receipt_id = _validate_text(receipt.get("receipt_id"), "receipt id")
+        if {"event", "created_at"} & set(receipt):
+            raise StoreValidationError("planning approval receipt must not carry event or created_at")
+        if any(item.get("receipt_id") == receipt_id for item in self.planning_approval_receipts(task_id)):
+            raise StoreValidationError(f"planning approval receipt already exists: {receipt_id}")
+        return self.add_audit_event(PLANNING_APPROVAL_EVENT, receipt)
+
+    def planning_approval_receipts(self, task_id: str) -> list[dict[str, Any]]:
+        """This task's recorded approvals, oldest first, as the payload plus the event name and an ISO creation time."""
+        receipts: list[dict[str, Any]] = []
+        for row in self.task_audit_events(PLANNING_APPROVAL_EVENT, task_id):
+            try:
+                payload = json.loads(row["payload"])
+            except ValueError:
+                continue
+            if isinstance(payload, dict):
+                created = datetime.fromtimestamp(float(row["created_at"]), UTC)
+                receipts.append(
+                    {
+                        **payload,
+                        "event": str(row["event_type"]),
+                        "created_at": created.isoformat().replace("+00:00", "Z"),
+                    }
+                )
+        return receipts
+
+    def active_execution_kinds(self, task_id: str) -> set[str]:
+        """Kinds of this task's executions that may still be running (RUNNING, or UNKNOWN until inspected)."""
+        task_id = _validate_text(task_id, "task id")
+        rows = self.conn.execute(
+            "SELECT DISTINCT kind FROM executions WHERE task_id=? AND status IN (?, ?)",
+            (task_id, ExecutionStatus.RUNNING, ExecutionStatus.UNKNOWN),
+        )
+        return {str(row["kind"]) for row in rows}
 
     def get_retry_state(self, key: str) -> sqlite3.Row | None:
         key = _validate_text(key, "retry key")

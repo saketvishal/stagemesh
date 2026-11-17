@@ -12,6 +12,7 @@ from .github import detect_github_repository
 from .provider_catalog import balanced_provider_pools, catalog_names
 from .routing import RoutingMode
 from .security import SecurityBoundaryError, WorkspaceBoundary
+from .spec_planning import ApprovalAuthority, approval_authority_from_gate_config
 
 # How long a passing live provider check stays fresh (routing.live_acceptance_ttl_seconds overrides it): 7 days.
 DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS = 7 * 24 * 60 * 60.0
@@ -197,6 +198,7 @@ def _planning_gate_policy(
         "require_plan_challenge",
         "planner_provider",
         "challenger_provider",
+        "approval_authority",  # parsed separately by _approval_authority
     }
     if unknown:
         raise ConfigValidationError(f"planning_gate has unsupported keys: {', '.join(sorted(unknown))}")
@@ -249,6 +251,14 @@ def _planning_gate_policy(
             "planning_gate planner_provider and challenger_provider must be different"
         )
     return require_spec, require_challenge, planner_provider, challenger_provider
+
+
+def _approval_authority(data: dict[str, object]) -> ApprovalAuthority | None:
+    """Accountable approval is opt-in: no approval_authority key keeps legacy behavior; a present one must be exact."""
+    authority, problems = approval_authority_from_gate_config(data)
+    if problems:
+        raise ConfigValidationError(f"planning_gate.approval_authority is invalid: {'; '.join(problems)}")
+    return authority
 
 
 @dataclass(frozen=True)
@@ -475,6 +485,7 @@ class StageMeshConfig:
     require_plan_challenge: bool = False
     planner_provider: str | None = None
     challenger_provider: str | None = None
+    approval_authority: ApprovalAuthority | None = None  # None: legacy approval behavior
     research: ResearchConfig | None = None
     driver: DriverInstallConfig | None = None
     spec_governance: SpecGovernanceConfig | None = None
@@ -590,6 +601,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     ) = _planning_gate_policy(
         _optional_mapping(data, "planning_gate"), known
     )
+    approval_authority = _approval_authority(_optional_mapping(data, "planning_gate"))
     return StageMeshConfig(
         project=project,
         github=github,
@@ -623,6 +635,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         require_plan_challenge=require_plan_challenge,
         planner_provider=planner_provider,
         challenger_provider=challenger_provider,
+        approval_authority=approval_authority,
         research=_research_config(_optional_mapping(data, "research"), known),
         driver=_driver_install_config(_optional_mapping(data, "driver")) if "driver" in data else None,
         spec_governance=_spec_governance_config(

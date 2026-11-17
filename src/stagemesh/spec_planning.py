@@ -8,12 +8,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .contracts import ContractError, _relative_paths
+
+if TYPE_CHECKING:
+    from .persistence import Store
 
 MAX_ITEMS = 20
 MAX_TEXT_CHARS = 500
@@ -558,6 +564,721 @@ def accepted_planning_context(
         separators=(",", ":"),
     )
     return canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# --- Accountable approval (opt-in via approval_authority) ---------------------------------------------------------
+APPROVAL_AUTHORITY_VERSION = 1
+APPROVAL_ARTIFACT_VERSION = 2
+APPROVAL_RECEIPT_EVENT = "planning_approval_recorded"
+
+APPROVAL_MISSING = "approval_missing"
+APPROVAL_VERSION_UNSUPPORTED = "approval_version_unsupported"
+APPROVAL_MALFORMED = "approval_malformed"
+APPROVAL_RECEIPT_MISSING = "approval_receipt_missing"
+APPROVAL_RECEIPT_MISMATCH = "approval_receipt_mismatch"
+APPROVAL_AUTHORITY_MISSING = "approval_authority_missing"
+APPROVAL_AUTHORITY_STALE = "approval_authority_stale"
+APPROVAL_BINDING_STALE = "approval_binding_stale"
+APPROVAL_ACTOR_MISSING = "approval_actor_missing"
+APPROVAL_ACTOR_UNAUTHORIZED = "approval_actor_unauthorized"
+APPROVAL_ROLE_CONFLICT = "approval_role_conflict"
+APPROVAL_EXECUTION_IDENTITY_MISSING = "approval_execution_identity_missing"
+PLANNING_INPUTS_INVALID = "planning_inputs_invalid"
+
+NEXT_REPAIR_APPROVAL_AUTHORITY = "repair_approval_authority"
+NEXT_OBTAIN_APPROVAL = "obtain_planning_approval"
+NEXT_CHOOSE_ACTOR = "choose_non_conflicting_actor"
+
+_IDENTITY = re.compile(r"[a-z0-9][a-z0-9._:@/-]{0,99}")
+_AUTHORITY_FIELDS = frozenset({"version", "authority_id", "approver_id"})
+_APPROVAL_FIELDS = frozenset(
+    {
+        "version",
+        "decision",
+        "task_id",
+        "planning_spec_hash",
+        "planning_challenge_hash",
+        "contract_hash",
+        "baseline_sha",
+        "authority_id",
+        "authority_hash",
+        "approver_id",
+        "receipt_id",
+    }
+)
+# Receipt fields that must equal the artifact; the receipt additionally carries its event name and creation time.
+_RECEIPT_BINDINGS = tuple(sorted(_APPROVAL_FIELDS))
+
+
+@dataclass(frozen=True)
+class ApprovalAuthority:
+    authority_id: str
+    approver_id: str
+
+    @property
+    def digest(self) -> str:
+        return approval_authority_digest(self)
+
+
+@dataclass(frozen=True)
+class ExecutionIdentities:
+    """Identities taken from successful StageMesh execution receipts, never from model output."""
+
+    planner: str | None = None
+    challenger: str | None = None
+    implementers: tuple[str, ...] = ()
+    reviewer: str | None = None
+
+
+@dataclass(frozen=True)
+class AccountableApprovalDecision:
+    allowed: bool
+    reason: str = ""
+    detail: str = ""
+    next_action: str | None = None
+    receipt_id: str = ""
+    approved_scope: tuple[str, ...] = ()
+
+
+def approval_authority_digest(authority: ApprovalAuthority) -> str:
+    canonical = json.dumps(
+        {
+            "version": APPROVAL_AUTHORITY_VERSION,
+            "authority_id": authority.authority_id,
+            "approver_id": authority.approver_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validate_approval_authority(payload: Any) -> tuple[ApprovalAuthority | None, tuple[str, ...]]:
+    """Strictly validate an approval_authority object; identifiers are never rewritten."""
+    if not isinstance(payload, dict):
+        return None, ("approval_authority must be a JSON object",)
+    problems = [f"unknown approval_authority field: {key}" for key in sorted(map(str, set(payload) - _AUTHORITY_FIELDS))]
+    problems.extend(f"approval_authority is missing {key}" for key in sorted(_AUTHORITY_FIELDS - set(payload)))
+    version = payload.get("version")
+    if "version" in payload and (type(version) is not int or version != APPROVAL_AUTHORITY_VERSION):
+        problems.append(f"approval_authority version must be {APPROVAL_AUTHORITY_VERSION}")
+    for key in ("authority_id", "approver_id"):
+        if key in payload and not _canonical_identity(payload[key]):
+            problems.append(f"approval_authority {key} must be a canonical identity")
+    if problems:
+        return None, tuple(problems)
+    return ApprovalAuthority(payload["authority_id"], payload["approver_id"]), ()
+
+
+def approval_authority_from_gate_config(gate_config: Any) -> tuple[ApprovalAuthority | None, tuple[str, ...]]:
+    """No approval_authority key means legacy behavior (None, no problems); a present key must validate."""
+    if not isinstance(gate_config, dict) or "approval_authority" not in gate_config:
+        return None, ()
+    return validate_approval_authority(gate_config["approval_authority"])
+
+
+def validate_approval_artifact(payload: Any, *, require_challenge: bool) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+    """Strictly validate a version-2 approval artifact and return it as a plain dict."""
+    if not isinstance(payload, dict):
+        return None, ("approval artifact must be a JSON object",)
+    problems = [f"unknown approval field: {key}" for key in sorted(map(str, set(payload) - _APPROVAL_FIELDS))]
+    problems.extend(f"approval is missing {key}" for key in sorted(_APPROVAL_FIELDS - set(payload)))
+    if payload.get("decision") != "approve":
+        problems.append("approval decision must be approve")
+    task_id = payload.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        problems.append("approval task_id must be a non-empty string")
+    for key, pattern in (
+        ("planning_spec_hash", _CONTRACT_HASH),
+        ("contract_hash", _CONTRACT_HASH),
+        ("authority_hash", _CONTRACT_HASH),
+        ("baseline_sha", _SHA),
+    ):
+        value = payload.get(key)
+        if not isinstance(value, str) or not pattern.fullmatch(value):
+            problems.append(f"approval {key} must be a lowercase hex digest")
+    challenge_hash = payload.get("planning_challenge_hash")
+    if require_challenge:
+        if not isinstance(challenge_hash, str) or not _CONTRACT_HASH.fullmatch(challenge_hash):
+            problems.append("approval planning_challenge_hash must be a lowercase hex digest")
+    elif challenge_hash is not None:
+        problems.append("approval planning_challenge_hash must be null when no challenge is required")
+    for key in ("authority_id", "approver_id"):
+        if not _canonical_identity(payload.get(key)):
+            problems.append(f"approval {key} must be a canonical identity")
+    receipt_id = payload.get("receipt_id")
+    if not isinstance(receipt_id, str) or not receipt_id.strip():
+        problems.append("approval receipt_id must be a non-empty string")
+    if problems:
+        return None, tuple(problems)
+    return dict(payload), ()
+
+
+def evaluate_accountable_approval(
+    *,
+    task_id: str,
+    authority: ApprovalAuthority | None,
+    spec_payload: Any,
+    approval: Any,
+    receipts: Iterable[Any],
+    contract_hash: str,
+    baseline_sha: str,
+    require_challenge: bool = False,
+    challenge_payload: Any = None,
+    identities: ExecutionIdentities | None = None,
+    required_roles: tuple[str, ...] = (),
+) -> AccountableApprovalDecision:
+    """Pure fail-closed decision for one enforcement boundary when approval_authority is configured.
+
+    ``required_roles`` names the execution roles ("implementer", "reviewer") that must be identified at this boundary;
+    the planner, and the challenger when a challenge is required, are always required.
+    """
+    if authority is None:
+        return _approval_block(APPROVAL_AUTHORITY_MISSING, "no valid approval_authority is configured", NEXT_REPAIR_APPROVAL_AUTHORITY)
+    if approval is None:
+        return _approval_block(APPROVAL_MISSING, "no approval artifact exists for this task", NEXT_OBTAIN_APPROVAL)
+    if not isinstance(approval, dict):
+        return _approval_block(APPROVAL_MALFORMED, "approval artifact must be a JSON object", NEXT_OBTAIN_APPROVAL)
+    version = approval.get("version")
+    if type(version) is not int or version != APPROVAL_ARTIFACT_VERSION:
+        return _approval_block(
+            APPROVAL_VERSION_UNSUPPORTED,
+            f"accountable approval requires a version-{APPROVAL_ARTIFACT_VERSION} artifact",
+            NEXT_OBTAIN_APPROVAL,
+        )
+    if "approver_id" not in approval or approval["approver_id"] in (None, ""):
+        return _approval_block(APPROVAL_ACTOR_MISSING, "approval names no approver", NEXT_OBTAIN_APPROVAL)
+    artifact, problems = validate_approval_artifact(approval, require_challenge=require_challenge)
+    if artifact is None:
+        return _approval_block(APPROVAL_MALFORMED, "; ".join(problems), NEXT_OBTAIN_APPROVAL)
+    if artifact["authority_id"] != authority.authority_id or artifact["authority_hash"] != authority.digest:
+        return _approval_block(
+            APPROVAL_AUTHORITY_STALE, "approval authority changed since the approval was recorded", NEXT_OBTAIN_APPROVAL
+        )
+    if artifact["approver_id"] != authority.approver_id:
+        return _approval_block(
+            APPROVAL_ACTOR_UNAUTHORIZED, "approver is not the configured approver", NEXT_OBTAIN_APPROVAL
+        )
+
+    spec, spec_problems = validate_planning_spec(spec_payload)
+    if spec is None:
+        return _approval_block(PLANNING_INPUTS_INVALID, "; ".join(spec_problems) or "no planning spec", NEXT_WRITE_SPEC)
+    spec_digest = freeze_planning_spec(spec_payload).digest
+    challenge_digest: str | None = None
+    if require_challenge:
+        challenge, challenge_problems = validate_planning_challenge(challenge_payload)
+        if challenge is None:
+            return _approval_block(
+                PLANNING_INPUTS_INVALID, "; ".join(challenge_problems), NEXT_CHALLENGE_SPEC
+            )
+        if challenge.planning_spec_hash != spec_digest:
+            return _approval_block(APPROVAL_BINDING_STALE, "planning_challenge_hash: challenge is stale", NEXT_OBTAIN_APPROVAL)
+        if challenge.verdict != "accept":
+            return _approval_block(PLANNING_INPUTS_INVALID, "planning challenge is not accepted", NEXT_CHALLENGE_SPEC)
+        challenge_digest = freeze_planning_challenge(challenge_payload).digest
+    current = {
+        "task_id": task_id,
+        "planning_spec_hash": spec_digest,
+        "planning_challenge_hash": challenge_digest,
+        "contract_hash": contract_hash,
+        "baseline_sha": baseline_sha,
+    }
+    if spec.contract_hash != contract_hash or spec.baseline_sha != baseline_sha:
+        return _approval_block(APPROVAL_BINDING_STALE, "planning spec contract or baseline is stale", NEXT_REFRESH_SPEC)
+    for key, value in current.items():
+        if artifact[key] != value:
+            return _approval_block(APPROVAL_BINDING_STALE, f"{key} no longer matches the current input", NEXT_OBTAIN_APPROVAL)
+
+    receipt_id = artifact["receipt_id"]
+    matching = [item for item in receipts if isinstance(item, dict) and item.get("receipt_id") == receipt_id]
+    if not matching:
+        return _approval_block(APPROVAL_RECEIPT_MISSING, "no durable approval receipt matches the artifact", NEXT_OBTAIN_APPROVAL)
+    receipt = matching[0]
+    created_at = receipt.get("created_at")
+    if (
+        len(matching) != 1
+        or receipt.get("event") != APPROVAL_RECEIPT_EVENT
+        or not isinstance(created_at, str)
+        or not created_at
+    ):
+        return _approval_block(APPROVAL_RECEIPT_MISMATCH, "approval receipt is not a unique recorded approval event", NEXT_OBTAIN_APPROVAL)
+    for key in _RECEIPT_BINDINGS:
+        if key not in receipt or receipt[key] != artifact[key]:
+            return _approval_block(APPROVAL_RECEIPT_MISMATCH, f"approval receipt {key} does not match the artifact", NEXT_OBTAIN_APPROVAL)
+
+    return _check_role_separation(authority.approver_id, identities or ExecutionIdentities(), require_challenge, required_roles, receipt_id, spec.affected_paths)
+
+
+def _check_role_separation(
+    approver: str,
+    identities: ExecutionIdentities,
+    require_challenge: bool,
+    required_roles: tuple[str, ...],
+    receipt_id: str,
+    scope: tuple[str, ...],
+) -> AccountableApprovalDecision:
+    roles: dict[str, tuple[str, ...]] = {
+        "planner": (identities.planner,) if identities.planner is not None else (),
+        "challenger": (identities.challenger,) if identities.challenger is not None else (),
+        "implementer": tuple(identities.implementers),
+        "reviewer": (identities.reviewer,) if identities.reviewer is not None else (),
+    }
+    required = {"planner"} | ({"challenger"} if require_challenge else set()) | set(required_roles)
+    for role in sorted(required):
+        if not roles.get(role):
+            return _approval_block(APPROVAL_EXECUTION_IDENTITY_MISSING, f"no execution identity for {role}", NEXT_CHOOSE_ACTOR)
+    for role, values in roles.items():
+        if any(not _canonical_identity(value) for value in values):
+            return _approval_block(
+                APPROVAL_EXECUTION_IDENTITY_MISSING, f"{role} execution identity is not canonical", NEXT_CHOOSE_ACTOR
+            )
+    conflicts = sorted(role for role, values in roles.items() if approver in values)
+    if conflicts:
+        return _approval_block(APPROVAL_ROLE_CONFLICT, f"approver also holds role: {', '.join(conflicts)}", NEXT_CHOOSE_ACTOR)
+    return AccountableApprovalDecision(True, receipt_id=receipt_id, approved_scope=scope)
+
+
+def _approval_block(reason: str, detail: str, next_action: str) -> AccountableApprovalDecision:
+    return AccountableApprovalDecision(False, reason, detail, next_action)
+
+
+def _canonical_identity(value: Any) -> bool:
+    return isinstance(value, str) and _IDENTITY.fullmatch(value) is not None
+
+
+# --- Explicit operator approval action ----------------------------------------------------------------------------
+PROVIDER_PROCESS_ENV = "STAGEMESH_PROVIDER_PROCESS"
+_APPROVAL_BLOCKING_EXECUTIONS = frozenset({"IMPLEMENTATION", "REVIEW", "INTEGRATION"})
+_RECEIPT_KEYS = _APPROVAL_FIELDS | {"event", "created_at"}
+
+
+class PlanningApprovalRefusal(Exception):
+    """The operator approval action was refused; ``code`` is stable for scripts."""
+
+    def __init__(self, code: str, message: str, next_action: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.next_action = next_action
+
+
+def record_planning_approval(
+    store: Store,
+    project: Path,
+    task_id: str,
+    *,
+    authority: ApprovalAuthority | None,
+    require_challenge: bool,
+) -> dict[str, Any]:
+    """Record an accountable approval for the task's current frozen plan, then project it as the version-2 artifact.
+
+    ``authority`` and ``require_challenge`` must come from the operator's protected project configuration; the approver
+    is never an argument. The durable receipt is appended first, the artifact is written atomically afterwards, and a
+    repeat with identical inputs reuses the existing receipt. Nothing the plan is built from is modified.
+    """
+    if os.environ.get(PROVIDER_PROCESS_ENV):
+        raise PlanningApprovalRefusal(
+            "operator_decision", "planning approval is an operator decision; it cannot run inside a provider process"
+        )
+    if not isinstance(task_id, str) or task_id in ("", ".", "..") or Path(task_id).name != task_id or "\\" in task_id:
+        raise PlanningApprovalRefusal("invalid_task", "task id must be a plain identifier")
+    if authority is None:
+        raise PlanningApprovalRefusal(
+            APPROVAL_AUTHORITY_MISSING,
+            "no approval_authority is configured under planning_gate; accountable approval is not enabled",
+            NEXT_REPAIR_APPROVAL_AUTHORITY,
+        )
+    contract = store.task_contract(task_id)
+    baseline = store.task_baseline(task_id)
+    if contract is None or baseline is None:
+        raise PlanningApprovalRefusal(
+            "task_identity_unbound", f"task {task_id} has no bound contract and baseline to approve against"
+        )
+    contract_hash = str(contract["digest"])
+    active = sorted(store.active_execution_kinds(task_id) & _APPROVAL_BLOCKING_EXECUTIONS)
+    if active:
+        raise PlanningApprovalRefusal(
+            "execution_active",
+            f"task {task_id} has active {', '.join(kind.lower() for kind in active)} execution; approve after it finishes",
+        )
+
+    spec_payload, _ = load_planning_artifacts(project, task_id)
+    challenge_payload = load_planning_challenge(project, task_id)
+    gate = evaluate_planning_gate(
+        enabled=True,
+        spec_payload=spec_payload,
+        approval=None,
+        contract_hash=contract_hash,
+        baseline_sha=baseline,
+        require_challenge=require_challenge,
+        challenge_payload=challenge_payload,
+    )
+    if gate.next_action != NEXT_APPROVE_SPEC:  # only "everything valid, approval missing" may proceed
+        stale = gate.next_action in (NEXT_REFRESH_SPEC, NEXT_REFRESH_CHALLENGE)
+        raise PlanningApprovalRefusal(
+            APPROVAL_BINDING_STALE if stale else PLANNING_INPUTS_INVALID, gate.reason, gate.next_action
+        )
+
+    bindings: dict[str, Any] = {
+        "version": APPROVAL_ARTIFACT_VERSION,
+        "decision": "approve",
+        "task_id": task_id,
+        "planning_spec_hash": freeze_planning_spec(spec_payload).digest,
+        "planning_challenge_hash": freeze_planning_challenge(challenge_payload).digest if require_challenge else None,
+        "contract_hash": contract_hash,
+        "baseline_sha": baseline,
+        "authority_id": authority.authority_id,
+        "authority_hash": authority.digest,
+        "approver_id": authority.approver_id,
+    }
+    receipt = next(
+        (
+            item
+            for item in store.planning_approval_receipts(task_id)
+            if set(item) == _RECEIPT_KEYS
+            and item["event"] == APPROVAL_RECEIPT_EVENT
+            and isinstance(item["receipt_id"], str)
+            and all(item[key] == value for key, value in bindings.items())
+        ),
+        None,
+    )
+    recorded = receipt is None
+    if receipt is None:
+        record = {**bindings, "receipt_id": f"approval-{uuid.uuid4().hex}"}
+        _, problems = validate_approval_artifact(record, require_challenge=require_challenge)
+        if problems:
+            raise PlanningApprovalRefusal(APPROVAL_MALFORMED, "; ".join(problems), NEXT_REPAIR_APPROVAL_AUTHORITY)
+        store.record_planning_approval(record)
+        receipt = next(
+            (item for item in store.planning_approval_receipts(task_id) if item.get("receipt_id") == record["receipt_id"]),
+            None,
+        )
+        if receipt is None:
+            raise PlanningApprovalRefusal("receipt_not_durable", "approval receipt could not be read back; no artifact written")
+    artifact = {**bindings, "receipt_id": receipt["receipt_id"]}
+    artifact_path = planning_artifact_paths(project, task_id)[1]
+    written = _write_artifact_atomic(artifact_path, artifact)
+    return {
+        **artifact,
+        "created_at": receipt["created_at"],
+        "approval_path": artifact_path.relative_to(project).as_posix(),
+        "receipt_recorded": recorded,
+        "artifact_written": written,
+    }
+
+
+def _write_artifact_atomic(path: Path, artifact: dict[str, Any]) -> bool:
+    """Write the artifact via a same-directory temp file and replace; an identical existing file is left untouched."""
+    try:
+        if json.loads(path.read_text(encoding="utf-8")) == artifact:
+            return False
+    except (OSError, ValueError):
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(artifact, sort_keys=True, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+    return True
+
+
+# --- Repeated enforcement at lifecycle boundaries -----------------------------------------------------------------
+BOUNDARY_PICKUP = "task_pickup"
+BOUNDARY_IMPLEMENTATION = "implementation_dispatch"
+BOUNDARY_RECOVERY = "implementation_recovery"
+BOUNDARY_REVIEW = "review_dispatch"
+BOUNDARY_INTEGRATION = "integration"
+BOUNDARY_PROMOTION = "promotion"
+APPROVAL_REFUSED_EVENT = "planning_approval.refused"
+APPROVAL_PROMOTION_EVENT = "planning_approval.promotion_evidence"
+
+_PLANNER_RECEIPT_EVENT = "planning.spec_produced"
+_CHALLENGER_RECEIPT_EVENT = "planning.challenge_produced"
+_DERIVATION_EVENT = "candidate.implementation_identity_derived"
+_DERIVATION_KINDS = frozenset({"rebase", "reattribution", "reconstruction"})
+_INTEGRATION_DERIVATION_EVENTS = {
+    "integration.rebased": "rebase",
+    "integration.reattributed": "reattribution",
+    "integration.reconstructed": "reconstruction",
+}
+_MAX_LINEAGE = 32
+_DEFAULT_ROLES = {
+    BOUNDARY_PICKUP: (),
+    BOUNDARY_IMPLEMENTATION: ("implementer",),
+    BOUNDARY_RECOVERY: ("implementer",),
+    BOUNDARY_REVIEW: ("implementer", "reviewer"),
+    BOUNDARY_INTEGRATION: ("implementer", "reviewer"),
+    BOUNDARY_PROMOTION: ("implementer", "reviewer"),
+}
+
+
+def protected_approval_policy(project: Path) -> tuple[ApprovalAuthority | None, bool, AccountableApprovalDecision | None]:
+    """Re-read the operator's project-root configuration (never a candidate worktree) on every call.
+
+    Returns (authority, require_challenge, refusal). No authority and no refusal means the legacy path applies; an
+    unreadable configuration that names ``approval_authority`` fails closed instead of silently downgrading.
+    """
+    from .config import ConfigValidationError, load_config
+
+    try:
+        config = load_config(Path(project))
+    except ConfigValidationError:
+        try:
+            names_authority = "approval_authority" in (Path(project) / ".stagemesh" / "config.json").read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            names_authority = False
+        if names_authority:
+            return None, False, _approval_block(
+                APPROVAL_AUTHORITY_MISSING, "project configuration naming approval_authority is invalid", NEXT_REPAIR_APPROVAL_AUTHORITY
+            )
+        return None, False, None
+    return config.approval_authority, config.require_plan_challenge, None
+
+
+def check_accountable_approval(
+    store: Store,
+    project: Path,
+    task_id: str,
+    boundary: str,
+    *,
+    candidate_sha: str | None = None,
+    implementers: Iterable[str] = (),
+    reviewers: Iterable[str] = (),
+    required_roles: tuple[str, ...] | None = None,
+    contract_hash: str | None = None,
+    baseline_sha: str | None = None,
+    record_refusal: bool = True,
+) -> AccountableApprovalDecision | None:
+    """Evaluate accountable approval for one lifecycle boundary; ``None`` means legacy (no approval_authority).
+
+    Every call re-reads the protected project-root configuration, planning artifacts, and approval receipts. Identities
+    come only from successful StageMesh execution receipts plus the actors the caller is about to select. A refusal is
+    recorded as durable evidence and changes nothing else: no task, candidate, execution, or worktree state.
+    """
+    authority, require_challenge, refusal = protected_approval_policy(project)
+    if refusal is None and authority is None:
+        return None
+    decision = refusal or _boundary_decision(
+        store, Path(project), task_id, boundary, authority, require_challenge,
+        candidate_sha, tuple(implementers), tuple(reviewers), required_roles, contract_hash, baseline_sha,
+    )
+    if not decision.allowed and record_refusal:
+        _record_refusal(store, task_id, boundary, candidate_sha, decision)
+    return decision
+
+
+def _boundary_decision(
+    store: Store,
+    project: Path,
+    task_id: str,
+    boundary: str,
+    authority: ApprovalAuthority | None,
+    require_challenge: bool,
+    candidate_sha: str | None,
+    implementers: tuple[str, ...],
+    reviewers: tuple[str, ...],
+    required_roles: tuple[str, ...] | None,
+    contract_hash: str | None,
+    baseline_sha: str | None,
+) -> AccountableApprovalDecision:
+    if contract_hash is None:
+        contract = store.task_contract(task_id)
+        contract_hash = str(contract["digest"]) if contract is not None else None
+    if baseline_sha is None:
+        baseline_sha = store.task_baseline(task_id)
+    if contract_hash is None or baseline_sha is None:
+        return _approval_block(APPROVAL_BINDING_STALE, "task contract or baseline is not bound", NEXT_OBTAIN_APPROVAL)
+    if candidate_sha is not None:
+        binding = store.contract_binding(task_id, candidate_sha)
+        if (
+            binding is None
+            or str(binding["digest"]) != contract_hash
+            or (binding["baseline_sha"] is not None and str(binding["baseline_sha"]) != baseline_sha)
+        ):
+            return _approval_block(
+                APPROVAL_BINDING_STALE, "candidate contract binding differs from the approved contract or baseline", NEXT_OBTAIN_APPROVAL
+            )
+    spec_payload, approval = load_planning_artifacts(project, task_id)
+    challenge_payload = load_planning_challenge(project, task_id)
+    spec_digest = challenge_digest = None
+    spec, _ = validate_planning_spec(spec_payload)
+    if spec is not None:
+        spec_digest = freeze_planning_spec(spec_payload).digest
+        if require_challenge and validate_planning_challenge(challenge_payload)[0] is not None:
+            challenge_digest = freeze_planning_challenge(challenge_payload).digest
+    planner = _trusted_planning_actor(store, _PLANNER_RECEIPT_EVENT, task_id, spec_digest)
+    challenger = _trusted_planning_actor(store, _CHALLENGER_RECEIPT_EVENT, task_id, challenge_digest)
+    lineage = _candidate_lineage(store, task_id, candidate_sha) if candidate_sha is not None else None
+    if candidate_sha is not None and lineage is None:
+        return _approval_block(
+            APPROVAL_EXECUTION_IDENTITY_MISSING,
+            "candidate implementation lineage is ambiguous, cyclic, or exceeds the supported depth",
+            NEXT_CHOOSE_ACTOR,
+        )
+    actors = {*implementers, *_successful_actors(store, task_id, "IMPLEMENTATION", lineage)}
+    reviewer_actors = {*reviewers}
+    if candidate_sha is not None:
+        reviewer_actors.update(_successful_actors(store, task_id, "REVIEW", {candidate_sha}))
+    roles = _DEFAULT_ROLES[boundary] if required_roles is None else required_roles
+    receipts = store.planning_approval_receipts(task_id)
+    decision = AccountableApprovalDecision(False, APPROVAL_EXECUTION_IDENTITY_MISSING, "no reviewer identity", NEXT_CHOOSE_ACTOR)
+    reviewer_choices: tuple[str | None, ...] = tuple(sorted(reviewer_actors)) or (None,)
+    for reviewer in reviewer_choices:  # the approver must differ from every successful reviewer
+        decision = evaluate_accountable_approval(
+            task_id=task_id,
+            authority=authority,
+            spec_payload=spec_payload,
+            approval=approval,
+            receipts=receipts,
+            contract_hash=contract_hash,
+            baseline_sha=baseline_sha,
+            require_challenge=require_challenge,
+            challenge_payload=challenge_payload,
+            identities=ExecutionIdentities(planner, challenger, tuple(sorted(actors)), reviewer),
+            required_roles=roles,
+        )
+        if not decision.allowed:
+            return decision
+    return decision
+
+
+def _trusted_planning_actor(store: Store, event_type: str, task_id: str, artifact_digest: str | None) -> str | None:
+    """The provider of the newest planner/challenger receipt whose successful StageMesh execution row agrees."""
+    if artifact_digest is None:
+        return None
+    for row in reversed(list(store.task_audit_events(event_type, task_id))):
+        try:
+            payload = json.loads(row["payload"])
+        except ValueError:
+            continue
+        if not isinstance(payload, dict) or payload.get("artifact_digest") != artifact_digest or payload.get("provider_invoked") is not True:
+            continue
+        execution = store.conn.execute(
+            "SELECT kind, status, task_id, actor FROM executions WHERE id=?", (payload.get("execution_id"),)
+        ).fetchone()
+        if (
+            execution is not None
+            and execution["kind"] == "REVIEW"
+            and execution["status"] == "SUCCEEDED"
+            and execution["task_id"] == task_id
+            and execution["actor"] == payload.get("provider")
+        ):
+            return str(execution["actor"])
+    return None
+
+
+def _candidate_lineage(store: Store, task_id: str, candidate_sha: str) -> set[str] | None:
+    """The candidate and its unambiguous ancestors through trusted StageMesh derivation events."""
+    derived: dict[str, set[str]] = {}
+    event_kinds = {_DERIVATION_EVENT: None, **_INTEGRATION_DERIVATION_EVENTS}
+    for event_type, expected_kind in event_kinds.items():
+        for row in store.task_audit_events(event_type, task_id):
+            try:
+                payload = json.loads(row["payload"])
+            except ValueError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            kind = payload.get("kind") if expected_kind is None else expected_kind
+            child, parent = payload.get("candidate_sha"), payload.get("from_candidate")
+            if (
+                kind not in _DERIVATION_KINDS
+                or not isinstance(child, str)
+                or not isinstance(parent, str)
+                or child == parent
+                or _SHA.fullmatch(child) is None
+                or _SHA.fullmatch(parent) is None
+            ):
+                continue
+            derived.setdefault(child, set()).add(parent)
+
+    lineage: set[str] = set()
+    resolving: set[str] = set()
+    invalid = False
+
+    def visit(sha: str) -> None:
+        nonlocal invalid
+        if invalid or sha in lineage:
+            return
+        if sha in resolving or len(lineage) + len(resolving) >= _MAX_LINEAGE:
+            invalid = True
+            return
+        parents = derived.get(sha, set())
+        if len(parents) > 1:
+            invalid = True
+            return
+        resolving.add(sha)
+        for parent in parents:
+            visit(parent)
+        resolving.remove(sha)
+        lineage.add(sha)
+
+    visit(candidate_sha)
+    return None if invalid else lineage
+
+
+def _successful_actors(store: Store, task_id: str, kind: str, shas: set[str] | None) -> set[str]:
+    """Actors of this task's succeeded executions of ``kind``; ``shas`` limits them to those candidates (None: any)."""
+    rows = store.conn.execute(
+        "SELECT actor, candidate_sha FROM executions WHERE task_id=? AND kind=? AND status='SUCCEEDED' AND actor IS NOT NULL",
+        (task_id, kind),
+    )
+    return {str(row["actor"]) for row in rows if shas is None or row["candidate_sha"] in shas}
+
+
+def _record_refusal(
+    store: Store, task_id: str, boundary: str, candidate_sha: str | None, decision: AccountableApprovalDecision
+) -> None:
+    payload = {
+        "task_id": task_id,
+        "boundary": boundary,
+        "candidate_sha": candidate_sha,
+        "reason": decision.reason,
+        "detail": decision.detail[:300],
+        "next_action": decision.next_action,
+    }
+    rows = list(store.task_audit_events(APPROVAL_REFUSED_EVENT, task_id))
+    if rows:
+        try:
+            if json.loads(rows[-1]["payload"]) == payload:
+                return  # an identical standing refusal is already durable
+        except ValueError:
+            pass
+    store.add_audit_event(APPROVAL_REFUSED_EVENT, payload)
+
+
+def refusal_detail(decision: AccountableApprovalDecision, boundary: str, candidate_sha: str | None = None) -> dict[str, Any]:
+    """Stable machine-readable refusal for run summaries; no prompts, credentials, or provider output."""
+    return {
+        "boundary": boundary,
+        "reason": decision.reason,
+        "detail": decision.detail,
+        "next_action": decision.next_action,
+        "candidate_sha": candidate_sha,
+    }
+
+
+def record_promotion_evidence(
+    store: Store, task_id: str, candidate_sha: str, decision: AccountableApprovalDecision, boundary: str = BOUNDARY_PROMOTION
+) -> None:
+    """Bind the accepted approval receipt to the exact candidate SHA being promoted; identical evidence is not duplicated."""
+    payload = {
+        "task_id": task_id,
+        "candidate_sha": candidate_sha,
+        "receipt_id": decision.receipt_id,
+        "boundary": boundary,
+    }
+    for row in store.task_audit_events(APPROVAL_PROMOTION_EVENT, task_id):
+        try:
+            if json.loads(row["payload"]) == payload:
+                return
+        except ValueError:
+            continue
+    store.add_audit_event(APPROVAL_PROMOTION_EVENT, payload)
 
 
 def planner_scope_violations(changed_paths: list[str] | tuple[str, ...], task_id: str) -> tuple[str, ...]:

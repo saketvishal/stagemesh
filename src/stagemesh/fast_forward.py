@@ -20,6 +20,7 @@ from .contracts import ContractError, bound_contract_from_record
 from .git import GitWorkspace, validate_destructive_reason
 from .queue_control import QueueStopControl
 from .review import independent_review_verified
+from .spec_planning import BOUNDARY_PROMOTION, check_accountable_approval, record_promotion_evidence
 from .survivor_wave import is_task_pr_branch
 
 
@@ -29,8 +30,32 @@ def checks_ready(ci, sha: str, required: tuple[str, ...]) -> bool:
                 and all(g.conclusion is Conclusion.SUCCESS for g in run.gates.values()))
 
 
-def landing_evidence_problem(store, task_id, sha):
+def promotion_approval_problem(store, task_id, sha, project=None, *, record=False):
+    """Final accountable-approval recheck before a landing; None for legacy projects or an accepted receipt.
+
+    The protected project root defaults to the one that owns the store's database. With ``record`` the accepted receipt id and
+    exact candidate SHA are written as durable promotion evidence.
+    """
+    if project is None:
+        db_path = Path(getattr(store, "db_path", ""))
+        if db_path.parent.name != ".stagemesh":
+            return None
+        project = db_path.parent.parent
+    decision = check_accountable_approval(store, Path(project), task_id, BOUNDARY_PROMOTION, candidate_sha=sha)
+    if decision is None:
+        return None
+    if not decision.allowed:
+        return decision.reason
+    if record:
+        record_promotion_evidence(store, task_id, sha, decision)
+    return None
+
+
+def landing_evidence_problem(store, task_id, sha, project=None, *, record_promotion=False):
     """Only the latest exact-bound successful evidence can authorize a landing."""
+    approval_problem = promotion_approval_problem(store, task_id, sha, project, record=record_promotion)
+    if approval_problem:
+        return approval_problem
     candidate = store.latest_candidate(task_id)
     record = store.contract_binding(task_id, sha)
     if candidate is None or candidate["sha"] != sha or record is None:
@@ -294,7 +319,9 @@ class FastForwardPullRequests(GitHubPullRequests):
 
     def sync_local(self, candidate):
         with IntegrationLock(self.project / ".stagemesh/integration.lock", timeout_seconds=10).hold("ff-sync"):
-            git = lambda *args: self.bounded_git(*args, after_landing=True)
+            def git(*args):
+                return self.bounded_git(*args, after_landing=True)
+
             if git("symbolic-ref", "HEAD").stdout.strip() != f"refs/heads/{self.branch}":
                 return "remote merged; local checkout changed"
             if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
@@ -371,7 +398,9 @@ class FastForwardPullRequests(GitHubPullRequests):
             if git.run("symbolic-ref", "HEAD").stdout.strip() != f"refs/heads/{self.branch}" or git.run("rev-parse", "HEAD").stdout.strip() != self.expected_base or git.run("status", "--porcelain", "--untracked-files=no").stdout.strip():
                 return MergeOutcome(False, reason="checkout_changed")
             if self.task_id is not None:
-                problem = landing_evidence_problem(self.store, self.task_id, expected_head_sha)
+                problem = landing_evidence_problem(
+                    self.store, self.task_id, expected_head_sha, self.project, record_promotion=True
+                )
                 if problem:
                     return MergeOutcome(False, reason=problem)
             self.store.add_audit_event("window.fast_forward_push_intent", {
@@ -493,7 +522,7 @@ def make_merger(
                 return "pending PR observed head, base or ownership changed"
             if pr.state is PRState.MERGED and pr.merge_commit_sha != record.integrated_candidate and not supervisor.facts.is_ancestor(record.integrated_candidate, pr.merge_commit_sha):
                 return "pending PR was not landed as the exact candidate"
-            problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
+            problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate, project)
             if problem:
                 return problem
         return None
@@ -571,7 +600,7 @@ def make_merger(
                 if not supervisor.facts.is_ancestor(pulls.expected_base, record.integrated_candidate):
                     return {"merged": False, "refresh_required": True, "base_sha": pulls.expected_base,
                             "reason": "base advanced; candidate needs revalidation"}
-                problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
+                problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate, project)
                 if problem:
                     return {"merged": False, "reason": problem}
                 supervisor.assess_ci(record.task_id, record.integrated_candidate, pulls.expected_base, reruns_left=0)
@@ -586,7 +615,7 @@ def make_merger(
                 decision = supervisor.merge_when_ready(record.task_id, number, ci=supervisor.last_ci_diagnosis, method="ff-only")
                 if decision.action is not Action.MERGE or not decision.detail.get("verified"):
                     return {"merged": False, "reason": decision.trace_line()}
-                problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
+                problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate, project)
                 if problem:
                     return {"merged": False, "reason": "remote landed but evidence changed: " + problem}
                 current_pr = pulls.get(number)

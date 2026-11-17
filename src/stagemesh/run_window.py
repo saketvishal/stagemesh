@@ -51,6 +51,12 @@ from .readiness import PrLister, build_readiness, format_provider_health, gh_ope
 from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .scheduling import Scheduler
+from .spec_planning import (
+    BOUNDARY_PROMOTION,
+    check_accountable_approval,
+    record_promotion_evidence,
+    refusal_detail,
+)
 from .step_progress import made_progress, progress_state
 from .survivor_wave import (
     INTEGRATION_LOCAL,
@@ -1104,7 +1110,20 @@ def run_window(
                 problem = validate([record], deadline)
                 if problem:
                     raise RuntimeError(problem)
-            merged = merge_pr(record, deadline)
+            # Merge-policy handoff: re-read the protected approval inputs once more and bind the accepted receipt to the exact SHA.
+            approval = check_accountable_approval(
+                store, project, record.task_id, BOUNDARY_PROMOTION, candidate_sha=record.integrated_candidate
+            )
+            if approval is not None and not approval.allowed:
+                merged = {
+                    "merged": False,
+                    "reason": approval.reason,
+                    "approval": refusal_detail(approval, BOUNDARY_PROMOTION, record.integrated_candidate),
+                }
+            else:
+                if approval is not None:
+                    record_promotion_evidence(store, record.task_id, record.integrated_candidate, approval)
+                merged = merge_pr(record, deadline)
         except Exception as exc:  # noqa: BLE001 -- fail closed on any injected landing failure
             merged = {"merged": False, "reason": f"{type(exc).__name__}: {exc}"}
         report.landing_results.append(merged)

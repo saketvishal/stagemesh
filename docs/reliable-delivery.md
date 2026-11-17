@@ -138,6 +138,37 @@ do not approve their own output: a human approval must bind the resulting spec
 and challenge digests. Manual planning remains supported when provider roles
 are omitted, and the whole policy remains disabled by default.
 
+## Accountable planning approval
+
+A project that sets `planning_gate.approval_authority` in its protected project-root `.stagemesh/config.json`
+(`{"version":1,"authority_id":"...","approver_id":"..."}`, strict, lowercase identity grammar, no extra keys) makes approval an
+explicit operator action: `stagemesh approve-planning --task <id>`. It requires the approved-spec gate, and also the accepted
+challenge when `require_plan_challenge` is set. A present but invalid `approval_authority` fails configuration loading.
+
+* The action revalidates the frozen spec (and accepted challenge) against the task's current contract digest and baseline, then
+  records a durable, append-only approval receipt in the store *before* atomically writing the version-2 `<task>.approval.json`.
+  The artifact binds the task, spec and challenge digests, contract, baseline, authority id and digest, approver and receipt id.
+  An identical repeat returns the existing receipt (and restores a missing artifact without a second receipt); changed inputs
+  create a new receipt and leave the old one. The action never edits the spec, challenge, contract or baseline.
+* It refuses inside a provider execution (`STAGEMESH_PROVIDER_PROCESS`, code `operator_decision`) and while an implementation,
+  review or integration execution is active for the task (`execution_active`). A running validation does not block it.
+* Authority comes only from the protected project root. A candidate checkout's own `.stagemesh/config.json` never selects or
+  changes it. A hand-written artifact without its matching receipt is not an approval.
+* The approval is revalidated at pickup, implementation dispatch, recovery, review dispatch, integration and promotion. Any change
+  to the authority, spec, challenge, contract or baseline, a missing or mismatched receipt, or an approver who is also the
+  planner, challenger, any implementer (including implementers inherited through candidate derivation) or the reviewer blocks the
+  next stage before a provider process starts. A refusal changes no task, candidate, execution or worktree evidence; a standing
+  identical refusal is recorded once.
+* Refusals carry a stable reason: `approval_authority_missing`, `approval_authority_stale`, `approval_missing`,
+  `approval_version_unsupported`, `approval_malformed`, `approval_receipt_missing`, `approval_receipt_mismatch`,
+  `approval_binding_stale`, `approval_actor_missing`, `approval_actor_unauthorized`, `approval_role_conflict`,
+  `approval_execution_identity_missing` and `planning_inputs_invalid`; the action itself also uses `invalid_task`,
+  `task_identity_unbound`, `operator_decision` and `execution_active`. Each blocking decision names a next action.
+* Compatibility: without `approval_authority` the legacy planning gate and its version-1 `approved` artifact behave exactly as
+  before and no boundary is refused. With it, a legacy artifact is `approval_version_unsupported`, and the legacy gate never
+  accepts a version-2 artifact. This change activates no live profile or configuration; a project must add `approval_authority`
+  itself.
+
 ## Retries and step caps
 
 `MAX_STEPS` is resumable only after meaningful progress: a later lifecycle stage, completion, or a new candidate whose failure

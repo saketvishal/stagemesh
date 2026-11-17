@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -135,3 +136,140 @@ def test_ui_registry_refuses_to_infer_unregistered_current_project(
         ["--project", str(alpha), "ui", "--registry", str(registry_path)]
     ) == 2
     assert "no default was inferred" in capsys.readouterr().err
+
+
+# --- approve-planning ---------------------------------------------------------------------------------------------
+_APPROVAL_CONTRACT = "c" * 64
+_APPROVAL_BASELINE = "b" * 40
+_APPROVAL_AUTHORITY = {"version": 1, "authority_id": "project-owner:example", "approver_id": "owner:example"}
+
+
+def _approval_project(path, *, authority: bool = True) -> str:
+    """A synthetic project with a bound task and a valid frozen spec; returns the task id."""
+    path.mkdir()
+    store = Store(cli.db_path(path))
+    store.migrate()
+    task_id = store.upsert_task("synthetic")
+    store.set_task_baseline(task_id, _APPROVAL_BASELINE)
+    store.bind_task_contract(task_id, _APPROVAL_BASELINE, 1, _APPROVAL_CONTRACT, "{}")
+    store.close()
+    gate = {"require_approved_spec": True}
+    if authority:
+        gate["approval_authority"] = _APPROVAL_AUTHORITY
+    (path / ".stagemesh" / "planning").mkdir(parents=True)
+    (path / ".stagemesh" / "config.json").write_text(json.dumps({"planning_gate": gate}), encoding="utf-8")
+    spec = {
+        "behavior": ["do the thing"],
+        "affected_paths": ["src/x.py"],
+        "acceptance_checks": ["pytest tests/test_x.py"],
+        "contract_hash": _APPROVAL_CONTRACT,
+        "baseline_sha": _APPROVAL_BASELINE,
+    }
+    (path / ".stagemesh" / "planning" / f"{task_id}.spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    return task_id
+
+
+def _approve(path, task_id: str, capsys, *extra: str) -> tuple[int, dict]:
+    code = cli.main(["--project", str(path), "approve-planning", "--task", task_id, "--json", *extra])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_approve_planning_records_receipt_artifact_and_returns_bound_identities(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+
+    code, report = _approve(project, task_id, capsys)
+
+    assert code == 0
+    assert report["task_id"] == task_id
+    assert report["approver_id"] == "owner:example"  # from protected config, not an argument
+    assert report["authority_id"] == "project-owner:example"
+    assert report["baseline_sha"] == _APPROVAL_BASELINE and report["contract_hash"] == _APPROVAL_CONTRACT
+    assert report["planning_challenge_hash"] is None
+    for key in ("planning_spec_hash", "authority_hash", "receipt_id"):
+        assert report[key]
+    artifact = json.loads((project / report["approval_path"]).read_text(encoding="utf-8"))
+    assert artifact["receipt_id"] == report["receipt_id"] and artifact["version"] == 2
+    store = Store(cli.db_path(project))
+    try:
+        assert [r["receipt_id"] for r in store.planning_approval_receipts(task_id)] == [report["receipt_id"]]
+    finally:
+        store.close()
+
+    code, repeat = _approve(project, task_id, capsys)  # identical inputs: same receipt, nothing new recorded
+    assert code == 0 and repeat["receipt_id"] == report["receipt_id"] and repeat["receipt_recorded"] is False
+
+
+def test_approve_planning_prints_a_human_summary(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+
+    assert cli.main(["--project", str(project), "approve-planning", "--task", task_id]) == 0
+
+    out = capsys.readouterr().out
+    assert "owner:example" in out and _APPROVAL_BASELINE in out and _APPROVAL_CONTRACT in out
+
+
+def test_approve_planning_refuses_provider_context_without_writing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("STAGEMESH_PROVIDER_PROCESS", "1")
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+
+    code, refusal = _approve(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "operator_decision"
+    assert not (project / ".stagemesh" / "planning" / f"{task_id}.approval.json").exists()
+
+
+def test_approve_planning_refuses_when_authority_is_not_configured(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project, authority=False)
+
+    code, refusal = _approve(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "approval_authority_missing"
+    assert refusal["next_action"] == "repair_approval_authority"
+    assert not (project / ".stagemesh" / "planning" / f"{task_id}.approval.json").exists()
+
+
+def test_approve_planning_refuses_invalid_authority_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    gate = {"require_approved_spec": True, "approval_authority": {**_APPROVAL_AUTHORITY, "extra": 1}}
+    (project / ".stagemesh" / "config.json").write_text(json.dumps({"planning_gate": gate}), encoding="utf-8")
+
+    code, refusal = _approve(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "invalid_config"
+
+
+def test_approve_planning_refuses_active_execution_and_preserves_it(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    store = Store(cli.db_path(project))
+    execution = store.start_execution(task_id=task_id, claim_id=None, kind="IMPLEMENTATION")
+    store.close()
+
+    code, refusal = _approve(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "execution_active"
+    store = Store(cli.db_path(project))
+    try:
+        assert store.planning_approval_receipts(task_id) == []
+        assert store.active_execution_kinds(task_id) == {"IMPLEMENTATION"}
+        assert execution
+    finally:
+        store.close()
+
+
+def test_approve_planning_accepts_no_approver_override():
+    parser = cli.build_parser()
+    assert parser.parse_args(["approve-planning", "--task", "t-1", "--json"]).command == "approve-planning"
+    for flag in ("--approver", "--approver-id", "--actor", "--config"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["approve-planning", "--task", "t-1", flag, "someone:else"])

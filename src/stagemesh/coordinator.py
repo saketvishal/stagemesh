@@ -14,7 +14,7 @@ from .block_kinds import BlockKind, block_kind_for, record_block, runtime_finger
 from .concurrency import IntegrationLockTimeout
 from .config import ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
-from .contracts import _matches, task_contract_path
+from .contracts import ContractError, _matches, bind_contract, task_contract_path
 from .diagnosis import (
     CONTRACT_SCOPE,
     DIAGNOSIS_EVENT,
@@ -84,6 +84,16 @@ from .review_disposition import (
     unresolved_adverse_review_findings,
 )
 from .scheduling import Scheduler
+from .spec_planning import (
+    BOUNDARY_IMPLEMENTATION,
+    BOUNDARY_INTEGRATION,
+    BOUNDARY_PICKUP,
+    BOUNDARY_RECOVERY,
+    BOUNDARY_REVIEW,
+    check_accountable_approval,
+    protected_approval_policy,
+    refusal_detail,
+)
 from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .task_completion import record_task_owner_state
 from .task_selection import contract_state
@@ -156,6 +166,56 @@ class Coordinator:
         self.last_adverse_block: tuple[str, ...] | None = None
         self.outbound_sync = outbound_sync
         self.outbound_sources = outbound_sources
+        self.last_approval_refusals: list[dict[str, Any]] = []
+
+    def _approval_refused(
+        self,
+        task_id: str,
+        boundary: str,
+        *,
+        candidate_sha: str | None = None,
+        implementers: tuple[str, ...] = (),
+        required_roles: tuple[str, ...] | None = None,
+    ) -> bool:
+        """Accountable-approval gate for one boundary; legacy projects (no approval_authority) are never refused.
+
+        A refusal is durable evidence only: no claim, execution, task stage, candidate, or worktree is touched.
+        """
+        authority, _, refusal = protected_approval_policy(self.project)
+        if authority is None and refusal is None:
+            return False  # legacy project: no accountable approval is configured
+        contract_hash: str | None = None
+        baseline_sha: str | None = None
+        if self.store.task_contract(task_id) is None:  # not bound yet: the on-disk contract is what will be bound
+            try:
+                bound = bind_contract(self.project, task_id)
+                contract_hash = bound.digest
+                baseline_sha = self.store.task_baseline(task_id) or GitWorkspace(self.project).head()
+            except (OSError, ValueError, ContractError, GitError):
+                contract_hash = None
+                baseline_sha = None
+        decision = check_accountable_approval(
+            self.store, self.project, task_id, boundary,
+            candidate_sha=candidate_sha, implementers=implementers, required_roles=required_roles,
+            contract_hash=contract_hash, baseline_sha=baseline_sha,
+        )
+        if decision is None or decision.allowed:
+            return False
+        self.last_approval_refusals.append({"task_id": task_id, **refusal_detail(decision, boundary, candidate_sha)})
+        return True
+
+    def _possible_implementation_actors(self, task_id: str) -> tuple[str, ...]:
+        """Every provider the executor could select for this dispatch, so a conflicting one is refused before any process starts."""
+        pool = getattr(self.executor, "pool", None)
+        evaluate = getattr(pool, "evaluate", None)
+        if callable(evaluate):
+            try:
+                names = tuple(str(item.provider) for item in evaluate(self.store, str(Stage.IMPLEMENT), task_id) if item.eligible)
+            except Exception:  # noqa: BLE001 - an unreadable pool must not shrink the conflict check
+                names = tuple(str(name) for name in getattr(pool, "adapters", {}))
+            if names:
+                return names
+        return (str(self.executor.name),)
 
     def recover(self) -> None:
         for execution in self.store.running_executions():
@@ -203,6 +263,7 @@ class Coordinator:
         self.validate_target()
         self.recover()
         self.last_execution_refusals: list[dict[str, Any]] = []
+        self.last_approval_refusals = []
         progressed = 0
         before = outcomes(self._selected_tasks()) if self.outbound_sync is not None else {}
         for task in self._selected_tasks():
@@ -335,6 +396,8 @@ class Coordinator:
                     stage=str(stage), detail={"failure_code": "invalid_contract"})
                 return 1
         if stage is Stage.PLAN:
+            if self._approval_refused(task_id, BOUNDARY_PICKUP):
+                return 0
             self.store.advance_task(task_id, Stage.IMPLEMENT)
             record_audit(self.store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT})
             record_task_owner_state(self.store, task_id, "task_advanced", self.project)
@@ -344,6 +407,15 @@ class Coordinator:
                 return 0
             if self._provider_stalled(task_id):
                 return 1
+            resumed = self.store.conn.execute(
+                "SELECT 1 FROM executions WHERE task_id=? AND kind=? LIMIT 1", (task_id, ExecutionKind.IMPLEMENTATION)
+            ).fetchone()
+            if self._approval_refused(
+                task_id,
+                BOUNDARY_RECOVERY if resumed is not None else BOUNDARY_IMPLEMENTATION,
+                implementers=self._possible_implementation_actors(task_id),
+            ):
+                return 0  # before the claim and before any process: nothing is acquired, started, or released
             worker_id = self.worker_id
             claim_id = (self.store.acquire_claim(task_id, worker_id,
                 admission_check=lambda: not outside_label_selector(self.store, self.store.get_task(task_id), self.required_label))
@@ -560,6 +632,8 @@ class Coordinator:
                         "finding_ids": [item["finding_id"] for item in pending.findings],
                     })
                     return self._remediate_or_block(task_id, sha, Stage.REVIEW)
+                if self._approval_refused(task_id, BOUNDARY_REVIEW, candidate_sha=sha, required_roles=("implementer",)):
+                    return 0  # the reviewer is checked again once selected, still before its process starts
                 review_status = self.reviewer.review(self.store, task_id, sha, self.project)
                 if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
                     return 1
@@ -632,6 +706,8 @@ class Coordinator:
                 return 0  # review infrastructure failure or unsatisfied independence: stay in REVIEW, no remediation
             return 0
         if stage is Stage.INTEGRATE:
+            if self._approval_refused(task_id, BOUNDARY_INTEGRATION, candidate_sha=sha):
+                return 0  # stays in INTEGRATE with its candidate, evidence and worktree intact
             if self.adverse_policy is not None:
                 bound = contract_for_candidate(self.store, task_id, sha, self.project)
                 decision = adverse_gate(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -30,7 +31,11 @@ from .remediation import finding_identity, findings_to_verify, unresolved_findin
 from .research_context import accepted_research_evidence
 from .review_disposition import record_review_findings
 from .review_identity import implementation_identity, take_review_identity, valid_command_snapshot
-from .spec_planning import accepted_planning_context
+from .spec_planning import (
+    BOUNDARY_REVIEW,
+    accepted_planning_context,
+    check_accountable_approval,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,28 @@ class ReviewFinding:
 
 INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
 MAX_REVIEW_EXECUTION_RESULT_CHARS = 200
+
+
+def _reviewer_candidates(adapter: object | None, considered: list[dict[str, object]], default: str) -> tuple[str, ...]:
+    """Every provider a direct, fallback, or scope-wrapped review adapter can invoke."""
+    names = [str(item["provider"]) for item in considered if item.get("eligible") is True and item.get("provider")]
+    pending = [adapter]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        name = getattr(current, "name", None)
+        if isinstance(name, str) and name:
+            names.append(name)
+        nested = getattr(current, "adapters", ())
+        if isinstance(nested, (list, tuple)):
+            pending.extend(nested)
+        inner = getattr(current, "inner", None)
+        if inner is not None:
+            pending.append(inner)
+    return tuple(dict.fromkeys(names)) or (default,)
 
 
 def _resolve_classified_prose_failures(store: Store, task_id: str, sha: str, payload: dict, review_id: str) -> None:
@@ -679,17 +706,12 @@ class Reviewer:
         self, store: Store, task_id: str, candidate_sha: str, project: Path, *,
         role: str | None = None, prior_roles: dict | None = None,
     ) -> EvidenceStatus:
-        execution_id = store.start_execution(
-            task_id=task_id,
-            claim_id=None,
-            kind=ExecutionKind.REVIEW,
-            candidate_sha=candidate_sha,
-            actor=self.provider_name,
-            **owner_execution_fields(),
-        )
+        execution_id: str | None = None
         reviewer_provider = self.provider_name
 
         def finish_running(status: ExecutionStatus, *, actor: str | None = None, result: str | None = None) -> None:
+            if execution_id is None:
+                return
             row = store.conn.execute("SELECT status FROM executions WHERE id=?", (execution_id,)).fetchone()
             if row is not None and row["status"] == ExecutionStatus.RUNNING:
                 store.finish_execution(
@@ -701,10 +723,6 @@ class Reviewer:
                 )
 
         try:
-            if self.fail_capacity:
-                store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY, {"provider": "fake"})
-                finish_running(ExecutionStatus.FAILED, result="capacity")
-                return EvidenceStatus.CAPACITY
             produced = store.conn.execute(
                 "SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)
             ).fetchone()
@@ -719,11 +737,36 @@ class Reviewer:
                     excluded_commands = set(frozen_implementer["alias_digests"])
                     if normal:
                         excluded_commands.update(normal["alias_digests"])
-                    adapter, verdicts = self.review_pool.review_adapter(
-                        store, task_id, candidate_sha, implementer,
-                        excluded_providers=(normal["provider"],) if normal else (),
-                        excluded_command_digests=tuple(excluded_commands),
+                    select_review = self.review_pool.review_adapter
+                    try:
+                        parameters = inspect.signature(select_review).parameters.values()
+                    except (TypeError, ValueError):
+                        parameters = ()
+                    supports_exclusions = any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        or parameter.name in {"excluded_providers", "excluded_command_digests"}
+                        for parameter in parameters
                     )
+                    scope_supervisor = getattr(self.review_pool, "supervisor", None)
+                    selection_pool = (
+                        self.review_pool
+                        if supports_exclusions
+                        else getattr(self.review_pool, "pool", None)
+                        if scope_supervisor is not None
+                        else None
+                    )
+                    if selection_pool is None:
+                        adapter, verdicts = None, []
+                    else:
+                        adapter, verdicts = selection_pool.review_adapter(
+                            store, task_id, candidate_sha, implementer,
+                            excluded_providers=(normal["provider"],) if normal else (),
+                            excluded_command_digests=tuple(excluded_commands),
+                        )
+                        if selection_pool is not self.review_pool and adapter is not None:
+                            from .autonomy.review_adapter import ScopedReviewAdapter
+
+                            adapter = ScopedReviewAdapter(adapter, scope_supervisor)
                 else:
                     adapter, verdicts = self.review_pool.review_adapter(store, task_id, candidate_sha, implementer)
                 considered = [v.to_dict() for v in verdicts]
@@ -746,6 +789,25 @@ class Reviewer:
             }
             role_findings: list[dict[str, str]] = []
             final_identity: dict | None = None
+            reviewer_candidates = _reviewer_candidates(adapter, considered, reviewer_provider)
+            approval = check_accountable_approval(
+                store, project, task_id, BOUNDARY_REVIEW, candidate_sha=candidate_sha, reviewers=reviewer_candidates
+            )
+            if approval is not None and not approval.allowed:
+                # Refuse before creating execution/evidence or invoking any initial/fallback review provider.
+                return EvidenceStatus.CAPACITY
+            execution_id = store.start_execution(
+                task_id=task_id,
+                claim_id=None,
+                kind=ExecutionKind.REVIEW,
+                candidate_sha=candidate_sha,
+                actor=reviewer_provider,
+                **owner_execution_fields(),
+            )
+            if self.fail_capacity:
+                store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY, {"provider": "fake"})
+                finish_running(ExecutionStatus.FAILED, result="capacity")
+                return EvidenceStatus.CAPACITY
             if role is not None:
                 if frozen_implementer is None:
                     infrastructure_failure = "implementation_identity_unavailable"
@@ -1035,7 +1097,7 @@ class Reviewer:
             finish_running(ExecutionStatus.SUCCEEDED, actor=reviewer_provider)
             return EvidenceStatus.PASSED
         except BaseException as exc:
-            if isinstance(exc, OperatorStopRequested) and not exc.cleanup_complete:
+            if isinstance(exc, OperatorStopRequested) and not exc.cleanup_complete and execution_id is not None:
                 store.retain_execution_for_cleanup(execution_id, str(exc)[:200])
                 if exc.retained_workspace is not None:
                     store.add_audit_event("review.workspace_retained", {

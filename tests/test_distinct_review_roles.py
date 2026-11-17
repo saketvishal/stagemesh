@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from test_review_terminalization import TASK, JsonReviewAdapter, _project_with_candidate
 
+from stagemesh.autonomy.review_adapter import supervise_reviewer
 from stagemesh.capacity import CapacityKind
 from stagemesh.config import AdverseReviewPolicy
 from stagemesh.contract_binding import contract_for_candidate
@@ -91,6 +92,12 @@ def _run(rig):
 def _gate(rig):
     _, store, candidate, policy, _, _, bound = rig
     return adverse_gate(store, TASK, candidate, bound.digest, policy)
+
+
+def test_scope_wrapped_pool_preserves_distinct_role_selection(role_rig):
+    *_, reviewer, _ = role_rig
+    supervise_reviewer(reviewer, object())
+    assert _run(role_rig) == EvidenceStatus.PASSED
 
 
 def test_only_trusted_mechanical_derivation_skips_stale_task_workspace(role_rig):
