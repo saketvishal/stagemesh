@@ -26,6 +26,7 @@ from .provider_cooldown import (
     DEFAULT_QUOTA_COOLDOWN_SECONDS,
     active_cooldowns,
 )
+from .provider_pause import is_provider_paused
 from .providers import RuntimeCommandAdapter, adapters_from_config
 
 PROVIDERS_CONTRACT = "stagemesh.provider-status/1"
@@ -316,6 +317,7 @@ class ProviderStatusProjection:
                             "seconds_remaining": cooldown["seconds_remaining"],
                         }
                     ),
+                    "operator_pause": {"paused": is_provider_paused(store, name)},
                     "invocation": (
                         {
                             "recorded": False,

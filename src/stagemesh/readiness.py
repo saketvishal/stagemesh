@@ -20,6 +20,7 @@ from .diagnosis import latest_tool_failure
 from .persistence import Store
 from .provider_acceptance import LIVE_PASSING, live_acceptance_status
 from .provider_cooldown import active_cooldowns, cooldown_parked
+from .provider_pause import is_provider_paused
 from .providers import adapters_from_config, stage_command_summary
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .survivor_wave import blocked_needs_decision, git_repo_state
@@ -189,6 +190,7 @@ def build_readiness(
         stage_capacity = None if adapter is None else adapter.check_stage_capacity(capability)
         live = live_acceptance_status(store, name, capability, ttl_seconds=config.live_acceptance_ttl_seconds)
         cooldown = cooldowns.get(name)
+        operator_paused = is_provider_paused(store, name)
         # Strict mode (release gating) requires a fresh passing live check; otherwise a missing one is only information.
         if strict_live and live["state"] != LIVE_PASSING:
             attention.append(f"provider {name} has no passing live acceptance check ({live['state']}); strict mode requires one")
@@ -200,6 +202,7 @@ def build_readiness(
                 "command_available": None if adapter is None else adapter.check_capacity() == CapacityKind.AVAILABLE,
                 "stage_capacity": stage_capacity,
                 "live_acceptance": live,
+                "operator_pause": {"paused": operator_paused},
                 "cooldown": None
                 if cooldown is None
                 else {"failure_class": cooldown["failure_class"], "seconds_remaining": cooldown["seconds_remaining"], "clear_command": cooldown["clear_command"]},
@@ -207,6 +210,8 @@ def build_readiness(
         )
         if cooldown is not None:
             attention.append(f"provider {name} is cooling down ({cooldown['failure_class']})")
+        if operator_paused:
+            attention.append(f"provider {name} is paused by the operator")
     data["providers"] = providers
     data["strict_live"] = strict_live
     from .window_journal import last_window
@@ -237,6 +242,8 @@ def format_provider_health(item: dict[str, Any]) -> str:
         return f"{name}: active, but unattended permissions are not configured"
     if item.get("denied"):
         return f"{name}: active but unavailable ({item['denied']})"
+    if item.get("operator_pause", {}).get("paused"):
+        return f"{name}: paused by operator; resume: `stagemesh provider resume {name}`"
     cooldown = item.get("cooldown")
     if cooldown is not None:
         return (
