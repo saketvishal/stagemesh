@@ -111,9 +111,47 @@ def probe(
     return ProviderAuth(provider, True, mode, mode in SUBSCRIPTION_MODES)
 
 
-def billing_environment(environ: Mapping[str, str] | None = None) -> list[str]:
-    """Names (never values) of API-billing variables visible to this process, and on Windows to the user's logon sessions."""
-    found = [f"process:{name}" for name in BILLING_ENVIRONMENT_VARIABLES if (environ if environ is not None else os.environ).get(name)]
+_CODEX_BILLING = frozenset({
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+})
+_CLAUDE_BILLING = frozenset({
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+})
+
+
+def billing_names_for(providers: Sequence[str]) -> frozenset[str]:
+    """Billing variables that belong to the providers actually being checked."""
+
+    names: set[str] = set()
+    for provider in providers:
+        if provider == "codex":
+            names.update(_CODEX_BILLING)
+        elif provider == "claude":
+            names.update(_CLAUDE_BILLING)
+    return frozenset(names)
+
+
+def billing_environment(
+    environ: Mapping[str, str] | None = None,
+    *,
+    names: frozenset[str] | None = None,
+) -> list[str]:
+    """Names (never values) of API-billing variables visible to this process, and on Windows to the user's logon sessions.
+
+    ``names`` limits the scan. ``None`` keeps the historical full scan.
+    """
+    variables = BILLING_ENVIRONMENT_VARIABLES if names is None else tuple(
+        name for name in BILLING_ENVIRONMENT_VARIABLES if name in names
+    )
+    found = [f"process:{name}" for name in variables if (environ if environ is not None else os.environ).get(name)]
     if environ is None and sys.platform == "win32":
         import winreg
 
@@ -123,7 +161,7 @@ def billing_environment(environ: Mapping[str, str] | None = None) -> list[str]:
         ):
             try:
                 with winreg.OpenKey(hive, path) as key:
-                    for name in BILLING_ENVIRONMENT_VARIABLES:
+                    for name in variables:
                         try:
                             if winreg.QueryValueEx(key, name)[0]:
                                 found.append(f"{label}:{name}")
@@ -155,7 +193,7 @@ def check(
             if not configured:
                 states.append(ProviderAuth(name, False, "not_installed", False))
             states.extend(probe(name, runner, which, executable=command) for command in configured)
-    billing = billing_environment(environ)
+    billing = billing_environment(environ, names=billing_names_for(providers))
     installed = [state for state in states if state.installed]
     blockers: list[str] = []
     if billing:

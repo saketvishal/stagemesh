@@ -145,7 +145,7 @@ def test_tick_and_resume_refuse_when_authentication_regresses(tmp_path: Path, mo
     assert "provider authentication blocked" in capsys.readouterr().err
 
 
-def test_cli_exposes_require_installed(monkeypatch, capsys):
+def test_cli_exposes_require_installed(monkeypatch, capsys, tmp_path: Path):
     from stagemesh.cli import main
 
     seen = {}
@@ -155,7 +155,7 @@ def test_cli_exposes_require_installed(monkeypatch, capsys):
         return {"providers": [], "api_billing_environment": [], "ok": True, "blockers": [], "model_calls_made": 0}
 
     monkeypatch.setattr(provider_auth, "check", fake_check)
-    assert main(["provider-auth", "--json", "--require-installed"]) == 0
+    assert main(["--project", str(tmp_path), "provider-auth", "--json", "--require-installed"]) == 0
     assert seen == {"require_installed": True}
 
 

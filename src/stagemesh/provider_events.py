@@ -16,6 +16,9 @@ class ProviderEventError(RuntimeError):
 
 CAPABILITY_EVIDENCE_MISSING = "capability_evidence_missing"
 CAPABILITY_POLICY_VIOLATION = "capability_policy_violation"
+# A headless review is complete only when the provider finished the turn.
+# max_turn_requests, max_tokens, refusal, and cancelled are terminal failures.
+SUCCESSFUL_REVIEW_STOP_REASONS = frozenset({"end_turn"})
 
 
 @dataclass(frozen=True)
@@ -90,20 +93,86 @@ def provider_event_response(stdout: str) -> str | None:
 
     The raw stream remains available to the evidence observers but is never
     persisted by this projection. Unknown events cannot masquerade as a review
-    verdict: callers fail closed when this returns ``None``.
+    verdict: callers fail closed when this returns ``None``. A terminal event
+    whose stop reason is not a completed turn discards any earlier answer.
+    Grok's session ``turn_ended`` event is terminal: only ``outcome``
+    ``completed`` keeps an earlier answer. An ``assistant`` message is
+    intermediate, so a stream that ends without a successful terminal event
+    is incomplete. Completion belongs to the latest answer: an earlier
+    successful terminal does not prove a later assistant message, and a
+    trailing truncated line does not preserve an earlier verdict. Per-response
+    reasons such as ``tool_use`` are not terminal. ``result`` and Codex
+    ``item.completed`` agent messages remain final answers on their own.
     """
     answer: str | None = None
+    answer_needs_terminal = False
+    terminal_failure = False
+    successful_terminal = False
+    truncated = False
     for line in stdout.splitlines():
         if not line.strip():
             continue
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            truncated = True
+            continue
+        truncated = False
+        if not isinstance(event, dict):
             continue
         candidate = _event_answer(event)
-        if candidate:
+        if candidate and candidate.strip():
+            # A new answer starts a new proof. Prior terminals do not apply.
             answer = candidate.strip()
+            answer_needs_terminal = _answer_needs_successful_terminal(event)
+            terminal_failure = False
+            successful_terminal = not answer_needs_terminal
+        if _terminal_review_stop_failed(event):
+            terminal_failure = True
+            successful_terminal = False
+        elif _successful_terminal_event(event):
+            successful_terminal = True
+    if (
+        truncated
+        or answer is None
+        or terminal_failure
+        or (answer_needs_terminal and not successful_terminal)
+    ):
+        return None
     return answer
+
+
+def _event_type(event: dict[str, Any]) -> str:
+    return str(event.get("type") or "").casefold().replace("-", "_")
+
+
+def _terminal_review_stop_failed(event: dict[str, Any]) -> bool:
+    """True when this event closes the run without a completed turn."""
+    event_type = _event_type(event)
+    if event_type == "error":
+        return True
+    if event_type == "turn_ended":
+        return str(event.get("outcome") or "").casefold() != "completed"
+    if event_type not in {"end", "result"}:
+        return False
+    reason = event.get("stopReason", event.get("stop_reason"))
+    return isinstance(reason, str) and bool(reason) and reason not in SUCCESSFUL_REVIEW_STOP_REASONS
+
+
+def _successful_terminal_event(event: dict[str, Any]) -> bool:
+    """True when this event closes a turn that the provider finished."""
+    event_type = _event_type(event)
+    if event_type == "turn_ended":
+        return str(event.get("outcome") or "").casefold() == "completed"
+    if event_type != "end":
+        return False
+    reason = event.get("stopReason", event.get("stop_reason"))
+    return reason in SUCCESSFUL_REVIEW_STOP_REASONS
+
+
+def _answer_needs_successful_terminal(event: dict[str, Any]) -> bool:
+    """Assistant text is not final until a later successful terminal event."""
+    return _event_type(event) == "assistant"
 
 
 def _event_answer(event: object) -> str | None:

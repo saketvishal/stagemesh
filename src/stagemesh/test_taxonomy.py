@@ -199,6 +199,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_autonomy_round24.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_security_evidence_boundaries.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_change_contracts.py": TestTier.DETERMINISTIC_UNIT,
+    "tests/test_codex_optional_defaults.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_mcp_proxy.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_provider_auth.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_provider_authorization.py": TestTier.DETERMINISTIC_UNIT,
@@ -211,6 +212,7 @@ FILE_TIER_MAP: dict[str, TestTier] = {
     "tests/test_spec_integrity_adapter.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_spec_audit.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_adverse_review_policy.py": TestTier.DETERMINISTIC_UNIT,
+    "tests/test_review_evidence_report.py": TestTier.DETERMINISTIC_UNIT,
     "tests/test_adverse_review_gate.py": TestTier.DETERMINISTIC_UNIT,
 
     # -------------------------------------------------------------------------
@@ -751,6 +753,7 @@ FILE_RUNTIME_SECONDS: dict[str, float] = {
     'tests/test_quality_policy.py': 0.100,
     'tests/test_project_smoke.py': 10.520,
     'tests/test_provider_acceptance.py': 125.380,
+    'tests/test_codex_optional_defaults.py': 0.400,
     'tests/test_provider_auth.py': 4.250,
     'tests/test_provider_authorization.py': 13.090,
     'tests/test_provider_authorization_e2e.py': 134.770,
@@ -783,6 +786,7 @@ FILE_RUNTIME_SECONDS: dict[str, float] = {
     'tests/test_research_scope_gate.py': 9.760,
     'tests/test_research_stage.py': 155.420,
     'tests/test_research_tree_recovery.py': 9.540,
+    'tests/test_review_evidence_report.py': 0.400,
     'tests/test_review_disposition.py': 395.380,
     'tests/test_review_recovery.py': 133.340,
     'tests/test_review_reliability.py': 785.160,

@@ -601,6 +601,7 @@ class Coordinator:
                         "quota_rate_limit",
                         "provider_unavailable",
                         "independent_review_unavailable",
+                        "invariant_review_unavailable",
                         "review_role_identity_unavailable",
                         "implementation_identity_unavailable",
                         "provider_timeout",

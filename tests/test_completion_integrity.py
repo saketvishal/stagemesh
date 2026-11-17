@@ -32,7 +32,7 @@ class FakeReviewAdapter:
 
 
 class Rig:
-    def __init__(self, tmp_path: Path, adapter, *, integration_ref: str, require: bool = True):
+    def __init__(self, tmp_path: Path, adapter, *, integration_ref: str, require: bool = True, invariants: list[str] | None = None):
         self.tmp_path = tmp_path
         self.project = tmp_path / "repo"
         self.project.mkdir()
@@ -47,14 +47,15 @@ class Rig:
         self.git.run("branch", "integration")
         contracts = self.project / ".stagemesh" / "contracts"
         contracts.mkdir(parents=True)
+        contract_data = {
+            "objective": "docs only",
+            "allowed_files": ["docs/**"],
+            "required_tests": [{"name": "docs-static", "command": [sys.executable, "-c", "pass"]}],
+        }
+        if invariants is not None:
+            contract_data["invariants"] = invariants
         (contracts / f"{TASK}.json").write_text(
-            json.dumps(
-                {
-                    "objective": "docs only",
-                    "allowed_files": ["docs/**"],
-                    "required_tests": [{"name": "docs-static", "command": [sys.executable, "-c", "pass"]}],
-                }
-            ),
+            json.dumps(contract_data),
             encoding="utf-8",
         )
         self.store = Store(self.project / ".stagemesh" / "stagemesh.sqlite3")
@@ -140,6 +141,33 @@ def test_fallback_or_same_provider_cannot_satisfy_required_review(
     if adapter is not None:
         assert adapter.calls == 0
     assert rig.evidence(EvidenceKind.INTEGRATION) == []
+
+
+def test_invariant_review_unavailable_records_hold_and_preserves_candidate(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        None,
+        integration_ref="refs/heads/integration",
+        invariants=["review: mandatory prose invariant check"],
+    )
+
+    rig.tick(6)
+
+    assert rig.stage == Stage.REVIEW
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert not [e for e in rig.evidence(EvidenceKind.REVIEW) if e[0] == EvidenceStatus.PASSED]
+    status, payload = rig.evidence(EvidenceKind.REVIEW)[0]
+    assert status == EvidenceStatus.CAPACITY
+    assert payload["independent_reviewer"] is False
+    assert payload["review_infrastructure_failure"] == "invariant_review_unavailable"
+    assert rig.evidence(EvidenceKind.INTEGRATION) == []
+
+    # Candidate and validation evidence stay in place
+    cand = rig.store.latest_candidate(TASK)
+    assert cand is not None
+    sha = cand["sha"]
+    bound = contract_for_candidate(rig.store, TASK, sha, rig.project)
+    assert rig.store.has_bound_evidence(TASK, sha, EvidenceKind.VALIDATION, bound.digest, EvidenceStatus.PASSED)
 
 
 @pytest.mark.parametrize("real_missing_binary", [False, True])

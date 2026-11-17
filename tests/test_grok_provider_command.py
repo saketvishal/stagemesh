@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from stagemesh.providers import (
     _command_and_input,
     _provider_permission_denial,
     _provider_text_response,
+    _review_provider_response,
     approved_default_adapters,
 )
+from stagemesh.review import VERDICT_REVIEW_INCOMPLETE, classify_review_response
 
 
 def test_grok_provider_prompt_is_passed_as_single_turn_argument() -> None:
@@ -40,6 +44,113 @@ def test_grok_json_mode_wrapper_is_normalized_to_review_json() -> None:
     response = _provider_text_response('{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"end_turn"}')
 
     assert response == '{"decision":"PASS"}'
+
+
+def test_cancelled_grok_review_envelope_is_not_a_verdict() -> None:
+    response = _review_provider_response('{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"cancelled"}')
+
+    parsed = json.loads(response)
+    assert parsed["decision"] == "INFRASTRUCTURE_FAILURE"
+    assert parsed["decision"] != "PASS"
+    assert parsed["reason"] == "review_provider_cancelled"
+    verdict = classify_review_response(response)
+    assert verdict.kind != "PASS"
+    assert verdict.kind == VERDICT_REVIEW_INCOMPLETE
+    assert verdict.provider_failure is True
+    assert verdict.reason == "review_provider_cancelled"
+
+
+def test_completed_grok_review_envelope_still_unwraps_its_verdict() -> None:
+    response = _review_provider_response('{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"end_turn"}')
+
+    assert response == '{"decision":"PASS"}'
+    assert classify_review_response(response).kind == "PASS"
+
+
+@pytest.mark.parametrize("stop_reason", ["max_turn_requests", "max_tokens", "refusal", "cancelled"])
+def test_unfinished_grok_review_stop_cannot_pass(stop_reason: str) -> None:
+    response = _review_provider_response(
+        '{"text":"{\\"decision\\":\\"PASS\\"}","stopReason":"' + stop_reason + '"}'
+    )
+
+    parsed = json.loads(response)
+    assert parsed["decision"] == "INFRASTRUCTURE_FAILURE"
+    assert parsed["decision"] != "PASS"
+    verdict = classify_review_response(response)
+    assert verdict.kind != "PASS"
+    assert verdict.kind == VERDICT_REVIEW_INCOMPLETE
+    assert verdict.provider_failure is True
+    if stop_reason == "cancelled":
+        assert verdict.reason == "review_provider_cancelled"
+    else:
+        assert verdict.reason == f"review_provider_stopped:{stop_reason}"
+
+
+def _grok_tool_values(command: list[str]) -> list[str]:
+    return [command[index + 1] for index, token in enumerate(command[:-1]) if token == "--tools"]
+
+
+def test_restricted_grok_read_only_tools_are_not_widened() -> None:
+    command, stdin = _command_and_input(
+        ("grok", "--permission-mode", "dontAsk", "--tools", "read_file,grep,list_dir"),
+        "review the packet",
+        structured_review=True,
+    )
+
+    assert stdin == ""
+    assert _grok_tool_values(command) == ["read_file,grep,list_dir"]
+    assert "--json-schema" in command
+
+
+def test_equals_form_read_only_grok_tools_are_not_replaced_with_edit_or_bash() -> None:
+    command, _stdin = _command_and_input(
+        ("grok", "--permission-mode", "dontAsk", "--tools=read_file,grep,list_dir"),
+        "review the packet",
+        structured_review=True,
+    )
+
+    assert not any(token.startswith("--tools=") for token in command)
+    assert _grok_tool_values(command) == ["read_file,grep,list_dir"]
+
+
+def test_equals_form_unsafe_grok_tools_still_use_the_unattended_default() -> None:
+    command, _stdin = _command_and_input(
+        ("grok", "--tools=read_file,grep,list_dir,run_terminal_cmd"),
+        "work",
+    )
+
+    assert not any(token.startswith("--tools=") for token in command)
+    assert _grok_tool_values(command) == ["Read,Grep,Edit,Bash"]
+
+
+def test_allow_rules_do_not_widen_a_read_only_grok_tool_list() -> None:
+    command, _stdin = _command_and_input(
+        (
+            "grok",
+            "--tools",
+            "read_file,grep,list_dir",
+            "--allow",
+            "Edit",
+            "--allow",
+            "Bash(git status*)",
+            "--allowedTools",
+            "Write",
+        ),
+        "review the packet",
+        structured_review=True,
+    )
+
+    assert _grok_tool_values(command) == ["read_file,grep,list_dir"]
+    assert command.count("--tools") == 1
+
+
+def test_unsafe_grok_tool_selection_stays_on_the_unattended_default() -> None:
+    command, _ = _command_and_input(
+        ("grok", "--tools", "read_file,grep,list_dir,run_terminal_cmd"),
+        "work",
+    )
+
+    assert command[command.index("--tools") + 1] == "Read,Grep,Edit,Bash"
 
 
 def test_agy_provider_prompt_is_passed_as_print_argument() -> None:

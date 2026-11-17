@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import metadata
@@ -217,16 +217,33 @@ def write_capable_command(name: str, command: str) -> str:
     return command
 
 
-def balanced_provider_pools(names: set[str] | tuple[str, ...] | list[str]) -> dict[str, tuple[str, ...]]:
-    """Build balanced pools from the project's provider registry."""
+# Same unset value as provider_pool.DEFAULT_PRIORITY. Not imported: that module imports this one.
+_UNSET_POOL_PRIORITY = 100
 
+
+def balanced_provider_pools(
+    names: set[str] | tuple[str, ...] | list[str],
+    priorities: Mapping[str, int] | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """Build balanced pools from the project's provider registry.
+
+    A configured priority is the first sort key (lower number first). Catalog
+    implement_rank and review_rank only break ties, so they cannot place Codex
+    ahead of a higher-priority configured provider. Names without a configured
+    priority use 100, matching pool selection.
+    """
+
+    configured = priorities or {}
     definitions = {item.name: item for item in catalog_definitions()}
 
-    def rank(name: str, stage: str) -> tuple[int, str]:
+    def rank(name: str, stage: str) -> tuple[int, int, str]:
         item = definitions.get(name)
-        if item is None:
-            return (len(definitions), name)
-        return (item.implement_rank if stage == "IMPLEMENT" else item.review_rank, name)
+        catalog_rank = (
+            len(definitions)
+            if item is None
+            else item.implement_rank if stage == "IMPLEMENT" else item.review_rank
+        )
+        return (configured.get(name, _UNSET_POOL_PRIORITY), catalog_rank, name)
 
     unique = set(names)
     return {

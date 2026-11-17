@@ -180,7 +180,18 @@ def test_capacity_text_shows_policy_pools_and_each_provider_once(tmp_path: Path,
 def test_capacity_legacy_chosen_line_is_labelled_as_fallback_check(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     _config(tmp_path, {"routing": {"provider_profile": "balanced"}})
 
-    code = cli_module.main(["--project", str(tmp_path), "capacity", "--primary-down"])
+    code = cli_module.main(
+        [
+            "--project",
+            str(tmp_path),
+            "capacity",
+            "--primary",
+            "codex",
+            "--secondary",
+            "claude",
+            "--primary-down",
+        ]
+    )
 
     assert code == 0
     out = capsys.readouterr().out
