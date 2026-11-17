@@ -520,7 +520,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     task_sources_data = data.get("task_sources", [])
     routing_data = _optional_mapping(data, "routing")
     stage_routes_data = _optional_mapping(routing_data, "stage_routes")
-    detected_github = detect_github_repository(project)
+    detected_github = detect_github_repository(project) if project.exists() else None
     auto_label_unlabeled = github_data.get("auto_label_unlabeled", False)
     if not isinstance(auto_label_unlabeled, bool):
         raise ConfigValidationError("github.auto_label_unlabeled must be a boolean")
