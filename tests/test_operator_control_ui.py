@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from stagemesh.api_server import ActivityApi, make_server
+from stagemesh.domain import ExecutionKind
 from stagemesh.operator_control import OperatorControl
 from stagemesh.persistence import Store
 
@@ -44,13 +45,25 @@ DRIVER = r"""
     const result = { errors: [] };
     try {
       await until(() => !$("show-control").hidden, "control capability");
-      $("show-control").click();
-      $("control-task").value = "blocked-ui-task";
+      $("show-status").click();
+      await until(
+        () => Array.from($("active-rows").querySelectorAll("button"))
+          .some((button) => button.textContent === "Verify dead and release"),
+        "unknown execution recovery action"
+      );
+      result.recordedAgeVisible = $("active-rows").textContent.includes("recorded ");
+      Array.from($("active-rows").querySelectorAll("button"))
+        .find((button) => button.textContent === "Verify dead and release").click();
+      result.exactTaskPrefilled = $("control-task").value === "blocked-ui-task";
+      result.exactExecutionPrefilled = $("control-execution").value === "unknown-ui-execution";
+      result.warningStatesNoKill = $("control-result").textContent.includes("No process will be killed");
+      $("control-reason").value = "checked Task Manager and confirmed the worker is absent";
       $("control-plan").focus();
       $("control-form").requestSubmit($("control-plan"));
       await until(() => !$("control-plan-view").hidden, "planned action");
       result.planFocusedConfirm = document.activeElement === $("control-confirm");
-      result.exactTarget = $("control-plan-facts").textContent.includes("task:blocked-ui-task");
+      result.exactTarget = $("control-plan-facts").textContent.includes("execution:unknown-ui-execution");
+      result.reasonVisible = $("control-plan-facts").textContent.includes("checked Task Manager");
       result.hasExpiry = $("control-plan-facts").textContent.includes("Expires");
       result.preconditions = $("control-preconditions").children.length;
       $("control-confirm").focus();
@@ -106,7 +119,7 @@ class ControlFixtureApi(ActivityApi):
         return super()._static(path)
 
 
-def test_keyboard_semantic_plan_confirm_and_lost_response_reconciliation(tmp_path: Path):
+def test_unknown_execution_release_plan_confirm_and_lost_response_reconciliation(tmp_path: Path):
     browser = _find_browser()
     if browser is None:
         if os.environ.get("CI"):
@@ -117,6 +130,16 @@ def test_keyboard_semantic_plan_confirm_and_lost_response_reconciliation(tmp_pat
     store.migrate()
     task_id = store.upsert_task("Blocked UI task", source_id="blocked-ui-task")
     store.block_task(task_id)
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=None,
+        kind=ExecutionKind.IMPLEMENTATION,
+        actor="codex",
+    )
+    store.conn.execute(
+        "UPDATE executions SET id=? WHERE id=?", ("unknown-ui-execution", execution_id)
+    )
+    store.conn.commit()
     store.close()
     site = tmp_path / "site"
     site.mkdir()
@@ -165,6 +188,9 @@ def test_keyboard_semantic_plan_confirm_and_lost_response_reconciliation(tmp_pat
         assert match, f"control driver did not finish; browser exit {process.returncode}\n{process.stderr[-800:]}"
         result = json.loads(html.unescape(match.group(1)))
         assert result["errors"] == []
+        assert result["exactTaskPrefilled"] and result["exactExecutionPrefilled"]
+        assert result["warningStatesNoKill"] and result["reasonVisible"]
+        assert result["recordedAgeVisible"]
         assert result["planFocusedConfirm"] and result["exactTarget"] and result["hasExpiry"]
         assert result["preconditions"] >= 5
         assert result["reconciled"] and result["confirmDisabled"]
@@ -174,6 +200,9 @@ def test_keyboard_semantic_plan_confirm_and_lost_response_reconciliation(tmp_pat
             assert check.conn.execute(
                 "SELECT COUNT(*) FROM audit_events WHERE event_type='operator.control.receipt'"
             ).fetchone()[0] == 1
+            assert check.conn.execute(
+                "SELECT status FROM executions WHERE id='unknown-ui-execution'"
+            ).fetchone()["status"] == "FAILED"
         finally:
             check.close()
     finally:

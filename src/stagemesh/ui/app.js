@@ -47,6 +47,15 @@
     el.className = level || "";
   }
 
+  function recordedAge(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "recorded age unavailable";
+    const seconds = Math.max(0, Math.round(Date.now() / 1000 - value));
+    if (seconds < 60) return "recorded " + seconds + "s ago";
+    if (seconds < 3600) return "recorded " + Math.floor(seconds / 60) + "m ago";
+    if (seconds < 86400) return "recorded " + Math.floor(seconds / 3600) + "h ago";
+    return "recorded " + Math.floor(seconds / 86400) + "d ago";
+  }
+
   function attentionKey(item) {
     return [item.task_id, item.kind, item.reason_code, item.recorded_at].join("|");
   }
@@ -788,8 +797,22 @@
     for (const item of snapshot.sections.active_executions) {
       const row = $("active-rows").insertRow(); taskCell(row, item.task_id);
       cell(row, item.stage); cell(row, item.provider);
-      const state = cell(row, [item.process_state, item.parent_process_state, item.cleanup_state, item.stale && "stale"].filter(Boolean).join(" / "));
+      const state = cell(row, [
+        item.process_state,
+        item.parent_process_state,
+        item.cleanup_state,
+        recordedAge(item.started_at),
+        item.stale && "stale",
+      ].filter(Boolean).join(" / "));
       if (item.execution_id) state.append(" ", executionButton(item.execution_id, "Inspect execution"));
+      if (item.release_unknown_allowed && item.execution_id &&
+          controlCapabilities && controlCapabilities.actions.includes("release_unknown_execution")) {
+        const release = document.createElement("button");
+        release.type = "button";
+        release.textContent = "Verify dead and release";
+        release.addEventListener("click", () => openUnknownRelease(item));
+        state.append(" ", release);
+      }
     }
     for (const item of snapshot.sections.workers) {
       const row = $("active-rows").insertRow(); cell(row, item.worker_id || "-");
@@ -1337,9 +1360,16 @@
   }
 
   function updateControlTarget() {
-    const taskAction = $("control-action").value === "task_retry";
+    const action = $("control-action").value;
+    const releaseAction = action === "release_unknown_execution";
+    const taskAction = action === "task_retry" || releaseAction;
     $("control-task-label").hidden = !taskAction;
     $("control-task").required = taskAction;
+    $("control-execution-label").hidden = !releaseAction;
+    $("control-execution").required = releaseAction;
+    $("control-reason-label").hidden = !releaseAction;
+    $("control-reason").required = releaseAction;
+    $("control-release-warning").hidden = !releaseAction;
   }
 
   function clearControlPlan() {
@@ -1358,6 +1388,7 @@
       ["Expires", new Date(plan.expires_at * 1000).toLocaleString()],
       ["Recorded-state digest", plan.state_digest.slice(0, 16) + "..."],
     ];
+    if (plan.reason) facts.splice(2, 0, ["Verification reason", plan.reason]);
     const target = $("control-plan-facts");
     target.replaceChildren();
     for (const [label, value] of facts) {
@@ -1380,6 +1411,7 @@
       const capabilities = await api("/api/v1/control");
       if (!capabilities.enabled) return;
       controlCapabilities = capabilities;
+      renderStatus();
       $("show-control").hidden = false;
       $("control-summary").textContent =
         "Control is enabled only for this loopback session and project " + capabilities.project_id +
@@ -1434,9 +1466,21 @@
     if (!controlCapabilities || controlBusy) return;
     const action = $("control-action").value;
     const taskId = $("control-task").value.trim();
-    if (action === "task_retry" && !taskId) {
-      setControlResult("Enter the exact blocked task id before reviewing a retry.", "error");
+    const executionId = $("control-execution").value.trim();
+    const reason = $("control-reason").value.trim();
+    if (["task_retry", "release_unknown_execution"].includes(action) && !taskId) {
+      setControlResult("Enter the exact task id before reviewing this action.", "error");
       $("control-task").focus();
+      return;
+    }
+    if (action === "release_unknown_execution" && !executionId) {
+      setControlResult("Enter the exact execution id before reviewing release.", "error");
+      $("control-execution").focus();
+      return;
+    }
+    if (action === "release_unknown_execution" && !reason) {
+      setControlResult("Describe what you checked to verify the process is dead.", "error");
+      $("control-reason").focus();
       return;
     }
     controlBusy = true;
@@ -1444,7 +1488,11 @@
     clearControlPlan();
     setControlResult("Checking current recorded state...");
     const request = { action, idempotency_key: controlKey() };
-    if (action === "task_retry") request.task_id = taskId;
+    if (["task_retry", "release_unknown_execution"].includes(action)) request.task_id = taskId;
+    if (action === "release_unknown_execution") {
+      request.execution_id = executionId;
+      request.reason = reason;
+    }
     try {
       controlIntent = await controlApi("/api/v1/control/plan", { method: "POST", body: request });
       renderControlPlan(controlIntent);
@@ -1459,10 +1507,25 @@
 
   function receiptText(receipt, reconciled) {
     const result = receipt.result || {};
-    const outcome = result.queue_state || result.status || receipt.status || "recorded";
+    const outcome = result.queue_state || result.status || result.outcome || receipt.status || "recorded";
     return (reconciled ? "Receipt reconciled after an uncertain response. " : "Action accepted. ") +
       receipt.action.replaceAll("_", " ") + " for " + (receipt.task_id || "this queue") +
       ": " + outcome + ". Receipt " + receipt.idempotency_key + ".";
+  }
+
+  function openUnknownRelease(item) {
+    setView("control");
+    $("control-action").value = "release_unknown_execution";
+    $("control-task").value = item.task_id || "";
+    $("control-execution").value = item.execution_id || "";
+    $("control-reason").value = "";
+    clearControlPlan();
+    updateControlTarget();
+    setControlResult(
+      "Verify outside StageMesh that this process is dead, then record what you checked. No process will be killed.",
+      "warn"
+    );
+    $("control-reason").focus();
   }
 
   async function confirmControl() {
