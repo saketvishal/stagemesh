@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from stagemesh.api_server import ActivityApi, make_server
-from stagemesh.domain import TaskStatus
+from stagemesh.domain import ExecutionKind, ExecutionStatus, TaskStatus
 from stagemesh.operator_control import CONTROL_CONTRACT, OperatorControl
 from stagemesh.persistence import Store
 
@@ -81,7 +81,12 @@ def test_capabilities_require_bearer_and_expose_only_bounded_control_contract(co
     status, payload = _call(api, "GET", "/api/v1/control", headers)
     assert status == 200 and payload["contract"] == CONTROL_CONTRACT
     assert payload["enabled"] is True and payload["project_id"] == "project-a"
-    assert payload["actions"] == ["queue_pause", "queue_resume", "task_retry"]
+    assert payload["actions"] == [
+        "queue_pause",
+        "queue_resume",
+        "release_unknown_execution",
+        "task_retry",
+    ]
     assert payload["csrf_token"] == control.csrf_token
 
     headers["Authorization"] = "Bearer wrong"
@@ -171,6 +176,58 @@ def test_plan_confirm_replay_and_receipt_are_current_project_bound(control_db):
         ).fetchone()[0] == 1
     finally:
         store.close()
+
+
+def test_unknown_execution_release_api_is_exact_and_durable(control_db):
+    path, task_id = control_db
+    store = Store(path)
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=None,
+        kind=ExecutionKind.IMPLEMENTATION,
+        actor="codex",
+    )
+    store.close()
+    api, control = _api(path)
+    request = json.dumps(
+        {
+            "action": "release_unknown_execution",
+            "task_id": task_id,
+            "execution_id": execution_id,
+            "reason": "checked the operating-system process list; worker is absent",
+            "idempotency_key": "release-api",
+        }
+    ).encode()
+
+    status, planned = _call(
+        api, "POST", "/api/v1/control/plan", _headers(control, request), request
+    )
+    confirmation = json.dumps({"intent": planned["intent"]}).encode()
+    confirm_status, receipt = _call(
+        api,
+        "POST",
+        "/api/v1/control/confirm",
+        _headers(control, confirmation),
+        confirmation,
+    )
+    lookup_status, lookup = _call(
+        api,
+        "GET",
+        "/api/v1/control/receipt?idempotency_key=release-api",
+        _headers(control),
+    )
+
+    assert status == confirm_status == lookup_status == 200
+    assert planned["target"] == f"execution:{execution_id}"
+    assert receipt == lookup and receipt["result"]["outcome"] == "RELEASED_BY_OPERATOR"
+    reopened = Store(path)
+    try:
+        row = reopened.conn.execute(
+            "SELECT status FROM executions WHERE id=?", (execution_id,)
+        ).fetchone()
+        assert row["status"] == ExecutionStatus.FAILED
+    finally:
+        reopened.close()
 
 
 def test_real_http_transport_reads_only_bounded_control_bodies(control_db):

@@ -13,8 +13,9 @@ dependency and no schema change.
 - The contract is a thin projection of `ActivityQuery` and `ActivityPage`. It adds no fields the projection does not produce.
 - Unknown parameters, malformed values, out-of-range pages and unauthenticated calls fail closed with an error; they are never
   ignored, coerced or answered with partial data.
-- Arbitrary commands, approvals, provider calls, process termination and remote control are out of scope. The only opt-in
-  actions are blocked-task retry and non-terminating queue-admission pause/resume.
+- Arbitrary commands, approvals, provider calls, operating-system process termination and remote control are out of scope.
+  The only opt-in actions are blocked-task retry, non-terminating queue-admission pause/resume, and an explicitly confirmed
+  release of one exact RUNNING execution whose process identity remains `UNKNOWN` after the operator verifies it is dead.
 
 ## Transport
 
@@ -417,10 +418,19 @@ creates an in-memory, per-launch control secret and enables `stagemesh.operator-
 for that loopback process only. It does not add a non-loopback bind, persist a secret,
 enable arbitrary commands, approve delivery, terminate running work, or invoke a provider.
 
-The fixed allowlist is `task_retry`, `queue_pause`, and `queue_resume`. A retry is
+The fixed allowlist is `task_retry`, `queue_pause`, `queue_resume`, and
+`release_unknown_execution`. A retry is
 refused unless the task is currently BLOCKED, has no active claim or running execution,
 is not an objective root, and its recorded source remains eligible. Queue events affect
 future admission only and record `terminate_running=false`.
+
+Unknown-identity release is shown only for a current RUNNING execution classified `UNKNOWN`.
+The operator must supply the exact task id, exact execution id, and a bounded
+reason describing the independent check that established the process is dead. Planning
+and confirmation each re-read the current execution. A live, provably dead, resolved,
+changed, missing, or cross-task target is refused. This action never kills a process,
+starts a provider, or starts a run window; it preserves the execution row as FAILED and
+uses the existing inspected recovery path to release its claim when applicable.
 
 The authenticated routes are:
 
@@ -436,13 +446,17 @@ POST requires the existing Bearer credential, the exact local `Origin`, the deri
 and a body of at most 8 KiB. Intents bind the project, action, target, state digest,
 idempotency key, nonce and expiry with HMAC. Confirmation rejects changed state,
 expired or cross-project intents, idempotency rebinding and concurrent duplicates.
-Receipts are durable audit events with fixed fields; task titles, paths, commands,
-provider output, environment values and secrets are never serialized.
+Receipts are durable audit events with fixed fields. Unknown-identity receipts include
+only the action, exact task/execution identifiers, bounded operator reason, execution kind,
+observed `UNKNOWN` classification and outcome; PID, executable identity, task titles,
+paths, commands, provider output, environment values and secrets are never serialized.
 
 The UI first shows the exact target, expiry and preconditions, then requires a separate
 Confirm action. It disables duplicate submissions and, if a confirmation response is
 lost, queries the durable receipt before reporting an unknown outcome. Successful
-confirmation refreshes the ordinary recorded-state projections.
+confirmation refreshes the ordinary recorded-state projections. The Status view exposes
+the recorded age derived from the start time and the recovery button beside the exact actionable
+execution, so the operator does not need to copy a recovery command from the terminal.
 
 ## Isolated project switcher
 

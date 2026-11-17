@@ -24,6 +24,8 @@ from .audit import record_audit
 from .config import AdverseReviewPolicy
 from .domain import TaskStatus
 from .objective_roots import objective_root_reason
+from .operator import execution_runtime_row
+from .operator_actions import OperatorActionError, release_unknown_execution
 from .persistence import Store
 from .queue_control import QUEUE_CONTROL_EVENT, latest_queue_control
 from .recovery import resume_task
@@ -33,7 +35,9 @@ CONTROL_CONTRACT = "stagemesh.operator-control/1"
 CONTROL_RECEIPT_EVENT = "operator.control.receipt"
 CONTROL_TTL_SECONDS = 120
 MAX_CONTROL_BODY_BYTES = 8 * 1024
-ALLOWED_ACTIONS = frozenset({"task_retry", "queue_pause", "queue_resume"})
+ALLOWED_ACTIONS = frozenset(
+    {"task_retry", "queue_pause", "queue_resume", "release_unknown_execution"}
+)
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
 _TASK_ID = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
@@ -51,6 +55,8 @@ class OperatorIntent:
     token: str
     action: str
     task_id: str | None
+    execution_id: str | None
+    reason: str | None
     idempotency_key: str
     issued_at: int
     expires_at: int
@@ -64,6 +70,8 @@ class OperatorIntent:
             "intent": self.token,
             "action": self.action,
             "task_id": self.task_id,
+            "execution_id": self.execution_id,
+            "reason": self.reason,
             "idempotency_key": self.idempotency_key,
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
@@ -113,7 +121,10 @@ class OperatorControl:
         }
 
     def plan(self, store: Store, request: object) -> OperatorIntent:
-        payload = _request(request, fields={"action", "task_id", "idempotency_key"})
+        payload = _request(
+            request,
+            fields={"action", "task_id", "execution_id", "reason", "idempotency_key"},
+        )
         action = payload.get("action")
         if action not in ALLOWED_ACTIONS:
             raise OperatorControlError("action_not_allowed", "operator action is not allowed")
@@ -123,20 +134,42 @@ class OperatorControl:
                 "invalid_idempotency_key", "idempotency_key must be a bounded identifier"
             )
         task_id = payload.get("task_id")
+        execution_id = payload.get("execution_id")
+        reason = payload.get("reason")
         if action == "task_retry":
             if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
                 raise OperatorControlError("invalid_task_id", "task_retry requires a bounded task_id")
+            if execution_id is not None or reason is not None:
+                raise OperatorControlError(
+                    "unexpected_execution", "task_retry does not accept execution_id or reason"
+                )
             _require_retry_eligible(store, task_id)
-        elif task_id is not None:
-            raise OperatorControlError("unexpected_task_id", "queue actions do not accept task_id")
+        elif action == "release_unknown_execution":
+            if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
+                raise OperatorControlError(
+                    "invalid_task_id", "release_unknown_execution requires a bounded task_id"
+                )
+            if not isinstance(execution_id, str) or not _IDENTIFIER.fullmatch(execution_id):
+                raise OperatorControlError(
+                    "invalid_execution_id",
+                    "release_unknown_execution requires a bounded execution_id",
+                )
+            reason = _reason(reason)
+            _require_unknown_release_eligible(store, task_id, execution_id)
+        elif task_id is not None or execution_id is not None or reason is not None:
+            raise OperatorControlError(
+                "unexpected_target", "queue actions do not accept task_id, execution_id, or reason"
+            )
         _require_queue_transition(store, str(action))
         issued = int(self._now())
-        state_digest = _state_digest(store, str(action), task_id)
+        state_digest = _state_digest(store, str(action), task_id, execution_id)
         signed = {
             "version": 1,
             "project_id": self.project_id,
             "action": action,
             "task_id": task_id,
+            "execution_id": execution_id,
+            "reason": reason,
             "idempotency_key": idempotency_key,
             "issued_at": issued,
             "expires_at": issued + self.ttl_seconds,
@@ -148,11 +181,19 @@ class OperatorControl:
             token=token,
             action=str(action),
             task_id=task_id if isinstance(task_id, str) else None,
+            execution_id=execution_id if isinstance(execution_id, str) else None,
+            reason=reason if isinstance(reason, str) else None,
             idempotency_key=idempotency_key,
             issued_at=issued,
             expires_at=issued + self.ttl_seconds,
             state_digest=state_digest,
-            target=f"task:{task_id}" if task_id is not None else f"queue:{self.project_id}",
+            target=(
+                f"execution:{execution_id}"
+                if execution_id is not None
+                else f"task:{task_id}"
+                if task_id is not None
+                else f"queue:{self.project_id}"
+            ),
             preconditions=_preconditions(str(action)),
         )
 
@@ -180,17 +221,28 @@ class OperatorControl:
             return {**prior, "replayed": True}
         action = str(payload["action"])
         task_id = payload.get("task_id")
-        if _state_digest(store, action, task_id) != payload["state_digest"]:
+        execution_id = payload.get("execution_id")
+        reason = payload.get("reason")
+        if _state_digest(store, action, task_id, execution_id) != payload["state_digest"]:
             raise OperatorControlError(
                 "stale_intent", "recorded project state changed after the plan", status=409
             )
-        result = _execute(store, action, task_id, self.adverse_policy)
+        result = _execute(
+            store,
+            action,
+            task_id,
+            execution_id,
+            reason,
+            self.adverse_policy,
+        )
         receipt = {
             "contract": CONTROL_CONTRACT,
             "status": "ACCEPTED",
             "project_id": self.project_id,
             "action": action,
             "task_id": task_id,
+            "execution_id": execution_id,
+            "reason": reason,
             "idempotency_key": idempotency_key,
             "intent_fingerprint": fingerprint,
             "result": result,
@@ -228,6 +280,8 @@ class OperatorControl:
             "project_id",
             "action",
             "task_id",
+            "execution_id",
+            "reason",
             "idempotency_key",
             "issued_at",
             "expires_at",
@@ -272,6 +326,14 @@ def _preconditions(action: str) -> tuple[str, ...]:
             "recorded source remains eligible",
             "recorded task state still matches this plan",
         )
+    if action == "release_unknown_execution":
+        return (
+            "operator verified the recorded process is dead",
+            "execution still belongs to the exact task",
+            "execution is still RUNNING with UNKNOWN process identity",
+            "no live matching process is observed",
+            "recorded task and execution state still match this plan",
+        )
     expected = "not already paused" if action == "queue_pause" else "currently paused or stopped"
     return (f"queue is {expected}", "recorded queue state still matches this plan")
 
@@ -295,7 +357,7 @@ def _require_retry_eligible(store: Store, task_id: str) -> None:
 
 
 def _require_queue_transition(store: Store, action: str) -> None:
-    if action == "task_retry":
+    if action in {"task_retry", "release_unknown_execution"}:
         return
     latest = latest_queue_control(store)
     state = str(latest.get("state")) if latest else "running"
@@ -305,7 +367,12 @@ def _require_queue_transition(store: Store, action: str) -> None:
         raise OperatorControlError("queue_not_paused", "queue admission is not paused", status=409)
 
 
-def _state_digest(store: Store, action: str, task_id: object) -> str:
+def _state_digest(
+    store: Store,
+    action: str,
+    task_id: object,
+    execution_id: object = None,
+) -> str:
     if action == "task_retry" and isinstance(task_id, str):
         task = store.get_task(task_id)
         candidate = store.latest_candidate(task_id)
@@ -324,6 +391,32 @@ def _state_digest(store: Store, action: str, task_id: object) -> str:
                 1 for row in store.running_executions() if row["task_id"] == task_id
             ),
         }
+    elif (
+        action == "release_unknown_execution"
+        and isinstance(task_id, str)
+        and isinstance(execution_id, str)
+    ):
+        execution = _require_unknown_release_eligible(store, task_id, execution_id)
+        task = store.get_task(task_id)
+        state = {
+            "task_id": task_id,
+            "task": None
+            if task is None
+            else {
+                "stage": str(task["stage"]),
+                "status": str(task["status"]),
+                "updated_at": task["updated_at"],
+            },
+            "execution": {
+                "id": execution_id,
+                "task_id": str(execution["task_id"]),
+                "kind": str(execution["kind"]),
+                "status": str(execution["status"]),
+                "claim_id": execution["claim_id"],
+                "updated_at": execution["updated_at"],
+                "process_state": "UNKNOWN",
+            },
+        }
     else:
         latest = latest_queue_control(store)
         state = {
@@ -338,6 +431,8 @@ def _execute(
     store: Store,
     action: str,
     task_id: object,
+    execution_id: object,
+    reason: object,
     adverse_policy: AdverseReviewPolicy | None,
 ) -> dict[str, Any]:
     if action == "task_retry" and isinstance(task_id, str):
@@ -350,6 +445,33 @@ def _execute(
             audit["candidate_sha"] = str(candidate["sha"])
         record_audit(store, "task.operator_retry_requested", audit)
         return {"task_id": task_id, "status": str(task["status"]), **result}
+    if (
+        action == "release_unknown_execution"
+        and isinstance(task_id, str)
+        and isinstance(execution_id, str)
+        and isinstance(reason, str)
+    ):
+        try:
+            result = release_unknown_execution(store, task_id, execution_id, reason)
+        except OperatorActionError as exc:
+            raise OperatorControlError(
+                "action_refused",
+                "execution changed or is no longer eligible for release",
+                status=409,
+            ) from exc
+        if result.action != "RELEASED_BY_OPERATOR":
+            raise OperatorControlError(
+                "action_refused",
+                "execution changed before it could be released",
+                status=409,
+            )
+        return {
+            "task_id": task_id,
+            "execution_id": execution_id,
+            "execution_kind": result.kind,
+            "process_state": result.process_state,
+            "outcome": result.action,
+        }
     state = "paused" if action == "queue_pause" else "resumed"
     record_audit(
         store,
@@ -363,6 +485,59 @@ def _execute(
         },
     )
     return {"queue_state": state}
+
+
+def _reason(value: object) -> str:
+    if not isinstance(value, str):
+        raise OperatorControlError(
+            "invalid_reason", "release_unknown_execution requires a non-empty reason"
+        )
+    reason = value.strip()
+    if not reason or len(reason) > 500 or any(ord(char) < 0x20 or ord(char) == 0x7F for char in reason):
+        raise OperatorControlError(
+            "invalid_reason", "reason must be 1 to 500 characters without control characters"
+        )
+    return reason
+
+
+def _require_unknown_release_eligible(
+    store: Store,
+    task_id: str,
+    execution_id: str,
+) -> Any:
+    task = store.get_task(task_id)
+    if task is None:
+        raise OperatorControlError("task_not_found", "task was not found", status=404)
+    execution = store.conn.execute(
+        "SELECT * FROM executions WHERE id=?",
+        (execution_id,),
+    ).fetchone()
+    if execution is None:
+        raise OperatorControlError("execution_not_found", "execution was not found", status=404)
+    if str(execution["task_id"]) != task_id:
+        raise OperatorControlError(
+            "execution_task_mismatch", "execution does not belong to the exact task", status=409
+        )
+    if str(execution["status"]) != "RUNNING":
+        raise OperatorControlError(
+            "execution_not_running", "execution is no longer running", status=409
+        )
+    process_state = str(execution_runtime_row(store, execution)["process_state"])
+    if process_state == "LIVE":
+        raise OperatorControlError(
+            "execution_live", "a live matching process is observed and cannot be released", status=409
+        )
+    if process_state == "DEAD":
+        raise OperatorControlError(
+            "execution_dead",
+            "execution is provably dead and must use ordinary stale recovery",
+            status=409,
+        )
+    if process_state != "UNKNOWN":
+        raise OperatorControlError(
+            "execution_not_unknown", "execution identity is not currently unknown", status=409
+        )
+    return execution
 
 
 def _receipt(store: Store, idempotency_key: str) -> dict[str, Any] | None:

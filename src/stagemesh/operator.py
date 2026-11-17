@@ -408,12 +408,15 @@ def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
                 "task_id": execution["task_id"],
                 "stage": execution["kind"],
                 "provider": provider,
+                "started_at": execution["started_at"],
+                "updated_at": execution["updated_at"],
                 "pid": pid,
                 "pid_label": str(pid) if pid is not None else "no pid recorded",
                 "process_state": runtime["process_state"],
                 "parent_process_state": runtime["parent_process_state"],
                 "cleanup_state": runtime["cleanup_state"],
                 "stale": runtime["process_state"] == "DEAD",
+                "release_unknown_allowed": runtime["process_state"] == "UNKNOWN",
             }
         )
     return rows

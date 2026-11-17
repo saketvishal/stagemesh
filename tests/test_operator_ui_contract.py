@@ -134,6 +134,19 @@ def test_read_only_and_fail_closed_posture_is_stated():
     assert "## Known gaps against #134" in DOC
 
 
+def test_documents_bounded_unknown_execution_release_control() -> None:
+    for phrase in (
+        "`release_unknown_execution`",
+        "exact task id",
+        "exact execution id",
+        "classified `UNKNOWN`",
+        "never kills a process",
+        "cross-task target is refused",
+        "PID, executable identity",
+    ):
+        assert phrase in DOC, phrase
+
+
 @pytest.mark.parametrize(
     "query",
     [

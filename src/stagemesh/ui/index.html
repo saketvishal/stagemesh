@@ -317,6 +317,7 @@
     <label>Action
       <select id="control-action">
         <option value="task_retry">Retry a blocked task</option>
+        <option value="release_unknown_execution">Verify dead and release an unknown execution</option>
         <option value="queue_pause">Pause queue admission</option>
         <option value="queue_resume">Resume queue admission</option>
       </select>
@@ -324,6 +325,13 @@
     <label id="control-task-label">Exact task id
       <input id="control-task" type="text" maxlength="200" autocomplete="off">
     </label>
+    <label id="control-execution-label" hidden>Exact execution id
+      <input id="control-execution" type="text" maxlength="100" autocomplete="off">
+    </label>
+    <label id="control-reason-label" hidden>What you checked to verify the process is dead
+      <textarea id="control-reason" maxlength="500" rows="3"></textarea>
+    </label>
+    <p id="control-release-warning" class="warn" hidden>StageMesh cannot determine whether this process is alive. Verify it is dead before planning release; StageMesh will re-read the exact execution and refuse a live, changed, resolved, or cross-task target.</p>
     <button type="submit" id="control-plan">Review plan</button>
   </form>
   <section id="control-plan-view" aria-labelledby="control-plan-heading" hidden>
