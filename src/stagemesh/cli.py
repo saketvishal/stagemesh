@@ -177,6 +177,7 @@ from .runtime_info import format_runtime, runtime_info
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
 from .spec_integrity import resolve_pinned_adapter, run_openspec_validation, spec_audit_report
+from .spec_planning import PlanningApprovalRefusal, record_planning_approval
 from .spec_refs import SpecAdapterError
 from .stage_dispatch import stage_dispatch_refusal
 from .task_sources import (
@@ -1451,6 +1452,36 @@ def command_delivery_unblock(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"task {args.task}: external delivery blocker cleared by {args.actor}; the next window retries publication once")
         return {"task_id": args.task, "cleared": blocked}
+
+    return _repair_command(args, run)
+
+
+def command_approve_planning(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        try:
+            config = load_config(project)  # the operator's project root only; never a candidate worktree or --config
+        except ConfigValidationError as exc:
+            raise RecoveryRefusal("invalid_config", f"config is invalid, approval authority unknown: {exc}") from exc
+        try:
+            report = record_planning_approval(
+                store,
+                project,
+                args.task,
+                authority=config.approval_authority,
+                require_challenge=config.require_plan_challenge,
+            )
+        except PlanningApprovalRefusal as exc:
+            raise RecoveryRefusal(exc.code, str(exc), next_action=exc.next_action) from exc
+        if not args.json:
+            state = "recorded" if report["receipt_recorded"] else "already recorded"
+            print(f"task {args.task}: planning approval {state} by {report['approver_id']} (receipt {report['receipt_id']})")
+            print(f"  planning spec: {report['planning_spec_hash']}")
+            print(f"  planning challenge: {report['planning_challenge_hash'] or 'not required'}")
+            print(f"  contract: {report['contract_hash']}")
+            print(f"  baseline: {report['baseline_sha']}")
+            print(f"  authority: {report['authority_id']} ({report['authority_hash']})")
+            print(f"  artifact: {report['approval_path']}")
+        return report
 
     return _repair_command(args, run)
 
@@ -5703,6 +5734,7 @@ _COMMAND_GROUPS = (
             "rebaseline-task",
             "finding-disposition",
             "delivery-unblock",
+            "approve-planning",
             "advance-baseline",
             "survivor-wave",
             "follow-up",
@@ -5942,6 +5974,13 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_unblock.add_argument("--reason", required=True, help="What changed (for example: write access granted to the token)")
     delivery_unblock.add_argument("--json", action="store_true")
     delivery_unblock.set_defaults(func=command_delivery_unblock)
+    approve_planning = sub.add_parser(
+        "approve-planning",
+        help="Operator-only: record accountable approval of the task's current frozen planning spec (requires planning_gate.approval_authority)",
+    )
+    approve_planning.add_argument("--task", required=True)
+    approve_planning.add_argument("--json", action="store_true")
+    approve_planning.set_defaults(func=command_approve_planning)
     advance = sub.add_parser(
         "advance-baseline",
         help="Move a task's baseline forward to the integration ref, reset its idle worktree and restart IMPLEMENT (audited; old state preserved)",

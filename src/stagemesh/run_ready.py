@@ -47,7 +47,14 @@ from .recovery import (
 )
 from .review import adverse_gate
 from .scheduling import Scheduler
-from .spec_planning import evaluate_planning_gate, load_planning_artifacts, load_planning_challenge
+from .spec_planning import (
+    BOUNDARY_PICKUP,
+    check_accountable_approval,
+    evaluate_planning_gate,
+    load_planning_artifacts,
+    load_planning_challenge,
+    refusal_detail,
+)
 from .stage_dispatch import stage_dispatch_refusal
 from .step_progress import (
     STEP_CAP_STALL_LIMIT,
@@ -326,6 +333,7 @@ def _ensure_contract(
 def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: bool | None) -> None:
     """Opt-in: refuse to start implementation without an approved, identity-current planning spec."""
     require_challenge = False
+    accountable = False
     if enabled is None or enabled:
         try:
             config = load_config(project)
@@ -333,6 +341,17 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             raise RunReadyRefusal("invalid_config", f"config is invalid, planning gate state unknown: {exc}", task_id=task_id) from exc
         if enabled is None:
             enabled = config.require_approved_spec
+        require_challenge = config.require_plan_challenge
+        accountable = config.approval_authority is not None
+    else:
+        # An explicit planning_gate=False never bypasses a configured accountable-approval authority.
+        try:
+            accountable = load_config(project).approval_authority is not None
+        except ConfigValidationError:
+            accountable = False
+    if accountable:
+        enabled = True
+        config = load_config(project)
         require_challenge = config.require_plan_challenge
     if not enabled:
         return
@@ -366,6 +385,19 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             next_action=exc.code,
             planning_gate_reason=str(exc),
         ) from exc
+    if accountable:
+        approval_decision = check_accountable_approval(
+            store, project, task_id, BOUNDARY_PICKUP, contract_hash=contract_hash, baseline_sha=baseline
+        )
+        if approval_decision is not None and not approval_decision.allowed:
+            raise RunReadyRefusal(
+                approval_decision.reason,
+                f"task {task_id} is blocked before implementation: {approval_decision.detail}",
+                task_id=task_id,
+                next_action=approval_decision.next_action,
+                approval=refusal_detail(approval_decision, BOUNDARY_PICKUP),
+            )
+        return
     spec_payload, approval = load_planning_artifacts(project, task_id)
     challenge_payload = load_planning_challenge(project, task_id)
     decision = evaluate_planning_gate(
@@ -1153,6 +1185,17 @@ def drive_task(
             break
         except TargetSelectionError as exc:
             summary.stop_reason, summary.message = "TARGET_ERROR", str(exc)
+            break
+        approval_refusals = [
+            item for item in getattr(coordinator, "last_approval_refusals", []) if item["task_id"] == selected
+        ]
+        if approval_refusals:
+            # Stable reason code, detail and next action pass through unchanged; nothing is synthesized or advanced.
+            latest = approval_refusals[-1]
+            summary.stop_reason, summary.message = f"REFUSED:{latest['reason']}", str(latest["detail"])
+            summary.detail["approval"] = latest
+            if not summary.steps:
+                summary.started = False
             break
         ownership_refusals = [
             item for item in getattr(coordinator, "last_execution_refusals", []) if item["task_id"] == selected
