@@ -37,6 +37,7 @@ from .provider_cooldown import (
     no_progress_streak,
 )
 from .provider_events import CAPABILITY_EVIDENCE_MISSING, CAPABILITY_POLICY_VIOLATION
+from .provider_pause import is_provider_paused
 from .providers import RuntimeCommandAdapter
 from .redaction import sanitize_provider_output
 from .review import (
@@ -261,6 +262,14 @@ class ProviderPool:
             adapter = self.adapters.get(name)
             if adapter is None:
                 verdicts.append(Verdict(name, False, "not_configured: no command configured for this provider"))
+            elif is_provider_paused(store, name):
+                verdicts.append(
+                    Verdict(
+                        name,
+                        False,
+                        f"paused_by_operator: paused by operator; resume: stagemesh provider resume {name}",
+                    )
+                )
             elif getattr(adapter, "denied", None):
                 verdicts.append(Verdict(name, False, f"not_authorized: {adapter.denied}"))
             elif capability not in adapter.capabilities:
@@ -291,7 +300,6 @@ class ProviderPool:
         if stage == IMPLEMENT and task_id is not None:
             verdicts = self._apply_recovery_switch(store, task_id, verdicts)
         return verdicts
-
     @staticmethod
     def _apply_recovery_switch(store: Store, task_id: str, verdicts: list[Verdict]) -> list[Verdict]:
         """After an exhausted remediation budget the next attempt goes to a different provider, if another one is usable."""

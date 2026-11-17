@@ -131,6 +131,12 @@ from .provider_catalog import (
     migrate_unsafe_bundled_provider_commands,
 )
 from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
+from .provider_pause import (
+    format_operator_pauses,
+    is_provider_paused,
+    operator_pause_rows,
+    set_provider_paused,
+)
 from .provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -821,6 +827,9 @@ def command_doctor(args: argparse.Namespace) -> int:
         "platform": platform.platform(),
         "git_identity": identity_report(project),
         "provider_cooldowns": _json_safe_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)),
+        "provider_operator_pauses": operator_pause_rows(
+            store, (adapter.name for adapter in adapters_from_config(config))
+        ),
     }
     stale = stale_runtime_warning(project)
     if stale:
@@ -866,6 +875,8 @@ def command_doctor(args: argparse.Namespace) -> int:
         print(f"warning: {stale}")
     print(f"platform: {platform.platform()}")
     for line in format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)):
+        print(line)
+    for line in format_operator_pauses(data["provider_operator_pauses"]):
         print(line)
     who = data["git_identity"]
     print(f"git identity: {who['name']} <{who['email']}> [{who['status']}]" + (f" via {who['origin']}" if who.get("origin") else ""))
@@ -938,6 +949,17 @@ def _live_acceptance_build_kwargs(mode: str | None) -> dict[str, str]:
     return {} if mode is None else {"live_acceptance": mode}
 
 
+def _refuse_paused_explicit_provider(args: argparse.Namespace, store: Store) -> bool:
+    provider = getattr(args, "provider", None)
+    if not provider or not is_provider_paused(store, provider):
+        return False
+    print(
+        f"provider {provider} is paused by the operator; run `stagemesh provider resume {provider}`",
+        file=sys.stderr,
+    )
+    return True
+
+
 def _build_coordinator(
     args,
     project: Path,
@@ -989,6 +1011,8 @@ def _build_coordinator(
         chosen_name = getattr(args, "provider", None)
         if chosen_name and chosen_name not in adapter_by_name:
             print(f"provider not found: {chosen_name}", file=sys.stderr)
+            raise _SetupError(2)
+        if _refuse_paused_explicit_provider(args, store):
             raise _SetupError(2)
         stage_caps = {"IMPLEMENT": "code", "REVIEW": "review"}
         capable = {
@@ -2757,6 +2781,10 @@ def command_status(args: argparse.Namespace) -> int:
                     "latest_implementation_failure": report.latest_implementation_failure,
                     "queue_control": control,
                     "provider_cooldowns": _json_safe_cooldowns(active_cooldowns(store, load_config(project).provider_failure_cooldown_seconds)),
+                    "provider_operator_pauses": operator_pause_rows(
+                        store,
+                        (adapter.name for adapter in adapters_from_config(load_config(project))),
+                    ),
                     **_health_scope_fields(report),
                     "tasks": [
                         {
@@ -2797,6 +2825,11 @@ def command_status(args: argparse.Namespace) -> int:
     for reason, count in report.blocked_reason_buckets.items():
         print(f"blocked_bucket {reason}: {count}")
     for line in format_cooldowns(active_cooldowns(store, load_config(project).provider_failure_cooldown_seconds)):
+        print(line)
+    config = load_config(project)
+    for line in format_operator_pauses(
+        operator_pause_rows(store, (adapter.name for adapter in adapters_from_config(config)))
+    ):
         print(line)
     for row in rows:
         print(f"{row['id']} {row['stage']} {row['status']} {row['title']}")
@@ -2877,6 +2910,44 @@ def command_cooldown(args: argparse.Namespace) -> int:
                 print(line)
         else:
             print("no provider is in cooldown")
+        return 0
+    finally:
+        store.close()
+
+
+def command_provider(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    names = [adapter.name for adapter in adapters_from_config(config)]
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        if args.provider_command in {"pause", "resume"}:
+            try:
+                provider = set_provider_paused(
+                    store,
+                    args.provider_name,
+                    names,
+                    paused=args.provider_command == "pause",
+                )
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            paused = args.provider_command == "pause"
+            payload = {"provider": provider, "paused": paused}
+            if args.json:
+                print(json.dumps(payload, sort_keys=True))
+            else:
+                state = "paused by operator" if paused else "resumed for automatic selection"
+                print(f"provider {provider}: {state}")
+            return 0
+        rows = operator_pause_rows(store, names)
+        if args.json:
+            print(json.dumps({"providers": rows}, indent=2, sort_keys=True))
+        else:
+            for row in rows:
+                state = "paused by operator" if row["paused"] else "active"
+                print(f"provider {row['provider']}: {state}")
         return 0
     finally:
         store.close()
@@ -3212,6 +3283,9 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
+    if _refuse_paused_explicit_provider(args, store):
+        store.close()
+        return 2
     try:
         scope = _prepare_selection_scope(store, project, config, args)
         if scope is None:
@@ -4287,6 +4361,7 @@ def command_capacity(args: argparse.Namespace) -> int:
         for stage in (IMPLEMENT, REVIEW)
     }
     cooldowns = _json_safe_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds))
+    pauses = operator_pause_rows(store, adapter_by_name)
     provider_rows = []
     for adapter in sorted(adapters, key=lambda item: item.name):
         capacity = adapter.check_capacity()
@@ -4308,6 +4383,7 @@ def command_capacity(args: argparse.Namespace) -> int:
                     IMPLEMENT: _live_readiness(store, adapter.name, "code", config.live_acceptance_ttl_seconds) if "code" in adapter.capabilities else "not_applicable",
                     REVIEW: _live_readiness(store, adapter.name, "review", config.live_acceptance_ttl_seconds) if "review" in adapter.capabilities else "not_applicable",
                 },
+                "operator_pause": {"paused": is_provider_paused(store, adapter.name)},
                 "recent_use": {
                     stage: next(
                         (
@@ -4328,6 +4404,7 @@ def command_capacity(args: argparse.Namespace) -> int:
         "selection_policy": config.provider_selection_policy,
         "pools": {stage: list(names) for stage, names in sorted(pools.items())},
         "provider_cooldowns": cooldowns,
+        "provider_operator_pauses": pauses,
         "recent_use": recent_use,
         "providers": provider_rows,
         "stages": {
@@ -4365,6 +4442,8 @@ def command_capacity(args: argparse.Namespace) -> int:
             print(line)
     else:
         print("provider cooldowns: none")
+    for line in format_operator_pauses(pauses):
+        print(line)
     print(f"live acceptance freshness window: {config.live_acceptance_ttl_seconds / 86400:g} days (routing.live_acceptance_ttl_seconds)")
     for row in provider_rows:
         stages = "; ".join(
@@ -5646,6 +5725,7 @@ _COMMAND_GROUPS = (
             "adopt-candidate",
             "health",
             "validation-plan",
+            "validation-bootstrap",
         ),
     ),
     (
@@ -5653,6 +5733,7 @@ _COMMAND_GROUPS = (
         "Provider and capability diagnostics",
         (
             "cooldown",
+            "provider",
             "provider-profile",
             "capacity",
             "skills",
@@ -6269,6 +6350,16 @@ def build_parser() -> argparse.ArgumentParser:
     cooldown.set_defaults(func=command_cooldown, cooldown_command="list", provider=None)
     cooldown_list.set_defaults(func=command_cooldown)
     cooldown_clear.set_defaults(func=command_cooldown)
+    provider = sub.add_parser("provider", help="Pause, resume, or inspect automatic provider selection")
+    provider_sub = provider.add_subparsers(dest="provider_command", required=True)
+    for action in ("pause", "resume"):
+        provider_action = provider_sub.add_parser(action)
+        provider_action.add_argument("provider_name")
+        provider_action.add_argument("--json", action="store_true")
+        provider_action.set_defaults(func=command_provider)
+    provider_status = provider_sub.add_parser("status")
+    provider_status.add_argument("--json", action="store_true")
+    provider_status.set_defaults(func=command_provider)
     retry_task = sub.add_parser("retry-task", help="Return a BLOCKED task to OPEN with a fresh remediation budget")
     retry_task.add_argument("--task", required=True)
     retry_task.add_argument("--json", action="store_true")
