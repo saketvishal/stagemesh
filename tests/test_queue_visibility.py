@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 from test_queue_run import _smoke_project, run_stagemesh_cli
@@ -128,6 +130,36 @@ def test_status_shows_compact_queue_counts_in_text_and_json(tmp_path: Path) -> N
     assert code == 0
     assert "Blocked Buckets" in json.loads(out)["sections"]
     assert "validation_gate" in dashboard.read_text(encoding="utf-8")
+
+
+def test_status_reconfigures_a_legacy_windows_stream_before_printing_unicode(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    store = _store(project)
+    store.upsert_task("plan → implement")
+    store.close()
+    environment = {
+        **os.environ,
+        "PYTHONIOENCODING": "cp1252:strict",
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from stagemesh.cli import main; raise SystemExit(main())",
+            "--project",
+            str(project),
+            "status",
+        ],
+        cwd=project,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert "plan → implement" in result.stdout.decode("utf-8")
 
 
 def test_json_surfaces_expose_state_event_reason_and_process(tmp_path: Path) -> None:

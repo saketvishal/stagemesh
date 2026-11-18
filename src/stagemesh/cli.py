@@ -62,6 +62,7 @@ from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
 from .config import (
+    GOVERNANCE_PROFILES,
     ConfigValidationError,
     StageMeshConfig,
     TaskSelectionConfig,
@@ -358,6 +359,124 @@ def _write_provider_authorization(project: Path, requested: tuple[str, ...]) -> 
     return names
 
 
+def _configure_governance_profile(
+    project: Path,
+    profile: str | None,
+    *,
+    planner_provider: str | None,
+    challenger_provider: str | None,
+    authority_id: str | None,
+    approver_id: str | None,
+    available_providers: tuple[str, ...],
+) -> bool:
+    """Atomically opt a project into a fail-closed governance profile.
+
+    Provider roles may be selected deterministically from already-authorized,
+    currently installed adapters. Accountable authority is never inferred.
+    """
+    supplied = any((planner_provider, challenger_provider, authority_id, approver_id))
+    if profile is None:
+        if supplied:
+            raise ConfigValidationError(
+                "governance role and authority options require --governance-profile"
+            )
+        return False
+    if profile not in GOVERNANCE_PROFILES:
+        raise ConfigValidationError(
+            f"governance profile must be one of: {', '.join(GOVERNANCE_PROFILES)}"
+        )
+    config_path = runtime_dir(project) / "config.json"
+    try:
+        original = config_path.read_bytes()
+        data = json.loads(original.decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ConfigValidationError("config file must be valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ConfigValidationError("config root must be an object")
+    current = load_config(project)
+    authorized = set(current.authorized_providers or ())
+    candidates = tuple(name for name in available_providers if name in authorized)
+    gate = data.get("planning_gate", {})
+    if not isinstance(gate, dict):
+        raise ConfigValidationError("planning_gate must be an object")
+    selected_planner = planner_provider or _string_option(gate.get("planner_provider"))
+    selected_challenger = challenger_provider or _string_option(gate.get("challenger_provider"))
+    if selected_planner is None:
+        selected_planner = candidates[0] if candidates else None
+    if selected_challenger is None:
+        selected_challenger = next((name for name in candidates if name != selected_planner), None)
+    if not selected_planner or not selected_challenger or selected_planner == selected_challenger:
+        raise ConfigValidationError(
+            "governed-sdd setup needs two distinct installed and authorized providers; "
+            "authorize them during init or pass --planner-provider and --challenger-provider"
+        )
+    unavailable = [
+        name
+        for name in (selected_planner, selected_challenger)
+        if name not in candidates
+    ]
+    if unavailable:
+        raise ConfigValidationError(
+            "governance provider roles must use installed and authorized providers: "
+            f"{', '.join(unavailable)}"
+        )
+    authority = gate.get("approval_authority", {})
+    if authority and not isinstance(authority, dict):
+        raise ConfigValidationError("planning_gate.approval_authority must be an object")
+    existing_authority = authority if isinstance(authority, dict) else {}
+    selected_authority = authority_id or _string_option(existing_authority.get("authority_id"))
+    selected_approver = approver_id or _string_option(existing_authority.get("approver_id"))
+    if not selected_authority or not selected_approver:
+        raise ConfigValidationError(
+            "governed-sdd setup requires an accountable identity; pass both "
+            "--approval-authority-id and --approver-id (for example, a project-owner authority and GitHub login)"
+        )
+    routing = data.get("routing", {})
+    merging = data.get("merging", {})
+    if not isinstance(routing, dict):
+        raise ConfigValidationError("routing must be an object")
+    if not isinstance(merging, dict):
+        raise ConfigValidationError("merging must be an object")
+    data["governance_profile"] = profile
+    routing["require_independent_review"] = True
+    data["routing"] = routing
+    merging["mode"] = "pr_only"
+    data["merging"] = merging
+    gate.update(
+        {
+            "require_approved_spec": True,
+            "require_plan_challenge": True,
+            "planner_provider": selected_planner,
+            "challenger_provider": selected_challenger,
+            "approval_authority": {
+                "version": 1,
+                "authority_id": selected_authority,
+                "approver_id": selected_approver,
+            },
+        }
+    )
+    data["planning_gate"] = gate
+    rendered = (json.dumps(data, indent=2) + "\n").encode("utf-8")
+    if rendered == original:
+        return False
+    tmp = config_path.with_name(f".config.json.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(rendered)
+        load_config(project, config_path=tmp)
+        if config_path.read_bytes() != original:
+            raise ConfigValidationError(
+                "config changed during governance setup; rerun `stagemesh init`"
+            )
+        os.replace(tmp, config_path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return True
+
+
+def _string_option(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _interactive_init(args: argparse.Namespace) -> bool:
     return not args.json and bool(sys.stdin) and sys.stdin.isatty()
 
@@ -611,6 +730,15 @@ def command_init(args: argparse.Namespace) -> int:
         _write_provider_authorization(project, requested_providers)
     elif _interactive_init(args):
         _prompt_provider_authorization(project, available_providers)
+    governance_changed = _configure_governance_profile(
+        project,
+        args.governance_profile,
+        planner_provider=args.planner_provider,
+        challenger_provider=args.challenger_provider,
+        authority_id=args.approval_authority_id,
+        approver_id=args.approver_id,
+        available_providers=available_providers,
+    )
     authorization_after = tuple(load_config(project).authorized_providers or ())
     store = Store(db_path(project))
     store.migrate()
@@ -624,6 +752,12 @@ def command_init(args: argparse.Namespace) -> int:
                 "after": list(authorization_after),
                 "added": [name for name in authorization_after if name not in authorization_before],
             },
+        )
+    if governance_changed:
+        record_audit(
+            store,
+            "governance.profile_configured",
+            {"actor": "stagemesh init", "profile": str(args.governance_profile)},
         )
     if args.task:
         store.upsert_task(args.task)
@@ -714,6 +848,7 @@ def command_init(args: argparse.Namespace) -> int:
                         ],
                         "provider_calls": 0,
                     },
+                    "governance_profile": config.governance_profile,
                     "task_source_sync": source_sync,
                     "github_issue_classification": github_classification.to_dict(),
                     "readiness": readiness,
@@ -752,6 +887,11 @@ def command_init(args: argparse.Namespace) -> int:
         print(
             "updated provider registry "
             f"(registered: {names}; available now: {available}; active: {authorized}; provider calls: 0)"
+        )
+    if governance_changed:
+        print(
+            f"configured governance profile {config.governance_profile} with accountable planning, "
+            "independent challenge/review, and PR-only delivery"
         )
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
@@ -5897,6 +6037,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create setup files but return success even when readiness blockers remain; never claims the project is ready",
     )
+    init.add_argument(
+        "--governance-profile",
+        choices=GOVERNANCE_PROFILES,
+        help="Configure a fail-closed governed development profile during initialization",
+    )
+    init.add_argument("--planner-provider", help="Authorized provider responsible for governed planning")
+    init.add_argument("--challenger-provider", help="Distinct authorized provider responsible for plan challenge")
+    init.add_argument("--approval-authority-id", help="Stable accountable authority id recorded in planning approvals")
+    init.add_argument("--approver-id", help="Stable identity permitted to approve governed plans")
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=command_init)
     doctor = sub.add_parser("doctor", help=_PRIMARY_COMMAND_HELP["doctor"])
@@ -6869,6 +7018,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows may give a console script a legacy cp1252 stream even when task
+    # titles and provider output are valid Unicode.  Keep every CLI command
+    # usable instead of crashing while rendering one such value.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command_catalog_json:

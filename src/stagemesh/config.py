@@ -29,6 +29,7 @@ PROVIDER_STAGES = ("IMPLEMENT", "REVIEW")
 SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted")
 _LEGACY_CAPABILITIES = {"code": "IMPLEMENT", "review": "REVIEW"}
 PROVIDER_PROFILES = ("balanced",)
+GOVERNANCE_PROFILES = ("governed-sdd",)
 BALANCED_PROVIDER_POOLS = balanced_provider_pools(BUILTIN_PROVIDERS)
 
 
@@ -190,7 +191,7 @@ def _adverse_review_policy(data: dict[str, object]) -> AdverseReviewPolicy:
 
 
 def _planning_gate_policy(
-    data: dict[str, object], known_providers: set[str]
+    data: dict[str, object], known_providers: set[str], governance_profile: str | None = None
 ) -> tuple[bool, bool, str | None, str | None]:
     """Opt-in planning policy; absent means no pre-implementation gate."""
     unknown = set(data) - {
@@ -202,8 +203,9 @@ def _planning_gate_policy(
     }
     if unknown:
         raise ConfigValidationError(f"planning_gate has unsupported keys: {', '.join(sorted(unknown))}")
-    require_spec = data.get("require_approved_spec", False)
-    require_challenge = data.get("require_plan_challenge", False)
+    governed = governance_profile == "governed-sdd"
+    require_spec = data.get("require_approved_spec", governed)
+    require_challenge = data.get("require_plan_challenge", governed)
     planner_provider = _string(data.get("planner_provider"))
     challenger_provider = _string(data.get("challenger_provider"))
     for field_name, provider in (
@@ -218,6 +220,14 @@ def _planning_gate_policy(
         raise ConfigValidationError("planning_gate.require_approved_spec must be a boolean")
     if not isinstance(require_challenge, bool):
         raise ConfigValidationError("planning_gate.require_plan_challenge must be a boolean")
+    if governed and not require_spec:
+        raise ConfigValidationError(
+            "governance_profile governed-sdd requires planning_gate.require_approved_spec=true"
+        )
+    if governed and not require_challenge:
+        raise ConfigValidationError(
+            "governance_profile governed-sdd requires planning_gate.require_plan_challenge=true"
+        )
     if require_challenge and not require_spec:
         raise ConfigValidationError(
             "planning_gate.require_plan_challenge requires require_approved_spec=true"
@@ -249,6 +259,10 @@ def _planning_gate_policy(
     ):
         raise ConfigValidationError(
             "planning_gate planner_provider and challenger_provider must be different"
+        )
+    if governed and (planner_provider is None or challenger_provider is None):
+        raise ConfigValidationError(
+            "governance_profile governed-sdd requires distinct planning_gate planner_provider and challenger_provider"
         )
     return require_spec, require_challenge, planner_provider, challenger_provider
 
@@ -464,6 +478,7 @@ class StageMeshConfig:
     database_url: str | None
     source: str
     providers_explicit: bool
+    governance_profile: str | None = None
     require_independent_review: bool = True
     integration_ref: str | None = None
     provider_pools: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -515,6 +530,13 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         data = loaded
         source = str(path)
     github_data = _optional_mapping(data, "github")
+    governance_profile = _string(data.get("governance_profile"))
+    if "governance_profile" in data and governance_profile is None:
+        raise ConfigValidationError("governance_profile must be a non-empty profile name")
+    if governance_profile is not None and governance_profile not in GOVERNANCE_PROFILES:
+        raise ConfigValidationError(
+            f"governance_profile must be one of: {', '.join(GOVERNANCE_PROFILES)}"
+        )
     providers_explicit = "providers" in data
     providers = _optional_mapping(data, "providers")
     task_sources_data = data.get("task_sources", [])
@@ -545,6 +567,10 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     require_review = routing_data.get("require_independent_review", True)
     if not isinstance(require_review, bool):
         raise ConfigValidationError("routing.require_independent_review must be a boolean")
+    if governance_profile == "governed-sdd" and not require_review:
+        raise ConfigValidationError(
+            "governance_profile governed-sdd requires routing.require_independent_review=true"
+        )
     cooldown = routing_data.get("provider_failure_cooldown_seconds", 900.0)
     if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
         raise ConfigValidationError("routing.provider_failure_cooldown_seconds must be a non-negative number")
@@ -593,15 +619,38 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     if integration_ref and not integration_ref.startswith("refs/"):
         integration_ref = f"refs/heads/{integration_ref}"
     runtime = _runtime(project, _optional_mapping(data, "runtime"))
+    authorized_providers = _authorization(
+        _optional_mapping(data, "authorization"), known
+    )
     (
         require_approved_spec,
         require_plan_challenge,
         planner_provider,
         challenger_provider,
     ) = _planning_gate_policy(
-        _optional_mapping(data, "planning_gate"), known
+        _optional_mapping(data, "planning_gate"), known, governance_profile
     )
     approval_authority = _approval_authority(_optional_mapping(data, "planning_gate"))
+    if governance_profile == "governed-sdd" and approval_authority is None:
+        raise ConfigValidationError(
+            "governance_profile governed-sdd requires planning_gate.approval_authority"
+        )
+    if governance_profile == "governed-sdd":
+        unauthorized_roles = [
+            provider
+            for provider in (planner_provider, challenger_provider)
+            if provider not in (authorized_providers or ())
+        ]
+        if unauthorized_roles:
+            raise ConfigValidationError(
+                "governance_profile governed-sdd requires authorized planning providers: "
+                f"{', '.join(unauthorized_roles)}"
+            )
+    merge_config = _merging(_optional_mapping(data, "merging"), require_review)
+    if governance_profile == "governed-sdd" and merge_config.mode != "pr_only":
+        raise ConfigValidationError(
+            "governance_profile governed-sdd requires merging.mode=pr_only"
+        )
     return StageMeshConfig(
         project=project,
         github=github,
@@ -614,6 +663,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         database_url=database_url,
         source=source,
         providers_explicit=providers_explicit,
+        governance_profile=governance_profile,
         require_independent_review=require_review,
         integration_ref=integration_ref,
         provider_pools=provider_pools,
@@ -627,9 +677,9 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         parallel=_parallel(_optional_mapping(data, "parallel")),
         runtime=runtime,
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
-        merging=_merging(_optional_mapping(data, "merging"), require_review),
+        merging=merge_config,
         budgets=_budgets(_optional_mapping(data, "budgets")),
-        authorized_providers=_authorization(_optional_mapping(data, "authorization"), known),
+        authorized_providers=authorized_providers,
         adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
         require_approved_spec=require_approved_spec,
         require_plan_challenge=require_plan_challenge,
