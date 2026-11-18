@@ -17,6 +17,7 @@ from .capacity import CapacityKind
 from .config import StageMeshConfig
 from .config_migration import legacy_review_config_hint
 from .diagnosis import latest_tool_failure
+from .objective_roots import objective_root_reason
 from .persistence import Store
 from .provider_acceptance import LIVE_PASSING, live_acceptance_status
 from .provider_cooldown import active_cooldowns, cooldown_parked
@@ -26,6 +27,12 @@ from .runtime_freshness import RuntimeFreshness, check_runtime
 from .survivor_wave import blocked_needs_decision, git_repo_state
 
 PrLister = Callable[[Path], list[dict[str, Any]]]
+_ACTIONABLE_SOURCE_REFUSALS = frozenset(
+    {
+        "source operations gate requires a non-code adapter",
+        "source task permits no repository file edits",
+    }
+)
 
 
 def gh_open_wave_prs(project: Path) -> list[dict[str, Any]]:
@@ -93,6 +100,16 @@ def build_readiness(
 
     freshness = runtime or check_runtime(project)
     data["runtime"] = _runtime_block(project, freshness, version_warning)
+    authority = config.approval_authority
+    data["governance"] = {
+        "profile": config.governance_profile,
+        "planner_provider": config.planner_provider,
+        "challenger_provider": config.challenger_provider,
+        "authority_id": None if authority is None else authority.authority_id,
+        "approver_id": None if authority is None else authority.approver_id,
+        "independent_review": config.require_independent_review,
+        "delivery_mode": config.merging.mode,
+    }
     if data["runtime"]["stale"]:
         attention.append("installed runtime is stale")
     migration_hint = legacy_review_config_hint(project)
@@ -108,6 +125,7 @@ def build_readiness(
                 attention.append(f"{len(data['wave_prs']['prs'])} open wave PR(s) waiting for merge")
         except Exception as exc:  # noqa: BLE001 - an unreachable GitHub must not hide the rest of the report
             data["wave_prs"] = {"available": False, "reason": f"{type(exc).__name__}: {exc}", "prs": []}
+            attention.append("GitHub access is unavailable; task sync, PR inspection, and delivery cannot be trusted")
 
     try:
         data["provider_stage_commands"] = {a.name: stage_command_summary(a) for a in sorted(adapters_from_config(config), key=lambda a: a.name)}
@@ -135,6 +153,7 @@ def build_readiness(
 
     cooldowns = {str(item["provider"]): item for item in active_cooldowns(store, config.provider_failure_cooldown_seconds)}
     decisions = []
+    source_refusals: list[dict[str, str]] = []
     parked_cooldown: list[dict[str, Any]] = []
     ledger = {"done": 0, "retired_closed": 0, "retired_operator": 0, "retired_ineligible": 0, "parked_cooldown": 0, "open": 0, "blocked": 0, "running": 0}
     live_tasks: list[dict[str, str]] = []
@@ -148,14 +167,25 @@ def build_readiness(
         reason = ""
         if row["source"] is not None:
             reason = str(store.source_state(str(row["source"]), str(row["source_id"])).get("retirement_reason") or "")
+        source_refusal = objective_root_reason(store, row)
         if not reason and row["source"] is not None and store.operator_retirement_reason(str(row["source"]), str(row["source_id"])):
             ledger["retired_operator"] += 1  # retired through the audited store path (duplicate, already satisfied): history, not work
             continue
         if reason == "source closed":  # closed upstream: history, not production work
             ledger["retired_closed"] += 1
             continue
-        if reason:  # still open upstream but not runnable (blocked/unlabelled): counted apart, and a decision still needs a person
+        if reason or source_refusal is not None:
+            # Open upstream but not runnable (blocked, unlabeled, or non-code)
+            # is history/attention, not live coding work.
             ledger["retired_ineligible"] += 1
+            if source_refusal in _ACTIONABLE_SOURCE_REFUSALS:
+                source_refusals.append(
+                    {
+                        "task_id": str(row["id"]),
+                        "title": str(row["title"]),
+                        "reason": source_refusal,
+                    }
+                )
         elif status == "BLOCKED" and (waiting := cooldown_parked(store, str(row["id"]), cooldowns)):
             ledger["parked_cooldown"] += 1  # waiting out a long provider cooldown: not actionable until it expires
             parked_cooldown.append({"task_id": str(row["id"]), "stage": str(row["stage"]), "title": str(row["title"]), "waiting_on": waiting})
@@ -176,8 +206,13 @@ def build_readiness(
     data["tool_failures"] = tool_failures
     data["tool_failures_omitted"] = max(0, tool_failure_total - len(tool_failures))
     data["needs_decision"] = decisions
+    data["source_refusals"] = source_refusals
     if decisions:
         attention.append(f"{len(decisions)} task(s) need a design decision")
+    if source_refusals:
+        attention.append(
+            f"{len(source_refusals)} source task(s) cannot run in the coding queue"
+        )
 
     providers = []
     try:
@@ -212,6 +247,13 @@ def build_readiness(
             attention.append(f"provider {name} is cooling down ({cooldown['failure_class']})")
         if operator_paused:
             attention.append(f"provider {name} is paused by the operator")
+        if config.authorized_providers is not None and name in config.authorized_providers:
+            if adapter is None or adapter.check_capacity() != CapacityKind.AVAILABLE:
+                attention.append(f"authorized provider {name} command is unavailable")
+            elif stage_capacity in {CapacityKind.AUTH, CapacityKind.PERMISSION}:
+                attention.append(f"authorized provider {name} requires unattended authentication or permission")
+            elif adapter.denied:
+                attention.append(f"authorized provider {name} is unavailable ({adapter.denied})")
     data["providers"] = providers
     data["strict_live"] = strict_live
     from .window_journal import last_window
@@ -275,6 +317,15 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
     lines.append(f"runtime: {'STALE' if runtime['stale'] else 'current'}")
     lines.append(f"  installed command: {runtime['installed_cli'] or 'not found'}")
     lines.append(f"  source command:    {runtime['source_cli'] or 'not found'} (this process runs from {runtime['running_from']})")
+    governance = data.get("governance", {})
+    if governance.get("profile"):
+        lines.append(
+            "governance: "
+            f"{governance['profile']}; planner {governance['planner_provider']}; "
+            f"challenger {governance['challenger_provider']}; "
+            f"approval {governance['approver_id']} via {governance['authority_id']}; "
+            f"delivery {governance['delivery_mode']}"
+        )
     if runtime["missing_from_installed"]:
         lines.append(f"  missing from installed: {', '.join(runtime['missing_from_installed'])}")
     if runtime["version_warning"]:
@@ -350,6 +401,12 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
     for t in ledger.get("parked_cooldown_tasks", []):
         waits = ", ".join(f"{w['provider']} {_duration(w['seconds_remaining'])} left ({w['failure_class']})" for w in t["waiting_on"])
         lines.append(f"  parked: provider cooldown - {t['task_id']} {t['stage']}/BLOCKED: {t['title']} (waiting on {waits})")
+    if data.get("source_refusals"):
+        lines.append("source tasks outside the coding queue:")
+        lines += [
+            f"  {item['task_id']} {item['title']}: {item['reason']}"
+            for item in data["source_refusals"]
+        ]
     if data["needs_decision"]:
         lines.append("tasks needing a design decision:")
         lines += [f"  {item['task_id']} {item['title']}: {item['reason']}" for item in data["needs_decision"]]

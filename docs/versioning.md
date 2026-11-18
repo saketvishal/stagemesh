@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.15 recognizes no-edit
-GitHub contracts across Markdown forms, keeps Grok headless tool policy valid,
-and accepts one terminal review verdict after structured progress records.
-See the [0.6.15 release notes](releases/0.6.15.md),
+files as reinstallable package points. Version 0.6.16 adds a fail-closed
+governed SDD setup profile, truthful readiness reporting for delivery and
+providers, and Unicode-safe Windows command output.
+See the [0.6.16 release notes](releases/0.6.16.md),
+[0.6.15 release notes](releases/0.6.15.md),
 [0.6.14 release notes](releases/0.6.14.md),
 [0.6.13 release notes](releases/0.6.13.md),
 [0.6.12 release notes](releases/0.6.12.md),
@@ -22,11 +23,11 @@ See the [0.6.15 release notes](releases/0.6.15.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.15` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.16` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.15
+python -m pip install --no-cache-dir stagemesh==0.6.16
 ```
 
 The preceding `0.6.14` release remains available for rollback. The older
@@ -38,6 +39,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.16`: governed SDD initialization, truthful readiness, and Unicode-safe Windows output.
 - `0.6.15`: Markdown no-edit admission, fail-closed Grok tools, and terminal review parsing.
 - `0.6.14`: contract-aware task admission, truthful AGY readiness, and clean interruption.
 - `0.6.13`: zero-call init migration of exact unsafe built-in provider defaults.

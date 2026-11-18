@@ -14,6 +14,7 @@ from stagemesh.audit import record_audit
 from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.runtime_freshness import RuntimeFreshness
+from stagemesh.task_sources import DiscoveredTask, sync_source
 
 FRESH = RuntimeFreshness(running_from="src", running_from_source=True, installed_cli="C:/x/stagemesh.exe", source_cli="C:/x/src/stagemesh/cli.py")
 STALE = RuntimeFreshness(
@@ -83,9 +84,111 @@ def test_open_wave_prs_are_listed_and_an_unreachable_github_is_reported_not_rais
 
     _s, _p, offline = build(tmp_path / "off", prs=down)
     assert offline["wave_prs"]["available"] is False and "not logged in" in offline["wave_prs"]["reason"]
-    assert offline["verdict"] == "ready"  # an unanswered question is not a finding
+    assert offline["verdict"] == "attention"
+    assert any("GitHub access is unavailable" in item for item in offline["attention"])
     _s, _p, skipped = build(tmp_path / "skip", prs=None)
     assert skipped["wave_prs"]["reason"].startswith("skipped")
+
+
+def test_an_authorized_provider_with_a_missing_command_requires_attention(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    _with_origin(tmp_path, project)
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {"missing": "stagemesh-command-that-does-not-exist"},
+                "authorization": {"unattended_providers": ["missing"]},
+                "routing": {"require_independent_review": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = cli_module.load_config(project)
+
+    data = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
+
+    assert data["verdict"] == "attention"
+    assert "authorized provider missing command is unavailable" in data["attention"]
+
+
+def test_governed_profile_is_visible_in_doctor_output(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    _with_origin(tmp_path, project)
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "governance_profile": "governed-sdd",
+                "providers": {"planner": "python", "challenger": "python"},
+                "authorization": {"unattended_providers": ["planner", "challenger"]},
+                "planning_gate": {
+                    "planner_provider": "planner",
+                    "challenger_provider": "challenger",
+                    "approval_authority": {
+                        "version": 1,
+                        "authority_id": "project-owner:example",
+                        "approver_id": "github:owner",
+                    },
+                },
+                "merging": {"mode": "pr_only"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    data = readiness.build_readiness(
+        store,
+        project,
+        cli_module.load_config(project),
+        list_prs=None,
+        runtime=FRESH,
+    )
+
+    assert data["governance"]["profile"] == "governed-sdd"
+    text = "\n".join(readiness.format_readiness(data))
+    assert "governance: governed-sdd" in text
+    assert "approval github:owner via project-owner:example" in text
+
+
+def test_source_task_that_forbids_repository_edits_is_not_reported_as_coding_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
+    store, project = make_store(tmp_path, [])
+    _with_origin(tmp_path, project)
+    sync_source(
+        store,
+        [
+            DiscoveredTask(
+                "github",
+                "3",
+                "Review and approve architecture",
+                labels=("stagemesh:ready",),
+                body="## Allowed files\n\n- No repository file edits. Review evidence is GitHub metadata.",
+            )
+        ],
+    )
+
+    data = readiness.build_readiness(
+        store,
+        project,
+        cli_module.load_config(project),
+        list_prs=lambda _project: [],
+        runtime=FRESH,
+    )
+
+    assert data["verdict"] == "attention"
+    assert data["ledger"]["open"] == 0
+    assert data["ledger"]["retired_ineligible"] == 1
+    assert data["source_refusals"] == [
+        {
+            "task_id": "3",
+            "title": "Review and approve architecture",
+            "reason": "source task permits no repository file edits",
+        }
+    ]
+    text = "\n".join(readiness.format_readiness(data))
+    assert "source tasks outside the coding queue" in text
+    assert "3 Review and approve architecture" in text
 
 
 def test_local_main_ahead_and_inflight_work_are_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
