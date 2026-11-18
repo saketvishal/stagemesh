@@ -822,6 +822,28 @@ def next_command(report: WindowReport) -> str:
     decisions = [t for t in report.tasks if t.outcome == "blocked_needs_decision"]
     if decisions:
         return "stagemesh doctor  # tasks " + ", ".join(t.task_id for t in decisions) + " need a design decision"
+    planning_decisions = [
+        t.task_id
+        for t in report.tasks
+        if t.stop_reason == "REFUSED:planning_gate"
+        and "independent planning challenge requires a human decision" in t.reason
+    ]
+    if planning_decisions:
+        return (
+            "operator decision required for task(s) "
+            + ", ".join(planning_decisions)
+            + "; review the decisions above and record their answers in the governing task/spec before rerunning"
+        )
+    approvals = [t.task_id for t in report.tasks if t.stop_reason == "REFUSED:approval_missing"]
+    if len(approvals) == 1:
+        return (
+            f"operator approval required for task {approvals[0]}; review the frozen plan, then run: "
+            f"stagemesh approve-planning --task {approvals[0]}"
+        )
+    if approvals:
+        return "review and approve each frozen plan: " + ", ".join(
+            f"stagemesh approve-planning --task {task_id}" for task_id in approvals
+        )
     if any(t.resumable for t in report.tasks):
         return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
     actions = {

@@ -33,6 +33,7 @@ from stagemesh.spec_planning import (
 PROVIDER = r'''
 import json, pathlib, sys
 mode = sys.argv[1]
+prompt = sys.stdin.read()
 if mode == "mutate":
     pathlib.Path("README.md").write_text("provider-local mutation\n", encoding="utf-8")
 if mode in {"planner", "mutate", "wrapped-planner", "aggregate-planner"}:
@@ -100,6 +101,19 @@ elif mode == "revise":
     print(json.dumps({
         "verdict": "revise",
         "findings": [{"kind": "scope-risk", "summary": "Narrow the affected paths"}],
+        "required_decisions": [],
+    }))
+elif mode == "human":
+    print(json.dumps({
+        "verdict": "needs-human-decision",
+        "findings": [{"kind": "scope-risk", "summary": "Authorization was not visible"}],
+        "required_decisions": ["Confirm whether this task is authorized"],
+    }))
+elif mode == "contract-aware":
+    covered = "REQUIRED_CONTRACT_BEHAVIOR" in prompt
+    print(json.dumps({
+        "verdict": "accept" if covered else "revise",
+        "findings": [] if covered else [{"kind": "objective-drift", "summary": "Contract behavior was omitted"}],
         "required_decisions": [],
     }))
 elif mode == "long-challenger":
@@ -220,6 +234,45 @@ def test_revise_verdict_is_preserved_and_blocks_implementation(tmp_path: Path):
     assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
     assert result["detail"]["next_action"] == NEXT_REVISE_SPEC
     assert load_planning_challenge(project, "T-1")["verdict"] == "revise"
+
+
+def test_accountable_gate_surfaces_challenge_decisions_before_missing_approval(tmp_path: Path):
+    config = _config(_script(tmp_path), challenger_mode="human")
+    config["planning_gate"]["approval_authority"] = {
+        "version": 1,
+        "authority_id": "project-owner:example",
+        "approver_id": "owner:example",
+    }
+    project = _project(tmp_path, ["T-1"], config=config)
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert result["detail"]["next_action"] == "resolve_planning_challenge_decisions"
+    assert result["detail"]["required_decisions"] == ["Confirm whether this task is authorized"]
+    assert "Confirm whether this task is authorized" in result["message"]
+
+
+def test_challenger_receives_authoritative_task_contract(tmp_path: Path):
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="contract-aware"),
+    )
+    contract_path = project / ".stagemesh" / "contracts" / "T-1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["objective"] = "REQUIRED_CONTRACT_BEHAVIOR"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+    code, result = _run(project)
+
+    assert code != 0 and result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    assert load_planning_challenge(project, "T-1")["verdict"] == "accept"
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert planning_execution_receipts(store, "T-1")["challenger"]["execution_verified"] is True
+    finally:
+        store.close()
 
 
 def test_long_provider_finding_is_visibly_bounded_instead_of_refusing_planning(
