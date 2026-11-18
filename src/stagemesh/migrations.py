@@ -96,6 +96,15 @@ MIGRATIONS = [
         ALTER TABLE task_remediations ADD COLUMN retry_event_id TEXT;
         """,
     ),
+    Migration(
+        9,
+        "retire leaked provider acceptance task",
+        """
+        UPDATE tasks
+        SET stage='DONE', status='DONE', updated_at=CAST(strftime('%s', 'now') AS REAL)
+        WHERE source='provider-acceptance' AND (stage!='DONE' OR status!='DONE');
+        """,
+    ),
 ]
 
 

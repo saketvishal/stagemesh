@@ -131,24 +131,29 @@ def run_provider_acceptance(store: Store, project: Path) -> ProviderAcceptanceRe
     review_provider = staged_router.choose_for_stage(Stage.REVIEW, "review")
     single_provider = single_router.choose_for_stage(Stage.REVIEW, "review")
     task_id = store.upsert_task("provider acceptance", source="provider-acceptance", source_id="provider-acceptance")
-    primary_result = primary.execute(store, task_id, None, project)
-    secondary_result = secondary.execute(store, task_id, None, project)
-    isolated = primary_result.capacity_failure and secondary_result.status is ExecutionStatus.SUCCEEDED
-    routing_ok = (
-        review_provider is not None
-        and review_provider.name == "reviewer"
-        and single_provider is not None
-        and single_provider.name == "solo"
-    )
-    status = "PASS" if chosen and chosen.name == chosen_name == "secondary" and isolated and routing_ok else "FAIL"
-    return ProviderAcceptanceResult(
-        status,
-        chosen.name if chosen else None,
-        secondary_result.status,
-        isolated,
-        single_provider.name if single_provider else None,
-        review_provider.name if review_provider else None,
-    )
+    try:
+        primary_result = primary.execute(store, task_id, None, project)
+        secondary_result = secondary.execute(store, task_id, None, project)
+        isolated = primary_result.capacity_failure and secondary_result.status is ExecutionStatus.SUCCEEDED
+        routing_ok = (
+            review_provider is not None
+            and review_provider.name == "reviewer"
+            and single_provider is not None
+            and single_provider.name == "solo"
+        )
+        status = "PASS" if chosen and chosen.name == chosen_name == "secondary" and isolated and routing_ok else "FAIL"
+        return ProviderAcceptanceResult(
+            status,
+            chosen.name if chosen else None,
+            secondary_result.status,
+            isolated,
+            single_provider.name if single_provider else None,
+            review_provider.name if review_provider else None,
+        )
+    finally:
+        # This row exists only to bind deterministic acceptance executions. It
+        # is not project work and must never leak into a later queue run.
+        store.advance_task(task_id, Stage.DONE)
 
 
 def run_live_provider_smoke(
