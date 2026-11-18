@@ -7,6 +7,7 @@ import json
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +29,36 @@ from stagemesh.provider_acceptance import (
 )
 from stagemesh.providers import RuntimeCommandAdapter
 from stagemesh.scheduling import Scheduler
+
+
+def _read_pid_when_ready(path: Path, timeout: float = 3.0) -> int:
+    """Wait for the producer's write, not merely the file-creation boundary."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            value = ""
+        if value:
+            return int(value)
+        time.sleep(0.01)
+    raise AssertionError(f"provider did not publish a complete PID to {path}")
+
+
+def test_pid_reader_does_not_treat_file_creation_as_a_completed_write(tmp_path: Path) -> None:
+    path = tmp_path / "provider.pid"
+    path.touch()
+
+    def publish() -> None:
+        time.sleep(0.03)
+        path.write_text("12345", encoding="utf-8")
+
+    producer = threading.Thread(target=publish)
+    producer.start()
+    try:
+        assert _read_pid_when_ready(path) == 12345
+    finally:
+        producer.join()
 
 
 def test_deterministic_provider_acceptance_record_is_not_project_work(tmp_path: Path) -> None:
@@ -306,8 +337,7 @@ def test_provider_acceptance_live_classifies_timeout_failure_and_kills_process(
     assert data["implementation_ready"] is False
     assert data["failure_reason"] == "provider_timeout"
 
-    assert pid_file.exists()
-    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    pid = _read_pid_when_ready(pid_file)
     deadline = time.time() + 3.0
     killed = False
     while time.time() < deadline:
@@ -355,8 +385,7 @@ def test_provider_acceptance_live_classifies_review_timeout_failure_and_kills_pr
     assert data["review_ready"] is False
     assert data["failure_reason"] == "provider_timeout"
 
-    assert pid_file.exists()
-    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    pid = _read_pid_when_ready(pid_file)
     deadline = time.time() + 3.0
     killed = False
     while time.time() < deadline:
@@ -391,8 +420,7 @@ def test_run_live_provider_smoke_enforces_timeout_and_kills_hanging_process(tmp_
     assert result.failure_reason == "provider_timeout"
     assert result.implementation_ready is False
 
-    assert pid_file.exists()
-    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    pid = _read_pid_when_ready(pid_file)
     deadline = time.time() + 3.0
     killed = False
     while time.time() < deadline:

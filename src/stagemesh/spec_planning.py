@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 MAX_ITEMS = 20
 MAX_TEXT_CHARS = 500
 MAX_CANONICAL_CHARS = 8000
+TRUNCATED_TEXT_SUFFIX = " ... [truncated by StageMesh]"
 PLANNING_SPEC_VERSION = 1
 PLANNING_CHALLENGE_VERSION = 1
 RESERVED_PATH_ROOTS = (".git", ".stagemesh")
@@ -49,6 +50,10 @@ class PlanningSpecError(ValueError):
     def __init__(self, problems: tuple[str, ...]) -> None:
         super().__init__("; ".join(problems))
         self.problems = problems
+
+
+class PlanningBudgetError(PlanningSpecError):
+    """A structurally valid provider artifact cannot fit without semantic loss."""
 
 
 @dataclass(frozen=True)
@@ -109,8 +114,7 @@ class FrozenPlanningChallenge:
     canonical_json: str
 
 
-def validate_planning_spec(payload: Any) -> tuple[PlanningSpec | None, tuple[str, ...]]:
-    """Return the parsed spec and no problems, or None and every problem found."""
+def _parse_planning_spec(payload: Any) -> tuple[PlanningSpec | None, tuple[str, ...]]:
     if not isinstance(payload, dict):
         return None, ("planning spec must be a JSON object",)
     problems: list[str] = []
@@ -135,6 +139,14 @@ def validate_planning_spec(payload: Any) -> tuple[PlanningSpec | None, tuple[str
         contract_hash=contract_hash,
         baseline_sha=baseline_sha,
     )
+    return spec, ()
+
+
+def validate_planning_spec(payload: Any) -> tuple[PlanningSpec | None, tuple[str, ...]]:
+    """Return the parsed spec and no problems, or None and every problem found."""
+    spec, problems = _parse_planning_spec(payload)
+    if spec is None:
+        return None, problems
     size = len(_canonical_json(spec))
     if size > MAX_CANONICAL_CHARS:
         return None, (f"planning spec is {size} characters canonicalized; the limit is {MAX_CANONICAL_CHARS}",)
@@ -150,10 +162,59 @@ def freeze_planning_spec(payload: Any) -> FrozenPlanningSpec:
     return FrozenPlanningSpec(spec, PLANNING_SPEC_VERSION, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), canonical)
 
 
-def validate_planning_challenge(
+def fit_provider_planning_spec(payload: Any) -> FrozenPlanningSpec:
+    """Fit provider-authored descriptive fields without changing paths or decisions.
+
+    Manual artifacts remain strict through ``freeze_planning_spec``. This
+    provider boundary preserves every item and marks every shortened value.
+    """
+    spec, problems = _parse_planning_spec(payload)
+    if spec is None:
+        raise PlanningSpecError(problems)
+    canonical = _canonical_json(spec)
+    if len(canonical) <= MAX_CANONICAL_CHARS:
+        return _freeze_parsed_spec(spec)
+
+    def fitted(limit: int) -> PlanningSpec:
+        return PlanningSpec(
+            behavior=_truncate_distinct(spec.behavior, limit),
+            non_goals=_truncate_distinct(spec.non_goals, limit),
+            affected_paths=spec.affected_paths,
+            acceptance_checks=_truncate_distinct(spec.acceptance_checks, limit),
+            decisions=spec.decisions,
+            spec_refs=spec.spec_refs,
+            contract_hash=spec.contract_hash,
+            baseline_sha=spec.baseline_sha,
+        )
+
+    compact = _largest_fitting(fitted, _canonical_json)
+    if compact is None:
+        raise PlanningBudgetError(
+            (
+                (
+                    "planning spec cannot fit the canonical limit without changing paths, "
+                    "decisions, or required structure"
+                ),
+            )
+        )
+    normalized = json.loads(_canonical_json(compact))
+    normalized.pop("version", None)
+    return freeze_planning_spec(normalized)
+
+
+def _freeze_parsed_spec(spec: PlanningSpec) -> FrozenPlanningSpec:
+    canonical = _canonical_json(spec)
+    return FrozenPlanningSpec(
+        spec,
+        PLANNING_SPEC_VERSION,
+        hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        canonical,
+    )
+
+
+def _parse_planning_challenge(
     payload: Any,
 ) -> tuple[PlanningChallenge | None, tuple[str, ...]]:
-    """Validate a bounded challenge without treating it as executed-agent proof."""
     if not isinstance(payload, dict):
         return None, ("planning challenge must be a JSON object",)
     allowed = {
@@ -224,6 +285,16 @@ def validate_planning_challenge(
         tuple(findings),
         required_decisions,
     )
+    return challenge, ()
+
+
+def validate_planning_challenge(
+    payload: Any,
+) -> tuple[PlanningChallenge | None, tuple[str, ...]]:
+    """Validate a bounded challenge without treating it as executed-agent proof."""
+    challenge, problems = _parse_planning_challenge(payload)
+    if challenge is None:
+        return None, problems
     canonical = _challenge_canonical_json(challenge)
     if len(canonical) > MAX_CANONICAL_CHARS:
         return None, (
@@ -243,6 +314,101 @@ def freeze_planning_challenge(payload: Any) -> FrozenPlanningChallenge:
         hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         canonical,
     )
+
+
+def fit_provider_planning_challenge(payload: Any) -> FrozenPlanningChallenge:
+    """Fit all provider finding summaries to the exact stored JSON budget.
+
+    Findings, required decisions, and the verdict are never dropped or changed.
+    If fixed structure and required decisions cannot fit, the response remains a
+    typed refusal instead of being silently weakened.
+    """
+    challenge, problems = _parse_planning_challenge(payload)
+    if challenge is None:
+        raise PlanningSpecError(problems)
+    canonical = _challenge_canonical_json(challenge)
+    if len(canonical) <= MAX_CANONICAL_CHARS:
+        return _freeze_parsed_challenge(challenge)
+
+    def fitted(limit: int) -> PlanningChallenge:
+        summaries = _truncate_distinct(
+            tuple(item.summary for item in challenge.findings), limit
+        )
+        return PlanningChallenge(
+            planning_spec_hash=challenge.planning_spec_hash,
+            planner_provider=challenge.planner_provider,
+            challenger_provider=challenge.challenger_provider,
+            verdict=challenge.verdict,
+            findings=tuple(
+                PlanningChallengeFinding(item.kind, summary)
+                for item, summary in zip(challenge.findings, summaries, strict=True)
+            ),
+            required_decisions=challenge.required_decisions,
+        )
+
+    compact = _largest_fitting(fitted, _challenge_canonical_json)
+    if compact is None:
+        raise PlanningBudgetError(
+            (
+                (
+                    "planning challenge cannot fit the canonical limit without dropping "
+                    "findings or changing required decisions"
+                ),
+            )
+        )
+    return _freeze_parsed_challenge(compact)
+
+
+def _freeze_parsed_challenge(challenge: PlanningChallenge) -> FrozenPlanningChallenge:
+    canonical = _challenge_canonical_json(challenge)
+    return FrozenPlanningChallenge(
+        challenge,
+        PLANNING_CHALLENGE_VERSION,
+        hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        canonical,
+    )
+
+
+def _largest_fitting(factory: Any, canonicalizer: Any) -> Any | None:
+    minimum = len(TRUNCATED_TEXT_SUFFIX) + 4
+    smallest = factory(minimum)
+    if len(canonicalizer(smallest)) > MAX_CANONICAL_CHARS:
+        return None
+    low, high = minimum, MAX_TEXT_CHARS
+    best = smallest
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = factory(middle)
+        if len(canonicalizer(candidate)) <= MAX_CANONICAL_CHARS:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _truncate_visible(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    keep = limit - len(TRUNCATED_TEXT_SUFFIX)
+    return text[:keep].rstrip() + TRUNCATED_TEXT_SUFFIX
+
+
+def _truncate_distinct(items: tuple[str, ...], limit: int) -> tuple[str, ...]:
+    shortened = [_truncate_visible(item, limit) for item in items]
+    duplicates = {value for value in shortened if shortened.count(value) > 1}
+    if not duplicates:
+        return tuple(shortened)
+    result: list[str] = []
+    for index, (original, value) in enumerate(zip(items, shortened, strict=True), start=1):
+        if value not in duplicates:
+            result.append(value)
+            continue
+        marker = f" #{index:02d}"
+        suffix = marker + TRUNCATED_TEXT_SUFFIX
+        keep = limit - len(suffix)
+        result.append(original[:keep].rstrip() + suffix)
+    return tuple(result)
 
 
 def _challenge_canonical_json(challenge: PlanningChallenge) -> str:

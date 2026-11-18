@@ -837,7 +837,12 @@ def next_command(report: WindowReport) -> str:
 
 
 def _resume_command(options: WindowOptions) -> str:
-    return shlex.join(_resume_argv(options))
+    argv = _resume_argv(options)
+    if options.required_label and "--resume-scope" in argv:
+        index = argv.index("--resume-scope")
+        del argv[index : index + 2]
+        argv.append(f"--label={options.required_label}")
+    return shlex.join(argv)
 
 
 def _resume_argv(options: WindowOptions) -> list[str]:

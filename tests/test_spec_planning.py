@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
@@ -8,7 +9,11 @@ from stagemesh.spec_planning import (
     MAX_CANONICAL_CHARS,
     MAX_ITEMS,
     PlanningSpecError,
+    fit_provider_planning_challenge,
+    fit_provider_planning_spec,
+    freeze_planning_challenge,
     freeze_planning_spec,
+    validate_planning_challenge,
     validate_planning_spec,
 )
 
@@ -121,6 +126,125 @@ def test_size_limits_are_enforced():
     payload["behavior"] = [f"{i:03d}" + "y" * 400 for i in range(MAX_ITEMS)]
     payload["non_goals"] = [f"{i:03d}" + "z" * 400 for i in range(MAX_ITEMS)]
     assert any(f"limit is {MAX_CANONICAL_CHARS}" in p for p in _problems(payload))
+
+
+def test_provider_fitting_does_not_rewrite_already_valid_artifacts() -> None:
+    spec = _payload()
+    challenge = {
+        "version": 1,
+        "planning_spec_hash": "c" * 64,
+        "planner_provider": "planner",
+        "challenger_provider": "challenger",
+        "verdict": "accept",
+        "findings": [{"kind": "missing-test", "summary": "Add a boundary test"}],
+        "required_decisions": [],
+    }
+
+    assert fit_provider_planning_spec(spec).canonical_json == freeze_planning_spec(spec).canonical_json
+    assert (
+        fit_provider_planning_challenge(challenge).canonical_json
+        == freeze_planning_challenge(challenge).canonical_json
+    )
+
+
+def test_provider_fitting_refuses_to_truncate_protected_decisions() -> None:
+    spec = _payload()
+    spec["decisions"] = [
+        {"question": f"question-{index}-" + "q" * 480, "resolution": "r" * 500}
+        for index in range(MAX_ITEMS)
+    ]
+    challenge = {
+        "version": 1,
+        "planning_spec_hash": "c" * 64,
+        "planner_provider": "planner",
+        "challenger_provider": "challenger",
+        "verdict": "needs-human-decision",
+        "findings": [],
+        "required_decisions": [f"decision-{index}-" + "d" * 480 for index in range(MAX_ITEMS)],
+    }
+
+    with pytest.raises(PlanningSpecError, match="cannot fit"):
+        fit_provider_planning_spec(spec)
+    with pytest.raises(PlanningSpecError, match="cannot fit"):
+        fit_provider_planning_challenge(challenge)
+
+
+def test_provider_fitting_preserves_distinct_items_with_shared_prefixes() -> None:
+    payload = _payload()
+    shared = "shared-prefix-" + "p" * 380
+    payload["behavior"] = [shared + f"-behavior-{index:02d}" for index in range(MAX_ITEMS)]
+    payload["non_goals"] = [shared + f"-non-goal-{index:02d}" for index in range(MAX_ITEMS)]
+    payload["acceptance_checks"] = [
+        shared + f"-acceptance-{index:02d}" for index in range(MAX_ITEMS)
+    ]
+
+    fitted = fit_provider_planning_spec(payload)
+    normalized = json.loads(fitted.canonical_json)
+    normalized.pop("version")
+    reparsed, problems = validate_planning_spec(normalized)
+
+    assert problems == () and reparsed is not None
+    assert len(set(reparsed.behavior)) == len(reparsed.behavior) == MAX_ITEMS
+    assert len(set(reparsed.non_goals)) == len(reparsed.non_goals) == MAX_ITEMS
+    assert len(set(reparsed.acceptance_checks)) == len(reparsed.acceptance_checks) == MAX_ITEMS
+    assert 7_900 <= len(fitted.canonical_json) <= MAX_CANONICAL_CHARS
+
+
+def test_challenge_fitting_preserves_distinct_shared_prefix_findings() -> None:
+    shared = "shared-finding-" + "f" * 470
+    challenge = {
+        "version": 1,
+        "planning_spec_hash": "c" * 64,
+        "planner_provider": "planner",
+        "challenger_provider": "challenger",
+        "verdict": "revise",
+        "findings": [
+            {"kind": "missing-test", "summary": shared + f"-{index:02d}"}
+            for index in range(MAX_ITEMS)
+        ],
+        "required_decisions": [],
+    }
+
+    fitted = fit_provider_planning_challenge(challenge)
+
+    assert len({item.summary for item in fitted.challenge.findings}) == MAX_ITEMS
+    assert len(fitted.canonical_json) <= MAX_CANONICAL_CHARS
+
+
+def _challenge_at_canonical_size(target: int) -> dict:
+    payload = {
+        "version": 1,
+        "planning_spec_hash": "c" * 64,
+        "planner_provider": "planner",
+        "challenger_provider": "challenger",
+        "verdict": "accept",
+        "findings": [
+            {"kind": "missing-test", "summary": f"{index:02d}"}
+            for index in range(MAX_ITEMS)
+        ],
+        "required_decisions": [],
+    }
+    current = len(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    remaining = target - current
+    for finding in payload["findings"]:
+        growth = min(remaining, 500 - len(finding["summary"]))
+        finding["summary"] += "x" * growth
+        remaining -= growth
+    assert remaining == 0
+    assert len(json.dumps(payload, sort_keys=True, separators=(",", ":"))) == target
+    return payload
+
+
+@pytest.mark.parametrize(("size", "valid"), [(7_999, True), (8_000, True), (8_001, False)])
+def test_challenge_canonical_boundary_is_exact(size: int, valid: bool) -> None:
+    challenge, problems = validate_planning_challenge(_challenge_at_canonical_size(size))
+
+    assert (challenge is not None) is valid
+    assert (not problems) is valid
+    if not valid:
+        assert problems == (
+            f"planning challenge is {size} characters canonicalized; the limit is {MAX_CANONICAL_CHARS}",
+        )
 
 
 def test_unknown_fields_duplicates_and_non_objects_are_rejected():

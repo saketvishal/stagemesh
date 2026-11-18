@@ -1964,7 +1964,14 @@ def command_run_window(args: argparse.Namespace) -> int:
     store.migrate()
     try:
         try:
-            scope = _prepare_selection_scope(store, project, config, args, integration_ref=base_ref)
+            scope = _prepare_selection_scope(
+                store,
+                project,
+                config,
+                args,
+                integration_ref=base_ref,
+                infer_unfinished=True,
+            )
         except _SetupError as exc:
             return exc.code
         if scope is None:
@@ -2899,7 +2906,16 @@ def _selection_policy(config: StageMeshConfig, args: argparse.Namespace) -> Task
     return replace(config.task_selection, required_label=label) if label else config.task_selection
 
 
-def _prepare_selection_scope(store, project, config, args, *, task_id=None, integration_ref=None):
+def _prepare_selection_scope(
+    store,
+    project,
+    config,
+    args,
+    *,
+    task_id=None,
+    integration_ref=None,
+    infer_unfinished=False,
+):
     from .selection_scope import ScopeError, attach, preview, refresh, resolve_scope
 
     try:
@@ -2907,7 +2923,8 @@ def _prepare_selection_scope(store, project, config, args, *, task_id=None, inte
                 getattr(args, "focus", None) or getattr(args, "sprint", None) or getattr(args, "once", False)):
             raise ScopeError("saved label scope cannot be combined with --focus, --sprint or --once")
         scope = resolve_scope(store, label=getattr(args, "label", None), resume=getattr(args, "resume_scope", None),
-            clear=getattr(args, "clear_label", False), task_id=task_id, preview=getattr(args, "plan", False))
+            clear=getattr(args, "clear_label", False), task_id=task_id,
+            preview=getattr(args, "plan", False), infer_unfinished=infer_unfinished)
         if scope is not None:
             if getattr(args, "focus", None) or getattr(args, "sprint", None) or getattr(args, "once", False):
                 raise ScopeError("saved label scope cannot be combined with --focus, --sprint or --once")
