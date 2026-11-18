@@ -358,9 +358,14 @@ def reconcile_completed_spec_dependencies(
     }
     reconciled: list[DiscoveredTask] = []
     for task in tasks:
+        governing_spec = _governing_spec_dependency(task)
+        if governing_spec is None:
+            reconciled.append(task)
+            continue
         evidence = _completed_spec_evidence(task, github, commit_is_merged)
         if evidence is None:
-            reconciled.append(task)
+            dependencies = tuple(dict.fromkeys((*task.dependencies, governing_spec)))
+            reconciled.append(replace(task, dependencies=dependencies))
             continue
         dependency_id, commit = evidence
         remaining = tuple(item for item in task.dependencies if item != dependency_id)
@@ -399,26 +404,31 @@ def reconcile_project_spec_dependencies(
     return reconcile_completed_spec_dependencies(tasks, commit_is_merged=commit_is_merged)
 
 
+def _governing_spec_dependency(task: DiscoveredTask) -> str | None:
+    if task.source != GitHubIssueSource.name or _normalized_state(task.state) != "OPEN":
+        return None
+    match = re.search(
+        r"^\s*governing\s+specification\s+issue\s*:\s*#(\d+)\b",
+        task.body,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    return match.group(1) if match is not None else None
+
+
 def _completed_spec_evidence(
     task: DiscoveredTask,
     github: dict[str, DiscoveredTask],
     commit_is_merged: Callable[[str], bool],
 ) -> tuple[str, str] | None:
-    if task.source != GitHubIssueSource.name or _normalized_state(task.state) != "OPEN":
-        return None
-    spec_match = re.search(
-        r"^\s*governing\s+specification\s+issue\s*:\s*#(\d+)\b",
-        task.body,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
+    dependency_id = _governing_spec_dependency(task)
     pin_match = re.search(
         r"^\s*approved\s+specification\s+commit\s*:\s*`?([0-9a-f]{40})\b`?",
         task.body,
         flags=re.IGNORECASE | re.MULTILINE,
     )
-    if spec_match is None or pin_match is None:
+    if dependency_id is None or pin_match is None:
         return None
-    dependency_id, commit = spec_match.group(1), pin_match.group(1).lower()
+    commit = pin_match.group(1).lower()
     specification = github.get(dependency_id)
     if specification is None or _normalized_state(specification.state) != "CLOSED":
         return None
