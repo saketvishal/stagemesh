@@ -54,6 +54,12 @@ elif mode == "revise":
         "findings": [{"kind": "scope-risk", "summary": "Narrow the affected paths"}],
         "required_decisions": [],
     }))
+elif mode == "long-challenger":
+    print(json.dumps({
+        "verdict": "accept",
+        "findings": [{"kind": "missing-test", "summary": "x" * 669}],
+        "required_decisions": [],
+    }))
 else:
     print("not json")
 '''
@@ -164,6 +170,32 @@ def test_revise_verdict_is_preserved_and_blocks_implementation(tmp_path: Path):
     assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
     assert result["detail"]["next_action"] == NEXT_REVISE_SPEC
     assert load_planning_challenge(project, "T-1")["verdict"] == "revise"
+
+
+def test_long_provider_finding_is_visibly_bounded_instead_of_refusing_planning(
+    tmp_path: Path,
+):
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="long-challenger"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    challenge = load_planning_challenge(project, "T-1")
+    summary = challenge["findings"][0]["summary"]
+    assert len(summary) == 500
+    assert summary.endswith("... [truncated by StageMesh]")
+    assert freeze_planning_challenge(challenge).digest
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    assert [row["status"] for row in store.conn.execute("SELECT status FROM executions ORDER BY started_at")] == [
+        "SUCCEEDED",
+        "SUCCEEDED",
+    ]
+    store.close()
 
 
 def test_malformed_challenger_output_fails_closed_after_trusted_planner(tmp_path: Path):
