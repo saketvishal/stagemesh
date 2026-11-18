@@ -68,6 +68,13 @@ def test_event_stream_command_is_provider_specific(
         },
         {"type": "result", "result": '{"decision":"PASS"}'},
         {"type": "result", "structured_output": {"decision": "PASS"}},
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "structured_output": {"decision": "PASS"},
+            },
+        },
     ],
 )
 def test_provider_event_response_extracts_supported_final_answers(
@@ -85,6 +92,33 @@ def test_provider_event_response_extracts_supported_final_answers(
 
 def test_provider_event_response_fails_closed_on_unknown_or_malformed_events() -> None:
     assert provider_event_response('{"type":"turn.completed"}\nnot-json') is None
+
+
+@pytest.mark.parametrize("status", ["ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING", "RUNNING"])
+def test_antigravity_unsuccessful_terminal_status_discards_verdict(status: str) -> None:
+    stdout = json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "status": status,
+                "structured_output": {"decision": "PASS"},
+            },
+        }
+    )
+
+    assert provider_event_response(stdout) is None
+
+
+@pytest.mark.parametrize("status", ["ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING", "RUNNING"])
+def test_antigravity_single_json_unsuccessful_status_discards_verdict(status: str) -> None:
+    stdout = json.dumps(
+        {
+            "status": status,
+            "structured_output": {"decision": "PASS"},
+        }
+    )
+
+    assert provider_event_response(stdout) is None
 
 
 @pytest.mark.parametrize("stop_reason", ["cancelled", "max_turn_requests", "max_tokens", "refusal"])

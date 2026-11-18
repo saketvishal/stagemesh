@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+import stagemesh.providers as providers_module
 from stagemesh.providers import (
+    ProviderValidationError,
+    _agy_command_with_builtin_skill_access,
     _command_and_input,
+    _launch_provider_process,
     _provider_permission_denial,
     _provider_text_response,
+    _remove_temporary_provider_settings,
     _review_provider_response,
     approved_default_adapters,
 )
@@ -171,10 +177,157 @@ def test_agy_review_uses_json_schema_print_mode() -> None:
     assert stdin == ""
 
 
+@pytest.mark.parametrize("equals_form", [False, True])
+def test_agy_gets_ephemeral_read_only_access_to_bundled_skills(
+    tmp_path: Path, equals_form: bool
+) -> None:
+    from stagemesh.agent_skills import SKILL_ROOT
+
+    settings = tmp_path / "agy-settings.json"
+    original = {
+        "toolPermission": "proceed-in-sandbox",
+        "permissions": {
+            "allow": ["read_file(.)"],
+            "deny": ["read_url(*)"],
+            "ask": [],
+        },
+    }
+    settings.write_text(json.dumps(original), encoding="utf-8")
+    option = f"--settings={settings}" if equals_form else "--settings"
+    command = ["agy", option]
+    if not equals_form:
+        command.append(str(settings))
+
+    prepared, temporary = _agy_command_with_builtin_skill_access(command, tmp_path)
+
+    assert temporary is not None and temporary.is_file()
+    selected = next(
+        part.split("=", 1)[1] if part.startswith("--settings=") else prepared[index + 1]
+        for index, part in enumerate(prepared)
+        if part == "--settings" or part.startswith("--settings=")
+    )
+    assert Path(selected) == temporary
+    derived = json.loads(temporary.read_text(encoding="utf-8"))
+    skill_root = SKILL_ROOT.resolve().as_posix()
+    assert f"read_file({skill_root})" in derived["permissions"]["allow"]
+    assert f"write_file({skill_root})" in derived["permissions"]["deny"]
+    assert derived["permissions"]["allow"][0] == "read_file(.)"
+    assert json.loads(settings.read_text(encoding="utf-8")) == original
+
+    _remove_temporary_provider_settings(temporary)
+    assert not temporary.exists()
+
+
+def test_non_agy_command_does_not_create_ephemeral_settings(tmp_path: Path) -> None:
+    command = ["codex", "exec", "--settings", "unused.json"]
+
+    prepared, temporary = _agy_command_with_builtin_skill_access(command, tmp_path)
+
+    assert prepared == command
+    assert temporary is None
+
+
+def test_agy_inline_settings_receive_the_same_bounded_skill_access(tmp_path: Path) -> None:
+    from stagemesh.agent_skills import SKILL_ROOT
+
+    inline = json.dumps(
+        {"toolPermission": "proceed-in-sandbox", "permissions": {"allow": [], "deny": [], "ask": []}}
+    )
+
+    prepared, temporary = _agy_command_with_builtin_skill_access(
+        ["agy", f"--settings={inline}"], tmp_path
+    )
+
+    assert temporary is not None
+    derived = json.loads(temporary.read_text(encoding="utf-8"))
+    skill_root = SKILL_ROOT.resolve().as_posix()
+    assert f"read_file({skill_root})" in derived["permissions"]["allow"]
+    assert prepared[1] == f"--settings={temporary}"
+    _remove_temporary_provider_settings(temporary)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["agy"],
+        ["agy", "--settings", "missing.json"],
+        ["agy", "--settings", "[]"],
+        ["agy", "--settings", '{"permissions":{"allow":"all"}}'],
+        ["agy", "--settings", '{"permissions":{"deny":[1]}}'],
+        ["agy", "--settings", '{"permissions":{"ask":"all"}}'],
+    ],
+)
+def test_agy_settings_fail_closed_before_provider_launch(
+    tmp_path: Path, command: list[str]
+) -> None:
+    with pytest.raises(ProviderValidationError):
+        _agy_command_with_builtin_skill_access(command, tmp_path)
+
+
+@pytest.mark.parametrize("executable", ["agy.cmd", "agy.bat"])
+def test_windows_agy_wrappers_receive_prompt_and_skill_access(
+    tmp_path: Path, executable: str
+) -> None:
+    settings = tmp_path / "agy-settings.json"
+    settings.write_text(
+        json.dumps({"permissions": {"allow": [], "deny": [], "ask": []}}),
+        encoding="utf-8",
+    )
+
+    command, provider_input = _command_and_input(
+        (executable, "-p", "--settings", str(settings)), "work"
+    )
+    prepared, temporary = _agy_command_with_builtin_skill_access(command, tmp_path)
+
+    assert "--print" not in command and "work" not in command
+    assert "--settings" in command and str(settings) in command
+    assert command[command.index("--input-format") + 1] == "stream-json"
+    assert command[command.index("--output-format") + 1] == "stream-json"
+    assert json.loads(provider_input) == {
+        "event": "user",
+        "message": {"content": "work"},
+    }
+    assert prepared[0] == executable
+    assert temporary is not None and temporary.is_file()
+    _remove_temporary_provider_settings(temporary)
+
+
+def test_interrupted_agy_process_creation_removes_ephemeral_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = tmp_path / "agy-settings.json"
+    settings.write_text(
+        json.dumps({"permissions": {"allow": [], "deny": [], "ask": []}}),
+        encoding="utf-8",
+    )
+    observed: list[Path] = []
+
+    def interrupt(command: list[str], **_kwargs: object) -> None:
+        selected = Path(command[command.index("--settings") + 1])
+        assert selected.is_file()
+        observed.append(selected)
+        raise KeyboardInterrupt("synthetic provider-start interruption")
+
+    monkeypatch.setattr(providers_module.subprocess, "Popen", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        _launch_provider_process(["agy", "--settings", str(settings)], tmp_path)
+
+    assert observed and not observed[0].exists()
+
+
 def test_agy_json_mode_wrapper_is_normalized_to_review_json() -> None:
     response = _provider_text_response('{"structured_output":{"decision":"PASS"},"status":"SUCCESS"}')
 
     assert response == '{"decision":"PASS"}'
+
+
+def test_agy_unsuccessful_json_mode_cannot_recover_stale_review_output() -> None:
+    response = _provider_text_response(
+        '{"structured_output":{"decision":"PASS"},"status":"ERROR"}'
+    )
+
+    assert response == ""
 
 
 def test_structured_denied_actions_are_a_provider_permission_failure() -> None:

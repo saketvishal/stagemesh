@@ -143,7 +143,7 @@ def provider_event_response(stdout: str) -> str | None:
 
 
 def _event_type(event: dict[str, Any]) -> str:
-    return str(event.get("type") or "").casefold().replace("-", "_")
+    return str(event.get("type") or event.get("event") or "").casefold().replace("-", "_")
 
 
 def _terminal_review_stop_failed(event: dict[str, Any]) -> bool:
@@ -151,6 +151,15 @@ def _terminal_review_stop_failed(event: dict[str, Any]) -> bool:
     event_type = _event_type(event)
     if event_type == "error":
         return True
+    if event_type in {"", "result"}:
+        status = event.get("status")
+        if isinstance(status, str):
+            return status.casefold() != "success"
+    if event_type == "result":
+        result = event.get("result")
+        status = result.get("status") if isinstance(result, dict) else None
+        if isinstance(status, str):
+            return status.casefold() != "success"
     if event_type == "turn_ended":
         return str(event.get("outcome") or "").casefold() != "completed"
     if event_type not in {"end", "result"}:
@@ -181,7 +190,7 @@ def _event_answer(event: object) -> str | None:
     structured = event.get("structured_output")
     if isinstance(structured, dict):
         return json.dumps(structured, separators=(",", ":"))
-    event_type = str(event.get("type") or "").casefold().replace("-", "_")
+    event_type = _event_type(event)
     if event_type == "item.completed":
         item = event.get("item")
         if isinstance(item, dict) and str(item.get("type") or "").casefold() in {
@@ -193,6 +202,12 @@ def _event_answer(event: object) -> str | None:
     if event_type in {"result", "final", "completed"}:
         result = event.get("result")
         if isinstance(result, dict):
+            structured = result.get("structured_output")
+            if isinstance(structured, dict):
+                return json.dumps(structured, separators=(",", ":"))
+            response = result.get("response")
+            if isinstance(response, str):
+                return response
             return json.dumps(result, separators=(",", ":"))
         if isinstance(result, str):
             return result
