@@ -7,8 +7,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
 
 from .audit import record_audit
 from .concurrency import IntegrationLock
@@ -43,6 +44,7 @@ class DiscoveredTask:
     created_at: str = ""
     eligibility_reason: str = ""
     selection_scope: dict | None = None
+    satisfied_dependencies: tuple[tuple[str, str], ...] = ()
 
 
 class LocalBacklogSource:
@@ -270,6 +272,7 @@ class ConfiguredGitHubTaskSource:
                     body=task.body,
                     created_at=task.created_at,
                     eligibility_reason=reason,
+                    satisfied_dependencies=task.satisfied_dependencies,
                 )
             )
         return discovered
@@ -338,6 +341,109 @@ def _github_dependencies(body: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(dependencies))
 
 
+def reconcile_completed_spec_dependencies(
+    tasks: list[DiscoveredTask], *, commit_is_merged: Callable[[str], bool]
+) -> list[DiscoveredTask]:
+    """Recognize a narrowly evidenced completed specification prerequisite.
+
+    Closure alone is deliberately insufficient. The implementation and specification
+    issues must bind to one another, both must name the same immutable commit, the
+    specification must declare DONE and closed, and the caller must prove that commit
+    is on the integration branch.
+    """
+    github = {
+        task.source_id: task
+        for task in tasks
+        if task.source == GitHubIssueSource.name
+    }
+    reconciled: list[DiscoveredTask] = []
+    for task in tasks:
+        evidence = _completed_spec_evidence(task, github, commit_is_merged)
+        if evidence is None:
+            reconciled.append(task)
+            continue
+        dependency_id, commit = evidence
+        remaining = tuple(item for item in task.dependencies if item != dependency_id)
+        satisfied = tuple(dict.fromkeys((*task.satisfied_dependencies, (dependency_id, commit))))
+        reconciled.append(replace(task, dependencies=remaining, satisfied_dependencies=satisfied))
+    return reconciled
+
+
+def reconcile_project_spec_dependencies(
+    tasks: list[DiscoveredTask], project: Path, integration_ref: str | None
+) -> list[DiscoveredTask]:
+    """Apply completed-spec reconciliation against a concrete integration ref."""
+    if not integration_ref or not integration_ref.startswith("refs/heads/"):
+        return tasks
+    from .git import GitWorkspace
+
+    git = GitWorkspace(project)
+    tip = git.run("rev-parse", "--verify", "--quiet", f"{integration_ref}^{{commit}}", check=False)
+    if tip.returncode != 0:
+        return tasks
+    integration_sha = tip.stdout.strip()
+    merged_cache: dict[str, bool] = {}
+
+    def commit_is_merged(commit: str) -> bool:
+        if commit in merged_cache:
+            return merged_cache[commit]
+        resolved = git.run("rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}", check=False)
+        if resolved.returncode != 0 or resolved.stdout.strip().casefold() != commit.casefold():
+            merged_cache[commit] = False
+        else:
+            merged_cache[commit] = (
+                git.run("merge-base", "--is-ancestor", commit, integration_sha, check=False).returncode == 0
+            )
+        return merged_cache[commit]
+
+    return reconcile_completed_spec_dependencies(tasks, commit_is_merged=commit_is_merged)
+
+
+def _completed_spec_evidence(
+    task: DiscoveredTask,
+    github: dict[str, DiscoveredTask],
+    commit_is_merged: Callable[[str], bool],
+) -> tuple[str, str] | None:
+    if task.source != GitHubIssueSource.name or _normalized_state(task.state) != "OPEN":
+        return None
+    spec_match = re.search(
+        r"^\s*governing\s+specification\s+issue\s*:\s*#(\d+)\b",
+        task.body,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    pin_match = re.search(
+        r"^\s*approved\s+specification\s+commit\s*:\s*`?([0-9a-f]{40})\b`?",
+        task.body,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if spec_match is None or pin_match is None:
+        return None
+    dependency_id, commit = spec_match.group(1), pin_match.group(1).lower()
+    specification = github.get(dependency_id)
+    if specification is None or _normalized_state(specification.state) != "CLOSED":
+        return None
+    implementation_match = re.search(
+        r"^\s*specification\s+for\s+implementation\s*:\s*#(\d+)\b",
+        specification.body,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    done = re.search(
+        r"^\s*stagemesh\s+status\s*:\s*DONE\b",
+        specification.body,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    merged_pin = re.search(
+        rf"\bmerged\b[\s\S]{{0,600}}\b{re.escape(commit)}\b",
+        specification.body,
+        flags=re.IGNORECASE,
+    )
+    if implementation_match is None or implementation_match.group(1) != task.source_id:
+        return None
+    if done is None or merged_pin is None or not commit_is_merged(commit):
+        return None
+    return dependency_id, commit
+
+
 def _validate_source_name(value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise TaskSourceValidationError("task source name must be a non-empty string")
@@ -375,7 +481,7 @@ def sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_
 def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_dependencies: bool) -> list[str]:
     ids: list[str] = []
     publications: list[tuple[str, str, dict[str, object], str]] = []
-    dependency_tasks: list[tuple[str, set[str]]] = []
+    dependency_tasks: list[tuple[str, set[str], tuple[tuple[str, str], ...]]] = []
     # Only durable tasks can carry scheduler dependency edges. Cached issues alone (including CLOSED issues) are not completion proof.
     known_github_ids = {
         str(row[0])
@@ -445,6 +551,11 @@ def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing
             cached["objective"] = task.body[:6000]
         if task.dependencies:
             cached["dependencies"] = list(task.dependencies)
+        if task.satisfied_dependencies:
+            cached["satisfied_dependencies"] = [
+                {"task_id": dependency_id, "kind": "approved_merged_spec", "commit": commit}
+                for dependency_id, commit in task.satisfied_dependencies
+            ]
         publications.append((task.source, task.source_id, dict(cached), state))
         # Every Store helper can commit independently. Fence readers BEFORE materialization/restoration, and leave
         # the fence durable on failure. Only processed rows are published after the complete dependency phase.
@@ -452,7 +563,7 @@ def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing
         store.cache_source(task.source, task.source_id, cached, state)
         if materialize_blocked_github_task:
             task_id = store.upsert_task(task.title, task.source, task.source_id)
-            dependency_tasks.append((task_id, set(task.dependencies)))
+            dependency_tasks.append((task_id, set(task.dependencies), task.satisfied_dependencies))
         if retirement_reason is not None and is_github:
             store.retire_source_task(
                 task.source,
@@ -477,8 +588,25 @@ def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing
                     {"source_state": state, "eligible": task.eligible},
                 )
             ids.append(task_id)
-            dependency_tasks.append((task_id, set(task.dependencies)))
-    for task_id, declared_deps in dependency_tasks:
+            dependency_tasks.append((task_id, set(task.dependencies), task.satisfied_dependencies))
+    for task_id, declared_deps, satisfied_deps in dependency_tasks:
+        for satisfied_dep, commit in satisfied_deps:
+            removed = store.conn.execute(
+                "DELETE FROM task_dependencies WHERE task_id=? AND depends_on_task_id=?",
+                (task_id, satisfied_dep),
+            ).rowcount
+            if removed:
+                store.conn.commit()
+                record_audit(
+                    store,
+                    "task.dependency_satisfied",
+                    {
+                        "task_id": task_id,
+                        "dependency_task_id": satisfied_dep,
+                        "kind": "approved_merged_spec",
+                        "commit": commit,
+                    },
+                )
         if hasattr(store, "conn") and not preserve_existing_dependencies:
             rows = store.conn.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)).fetchall()
             existing_deps = {str(r[0]) for r in rows}

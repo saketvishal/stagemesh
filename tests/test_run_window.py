@@ -118,6 +118,43 @@ def test_human_left_alone_task_ids_are_bounded() -> None:
     assert len(rendered) < 60
 
 
+def test_cli_human_plan_compacts_left_alone_tasks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_run_ready import _project
+
+    from stagemesh.persistence import Store
+
+    task_ids = [str(task_id) for task_id in range(1, 21)]
+    project = _project(
+        tmp_path,
+        task_ids,
+        labels={task_id: ["mobile" if task_id == "1" else "other"] for task_id in task_ids},
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    cli_module._sync_all_sources(store, project, cli_module.load_config(project), None)
+    store.close()
+    monkeypatch.setattr(rw, "check_runtime", lambda project: FRESH)
+
+    code = cli_module.main(
+        [
+            "--project",
+            str(project),
+            "run-window",
+            "--plan",
+            "--label",
+            "mobile",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert code in (0, 2)
+    assert output.count("left alone:") == 1
+    assert "... (+11 more)" in output
+    assert "left alone 2:" not in output
+
+
 def test_selection_picks_only_runnable_tasks_and_never_blocked_parked_or_claimed_ones(tmp_path: Path) -> None:
     store, _project = make_store(tmp_path, ["10", "2", "T-blocked", "T-parked", "T-claimed", "T-done"])
     store.advance_task("T-done", Stage.DONE)
