@@ -1,18 +1,31 @@
 """Scope persistence, source failures and actual claim boundaries; no real providers."""
 import json
+import shlex
 from dataclasses import replace
 
 import pytest
+from test_run_ready import _project
+from test_task_selection import _continue
 
 from stagemesh.auto_plan import outside_label_selector
+from stagemesh.audit import record_audit
 from stagemesh.config import load_config
 from stagemesh.domain import Stage
 from stagemesh.persistence import Store
-from stagemesh.selection_scope import (ScopeError, attach, current, load_scope, preview, record_candidate,
-    record_task, refresh, resolve_scope, task_problem)
-from stagemesh.run_window import WindowOptions, _resume_argv, planned_selection
-from test_run_ready import _project
-from test_task_selection import _continue
+from stagemesh.run_window import WindowOptions, _resume_argv, _resume_command, planned_selection
+from stagemesh.selection_scope import (
+    ScopeError,
+    attach,
+    current,
+    load_scope,
+    preview,
+    record_candidate,
+    record_task,
+    refresh,
+    resolve_scope,
+    task_problem,
+    task_scope,
+)
 
 
 @pytest.fixture
@@ -38,7 +51,8 @@ def test_saved_scope_survives_restart_and_unrelated_audit_volume(rig):
     try:
         assert resolve_scope(with_store, resume=scope.id) == scope
         assert resolve_scope(with_store, task_id="A") == scope
-        assert resolve_scope(with_store) is None  # fresh run is unfiltered
+        with_store.advance_task("B", Stage.DONE)
+        assert resolve_scope(with_store, infer_unfinished=True) == scope
     finally:
         with_store.close()
     changed = resolve_scope(store, resume=scope.id, label="other")
@@ -56,6 +70,60 @@ def test_active_scope_change_is_refused_without_touching_owner(rig):
         resolve_scope(store, resume=scope.id, clear=True)
     assert store.conn.execute("SELECT active FROM claims WHERE id=?", (claim,)).fetchone()[0] == 1
     assert current(store, scope)
+
+
+def test_task_scope_follows_supersession_and_label_reuses_current_scope(rig):
+    store, _, _, scope = rig
+    record_task(store, "A")
+
+    changed = resolve_scope(store, resume=scope.id, label="other")
+
+    assert task_scope(store, "A") == changed
+    assert resolve_scope(store, label="other") == changed
+    with pytest.raises(ScopeError, match="already changed"):
+        resolve_scope(store, resume=scope.id)
+
+
+def test_stale_scope_id_cannot_follow_a_clear_into_unfiltered_work(rig):
+    store, _, _, scope = rig
+    cleared = resolve_scope(store, resume=scope.id, clear=True)
+
+    assert cleared.label is None
+    with pytest.raises(ScopeError, match="already changed"):
+        resolve_scope(store, resume=scope.id)
+
+
+def test_legacy_history_without_unfinished_tasks_does_not_block_new_label(rig):
+    store, _, _, scope = rig
+    first = record_audit(
+        store,
+        "selection.scope",
+        {"label": "old-a", "supersedes": scope.id, "action": "change"},
+    )
+    record_audit(
+        store,
+        "selection.scope",
+        {"label": "old-b", "supersedes": scope.id, "action": "change"},
+    )
+
+    created = resolve_scope(store, label="other")
+
+    assert created.label == "other"
+    assert created.id != first
+
+
+def test_unfinished_scope_inference_refuses_ambiguous_labels(rig):
+    store, project, config, _ = rig
+    record_task(store, "A")
+    other = resolve_scope(store, label="other")
+    attach(store, project, config, other)
+    refresh(store)
+    record_task(store, "B")
+
+    with pytest.raises(ScopeError, match="multiple saved labels") as exc:
+        resolve_scope(store, infer_unfinished=True)
+
+    assert "scope_id" not in str(exc.value)
 
 
 def test_failed_source_after_success_revokes_admission(rig, monkeypatch):
@@ -122,8 +190,21 @@ def test_window_plan_and_resume_argv_keep_scope_and_exclusions(rig):
     assert picked == ["A"] and "B" in skipped
     argv = _resume_argv(options)
     assert argv[argv.index("--resume-scope") + 1] == scope.id
+    human = _resume_command(options)
+    assert "--label=focus" in human
+    assert scope.id not in human
     report = preview(store, project, replace(config.task_selection, required_label="focus"))
     assert (report["matching"], report["eligible"], report["excluded"]) == (1, 1, 1)
+
+
+@pytest.mark.parametrize("label", ["-wip", "a b", "móbile"])
+def test_human_resume_command_round_trips_any_github_label(label):
+    options = WindowOptions(required_label=label, scope_id="internal-scope-id")
+
+    argv = shlex.split(_resume_command(options))
+
+    assert f"--label={label}" in argv
+    assert "internal-scope-id" not in argv
 
 
 def test_continue_scope_round_trip_and_explicit_conflict(rig):

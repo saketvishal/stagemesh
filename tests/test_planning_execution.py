@@ -15,6 +15,8 @@ from stagemesh.persistence import Store
 from stagemesh.planning_execution import (
     CHALLENGER_RECEIPT,
     PLANNER_RECEIPT,
+    PlanningExecutionError,
+    _freeze_planner,
     planning_execution_receipts,
 )
 from stagemesh.recovery import task_doctor
@@ -33,7 +35,7 @@ import json, pathlib, sys
 mode = sys.argv[1]
 if mode == "mutate":
     pathlib.Path("README.md").write_text("provider-local mutation\n", encoding="utf-8")
-if mode in {"planner", "mutate", "wrapped-planner"}:
+if mode in {"planner", "mutate", "wrapped-planner", "aggregate-planner"}:
     payload = {
         "behavior": ["Keep the requested behavior bounded"],
         "non_goals": ["Do not widen the contract"],
@@ -44,9 +46,23 @@ if mode in {"planner", "mutate", "wrapped-planner"}:
     }
     if mode == "wrapped-planner":
         print("Here is the requested object:\n```json\n" + json.dumps(payload) + "\n```")
+    elif mode == "aggregate-planner":
+        payload["behavior"] = [f"behavior-{index:02d}-" + "b" * 120 for index in range(20)]
+        payload["non_goals"] = [f"non-goal-{index:02d}-" + "n" * 120 for index in range(20)]
+        payload["acceptance_checks"] = [f"check-{index:02d}-" + "c" * 120 for index in range(20)]
+        print(json.dumps(payload))
     else:
         print(json.dumps(payload))
-elif mode in {"challenger", "wrapped-challenger", "ambiguous-challenger"}:
+elif mode in {
+    "challenger",
+    "wrapped-challenger",
+    "ambiguous-challenger",
+    "aggregate-challenger",
+    "array-prose-challenger",
+    "escaped-challenger",
+    "nested-duplicate-challenger",
+    "truncated-array-challenger",
+}:
     payload = {
         "verdict": "accept",
         "findings": [{"kind": "missing-test", "summary": "Inspect README explicitly"}],
@@ -56,6 +72,28 @@ elif mode in {"challenger", "wrapped-challenger", "ambiguous-challenger"}:
         print("Independent challenge complete.\n```json\n" + json.dumps(payload) + "\n```\nEnd.")
     elif mode == "ambiguous-challenger":
         print(json.dumps(payload) + "\n" + json.dumps({**payload, "verdict": "revise"}))
+    elif mode == "aggregate-challenger":
+        payload["findings"] = [
+            {"kind": "missing-test", "summary": f"finding-{index:02d}-" + "x" * 390}
+            for index in range(20)
+        ]
+        print(json.dumps(payload))
+    elif mode == "escaped-challenger":
+        payload["findings"] = [
+            {"kind": "missing-test", "summary": "😀" * 500},
+            {"kind": "scope-risk", "summary": "🚀" * 145},
+        ]
+        print(json.dumps(payload))
+    elif mode == "array-prose-challenger":
+        print("Result: [" + json.dumps(payload) + "] done")
+    elif mode == "nested-duplicate-challenger":
+        print(
+            '{"verdict":"revise","findings":['
+            '{"kind":"missing-test","kind":"scope-risk","summary":"x"}'
+            '],"required_decisions":[]}'
+        )
+    elif mode == "truncated-array-challenger":
+        print("[" + json.dumps(payload))
     else:
         print(json.dumps(payload))
 elif mode == "revise":
@@ -70,6 +108,8 @@ elif mode == "long-challenger":
         "findings": [{"kind": "missing-test", "summary": "x" * 669}],
         "required_decisions": [],
     }))
+elif mode == "duplicate-key-challenger":
+    print('{"verdict":"revise","verdict":"accept","findings":[],"required_decisions":[]}')
 else:
     print("not json")
 '''
@@ -258,6 +298,190 @@ def test_multiple_provider_objects_remain_ambiguous_and_fail_closed(tmp_path: Pa
     assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
     assert result["detail"]["next_action"] == "challenger_invalid"
     assert load_planning_challenge(project, "T-1") is None
+
+
+@pytest.mark.parametrize("mode", ["aggregate-challenger", "escaped-challenger"])
+def test_locally_valid_challenge_is_fitted_to_the_canonical_budget(
+    tmp_path: Path, mode: str
+) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode=mode),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    challenge = load_planning_challenge(project, "T-1")
+    frozen = freeze_planning_challenge(challenge)
+    assert len(frozen.canonical_json) <= 8_000
+    assert len(challenge["findings"]) == (20 if mode == "aggregate-challenger" else 2)
+    assert all(item["summary"] for item in challenge["findings"])
+    assert any(item["summary"].endswith("... [truncated by StageMesh]") for item in challenge["findings"])
+
+
+def test_locally_valid_planner_output_is_fitted_to_the_canonical_budget(tmp_path: Path) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), planner_mode="aggregate-planner"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    spec, _ = load_planning_artifacts(project, "T-1")
+    frozen = freeze_planning_spec(spec)
+    assert len(frozen.canonical_json) <= 8_000
+    assert len(spec["behavior"]) == len(spec["non_goals"]) == len(spec["acceptance_checks"]) == 20
+    assert any(item.endswith("... [truncated by StageMesh]") for item in spec["behavior"])
+
+
+def test_duplicate_provider_json_keys_fail_closed(tmp_path: Path) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="duplicate-key-challenger"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
+    assert result["detail"]["next_action"] == "challenger_invalid"
+    assert load_planning_challenge(project, "T-1") is None
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "array-prose-challenger",
+        "nested-duplicate-challenger",
+        "truncated-array-challenger",
+    ],
+)
+def test_ambiguous_json_wrappers_and_nested_duplicate_keys_fail_closed(
+    tmp_path: Path, mode: str
+) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode=mode),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
+    assert result["detail"]["next_action"] == "challenger_invalid"
+    assert load_planning_challenge(project, "T-1") is None
+
+
+def test_validation_text_cannot_spoof_an_over_budget_error_code() -> None:
+    payload = {
+        "behavior": ["bounded"],
+        "non_goals": [],
+        "affected_paths": ["README.md"],
+        "acceptance_checks": ["inspect"],
+        "decisions": [{"question": "cannot fit", "resolution": ""}],
+        "spec_refs": [],
+    }
+
+    with pytest.raises(PlanningExecutionError) as exc:
+        _freeze_planner(payload, "a" * 64, "b" * 40)
+
+    assert exc.value.code == "planner_invalid"
+
+
+def test_new_planning_artifact_is_published_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import planning_execution
+
+    target = tmp_path / "planning.json"
+
+    def fail_link(*_args, **_kwargs):
+        raise OSError("simulated publication interruption")
+
+    monkeypatch.setattr(planning_execution.os, "link", fail_link, raising=False)
+
+    with pytest.raises(PlanningExecutionError) as exc:
+        planning_execution._write_new(target, '{"valid":true}')
+
+    assert exc.value.code == "planning_artifact_publish_failed"
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_missing_artifact_after_receipt_is_recoverable_on_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import planning_execution
+
+    project = _project(tmp_path, ["T-1"], config=_config(_script(tmp_path)))
+    write_new = planning_execution._write_new
+    attempts = 0
+
+    def interrupt_once(path, text):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PlanningExecutionError(
+                "planning_artifact_publish_failed", "simulated publication interruption"
+            )
+        return write_new(path, text)
+
+    monkeypatch.setattr(planning_execution, "_write_new", interrupt_once)
+
+    first_code, first = _run(project)
+    second_code, second = _run(project)
+
+    assert first_code != 0
+    assert first["detail"]["next_action"] == "planning_artifact_publish_failed"
+    assert second_code != 0 and second["stop_reason"] == "REFUSED:planning_gate"
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        planner_receipts = store.conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type=?", (PLANNER_RECEIPT,)
+        ).fetchone()[0]
+        challenger_receipts = store.conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type=?", (CHALLENGER_RECEIPT,)
+        ).fetchone()[0]
+    finally:
+        store.close()
+    assert (planner_receipts, challenger_receipts) == (2, 1)
+
+
+def test_execution_receipt_is_durable_before_each_artifact_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import planning_execution
+
+    project = _project(tmp_path, ["T-1"], config=_config(_script(tmp_path)))
+    events: list[str] = []
+    record_receipt = planning_execution._record_receipt
+    write_new = planning_execution._write_new
+
+    def observe_receipt(*args, **kwargs):
+        events.append(f"receipt:{args[1]}")
+        return record_receipt(*args, **kwargs)
+
+    def observe_write(path, text):
+        events.append(f"write:{path.name}")
+        return write_new(path, text)
+
+    monkeypatch.setattr(planning_execution, "_record_receipt", observe_receipt)
+    monkeypatch.setattr(planning_execution, "_write_new", observe_write)
+
+    _run(project)
+
+    assert events == [
+        f"receipt:{PLANNER_RECEIPT}",
+        "write:T-1.spec.json",
+        f"receipt:{CHALLENGER_RECEIPT}",
+        "write:T-1.challenge.json",
+    ]
 
 
 def test_distinct_names_with_the_same_command_are_not_independent(tmp_path: Path):

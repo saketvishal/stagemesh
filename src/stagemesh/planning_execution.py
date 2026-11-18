@@ -7,6 +7,7 @@ planning artifacts in the real project.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -40,9 +41,14 @@ from .queue_control import OperatorStopRequested
 from .research_context import source_snapshot
 from .review_identity import command_snapshot, valid_command_snapshot
 from .spec_planning import (
+    MAX_CANONICAL_CHARS,
     MAX_ITEMS,
     MAX_TEXT_CHARS,
+    TRUNCATED_TEXT_SUFFIX,
+    PlanningBudgetError,
     PlanningSpecError,
+    fit_provider_planning_challenge,
+    fit_provider_planning_spec,
     freeze_planning_challenge,
     freeze_planning_spec,
     load_planning_artifacts,
@@ -55,7 +61,6 @@ from .spec_planning import (
 PLANNER_RECEIPT = "planning.spec_produced"
 CHALLENGER_RECEIPT = "planning.challenge_produced"
 _OUTPUT_LIMIT = 12_000
-_TRUNCATED_SUMMARY_SUFFIX = " ... [truncated by StageMesh]"
 
 
 class PlanningExecutionError(RuntimeError):
@@ -94,7 +99,6 @@ def ensure_executed_planning(
             lambda payload: _freeze_planner(payload, contract_hash, baseline_sha),
         )
         frozen, normalized = planned
-        _write_new(spec_path, json.dumps(normalized, sort_keys=True, separators=(",", ":")))
         _record_receipt(
             store,
             PLANNER_RECEIPT,
@@ -104,6 +108,7 @@ def ensure_executed_planning(
             frozen.digest,
             execution,
         )
+        _write_new(spec_path, json.dumps(normalized, sort_keys=True, separators=(",", ":")))
         spec_payload = normalized
 
     planner: dict[str, Any] | None = None
@@ -204,7 +209,6 @@ def ensure_executed_planning(
             payload, frozen_spec.digest, str(planner["provider"]), adapter.name
         ),
     )
-    _write_new(planning_challenge_path(project, task_id), frozen_challenge.canonical_json)
     _record_receipt(
         store,
         CHALLENGER_RECEIPT,
@@ -215,6 +219,7 @@ def ensure_executed_planning(
         execution,
         planning_spec_hash=frozen_spec.digest,
     )
+    _write_new(planning_challenge_path(project, task_id), frozen_challenge.canonical_json)
 
 
 def planning_execution_receipts(store: Store, task_id: str) -> dict[str, dict[str, Any] | None]:
@@ -376,8 +381,8 @@ def _provider_json_object(text: str, purpose: str) -> dict[str, Any]:
     closed instead of letting StageMesh guess which answer is authoritative.
     """
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
+        payload = _strict_json_decoder().decode(text)
+    except (json.JSONDecodeError, ValueError):
         payload = _single_embedded_json_object(text)
         if payload is None:
             raise PlanningExecutionError(
@@ -391,7 +396,7 @@ def _provider_json_object(text: str, purpose: str) -> dict[str, Any]:
 
 
 def _single_embedded_json_object(text: str) -> dict[str, Any] | None:
-    decoder = json.JSONDecoder()
+    decoder = _strict_json_decoder()
     found: list[tuple[int, int, dict[str, Any]]] = []
     index = 0
     while True:
@@ -400,7 +405,7 @@ def _single_embedded_json_object(text: str) -> dict[str, Any] | None:
             break
         try:
             payload, width = decoder.raw_decode(text[start:])
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             index = start + 1
             continue
         end = start + width
@@ -411,9 +416,26 @@ def _single_embedded_json_object(text: str) -> dict[str, Any] | None:
         return None
     start, end, payload = found[0]
     outside = text[:start] + text[end:]
-    if any(token in outside for token in ("{", "}", "[", "]")):
+    if any(token in outside for token in ("{", "}")):
+        return None
+    if text[:start].rstrip().endswith("[") or text[end:].lstrip().startswith("]"):
         return None
     return payload
+
+
+def _strict_json_decoder() -> json.JSONDecoder:
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    def invalid_constant(value: str) -> None:
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    return json.JSONDecoder(object_pairs_hook=object_pairs, parse_constant=invalid_constant)
 
 
 def _planner_prompt(task_id: str, title: str, contract_json: str) -> str:
@@ -423,6 +445,8 @@ def _planner_prompt(task_id: str, title: str, contract_json: str) -> str:
         "Do not edit files. Reply with one JSON object and no progress text. Required fields: "
         "behavior (list), affected_paths (list), acceptance_checks (list). Optional fields: "
         "non_goals (list), decisions (list of question/resolution objects), spec_refs (list). "
+        f"Use no more than {MAX_ITEMS} entries per list and {MAX_TEXT_CHARS} characters per "
+        f"descriptive entry; the complete canonical JSON must fit {MAX_CANONICAL_CHARS} characters. "
         "Do not include contract_hash or baseline_sha; StageMesh binds them.\nContract data:\n"
         + contract_json
     )
@@ -436,25 +460,46 @@ def _challenger_prompt(task_id: str, planning_json: str) -> str:
         "Do not edit files. Reply with one JSON object and no progress text containing verdict "
         "(accept, revise, or needs-human-decision), findings (kind/summary objects), and required_decisions (list). "
         f"Return at most {MAX_ITEMS} findings and keep every finding summary to "
-        f"{MAX_TEXT_CHARS} characters or fewer.\n"
+        f"{MAX_TEXT_CHARS} characters or fewer. The complete canonical JSON must fit "
+        f"{MAX_CANONICAL_CHARS} characters.\n"
         + planning_json
     )
 
 
 def _write_new(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
     try:
-        with path.open("x", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
     except FileExistsError as exc:
         raise PlanningExecutionError(
             "planning_artifact_race", f"planning artifact appeared concurrently: {path.name}"
         ) from exc
+    except OSError as exc:
+        raise PlanningExecutionError(
+            "planning_artifact_publish_failed",
+            f"planning artifact could not be published atomically: {type(exc).__name__}",
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _freeze_planner(
     payload: dict[str, Any], contract_hash: str, baseline_sha: str
 ) -> tuple[Any, dict[str, Any]]:
+    payload = dict(payload)
+    for field in ("behavior", "non_goals", "acceptance_checks"):
+        if field in payload:
+            payload[field] = _bounded_planner_text(payload[field])
     for field, trusted in (("contract_hash", contract_hash), ("baseline_sha", baseline_sha)):
         supplied = payload.get(field)
         if supplied is not None and supplied != trusted:
@@ -463,9 +508,10 @@ def _freeze_planner(
             )
         payload[field] = trusted
     try:
-        frozen = freeze_planning_spec(payload)
+        frozen = fit_provider_planning_spec(payload)
     except PlanningSpecError as exc:
-        raise PlanningExecutionError("planner_invalid", str(exc)) from exc
+        code = "planner_over_budget" if isinstance(exc, PlanningBudgetError) else "planner_invalid"
+        raise PlanningExecutionError(code, str(exc)) from exc
     normalized = json.loads(frozen.canonical_json)
     normalized.pop("version", None)
     return frozen, normalized
@@ -495,9 +541,19 @@ def _freeze_challenge(
         "required_decisions": payload.get("required_decisions", []),
     }
     try:
-        return freeze_planning_challenge(challenge_payload)
+        return fit_provider_planning_challenge(challenge_payload)
     except PlanningSpecError as exc:
-        raise PlanningExecutionError("challenger_invalid", str(exc)) from exc
+        code = "challenger_over_budget" if isinstance(exc, PlanningBudgetError) else "challenger_invalid"
+        raise PlanningExecutionError(code, str(exc)) from exc
+
+
+def _bounded_planner_text(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    return [
+        _truncate_provider_text(item) if isinstance(item, str) else item
+        for item in value
+    ]
 
 
 def _bounded_challenge_findings(value: Any) -> Any:
@@ -515,12 +571,17 @@ def _bounded_challenge_findings(value: Any) -> Any:
         if not isinstance(item, dict) or not isinstance(item.get("summary"), str):
             bounded.append(item)
             continue
-        summary = item["summary"].strip()
-        if len(summary) > MAX_TEXT_CHARS:
-            keep = MAX_TEXT_CHARS - len(_TRUNCATED_SUMMARY_SUFFIX)
-            summary = summary[:keep].rstrip() + _TRUNCATED_SUMMARY_SUFFIX
+        summary = _truncate_provider_text(item["summary"])
         bounded.append({**item, "summary": summary})
     return bounded
+
+
+def _truncate_provider_text(value: str) -> str:
+    value = value.strip()
+    if len(value) <= MAX_TEXT_CHARS:
+        return value
+    keep = MAX_TEXT_CHARS - len(TRUNCATED_TEXT_SUFFIX)
+    return value[:keep].rstrip() + TRUNCATED_TEXT_SUFFIX
 
 
 def _record_receipt(

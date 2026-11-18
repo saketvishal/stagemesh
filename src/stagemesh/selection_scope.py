@@ -1,4 +1,4 @@
-"""Durable, explicit run scope. Fresh runs never inherit a previous run's label.
+"""Durable, explicit run scope with safe continuation of unfinished work.
 
 Audit records are append-only and queried by identity, not a bounded recent-event
 window. A changed scope supersedes new admissions by the old run; an already
@@ -52,18 +52,45 @@ def load_scope(store, scope_id):
 
 def task_scope(store, task_id):
     for _, value in _events(store, "selection.task"):
-        if value["task_id"] == task_id:
-            return load_scope(store, value["scope_id"])
+        if value.get("task_id") == task_id:
+            scope_id = value.get("scope_id")
+            if not isinstance(scope_id, str) or not scope_id:
+                raise ScopeError("task has malformed saved scope history; nothing started")
+            scope = _current_scope(store, load_scope(store, scope_id))
+            return scope if scope.label else None
     return None
 
 
-def resolve_scope(store, *, label=None, resume=None, clear=False, task_id=None, preview=False):
+def resolve_scope(
+    store,
+    *,
+    label=None,
+    resume=None,
+    clear=False,
+    task_id=None,
+    preview=False,
+    infer_unfinished=False,
+):
     if clear and (label is not None or not resume):
         raise ScopeError("--clear-label requires --resume-scope and cannot be combined with --label")
     if label is not None and not label.strip():
         raise ScopeError("--label must not be empty")
     prior = load_scope(store, resume) if resume else (task_scope(store, task_id) if task_id else None)
+    if resume and not current(store, prior):
+        guidance = f"; continue current work with --label {prior.label!r}" if prior.label else ""
+        raise ScopeError("saved scope was already changed" + guidance)
     label = label.strip() if label is not None else None
+    if prior is None and label is not None:
+        matches = _current_scopes(store, label)
+        if len(matches) == 1:
+            prior = matches[0]
+        elif len(matches) > 1:
+            raise ScopeError(
+                f"multiple unfinished saved scopes use label {label!r}; "
+                "StageMesh will not guess which run to continue"
+            )
+    if prior is None and label is None and infer_unfinished:
+        prior = _unfinished_scope(store)
     if prior and label is None and not clear:
         return prior
     if prior and label is not None and prior.label and label.casefold() == prior.label.casefold():
@@ -71,7 +98,10 @@ def resolve_scope(store, *, label=None, resume=None, clear=False, task_id=None, 
     if not prior and label is None:
         return None
     if prior and not resume:
-        raise ScopeError(f"task belongs to scope {prior.id}; use --resume-scope {prior.id} to change or clear its label")
+        raise ScopeError(
+            f"task belongs to saved label {prior.label!r}; continue it with --label "
+            f"{prior.label!r} instead of changing its scope"
+        )
     # Changes are explicit and preserve every historical scope/candidate. Refuse
     # while a stage owns work; never kill a worker to change its selector.
     payload = {"label": label, "supersedes": prior.id if prior else None, "action": "clear" if clear else "change" if prior else "create"}
@@ -90,7 +120,70 @@ def resolve_scope(store, *, label=None, resume=None, clear=False, task_id=None, 
 
 
 def current(store, scope):
-    return not any(value.get("supersedes") == scope.id for _, value in _events(store, "selection.scope"))
+    try:
+        return _current_scope(store, scope).id == scope.id
+    except ScopeError:
+        return False
+
+
+def _current_scope(store, scope):
+    seen: set[str] = set()
+    while True:
+        if scope.id in seen:
+            raise ScopeError("saved scope history contains a cycle; nothing started")
+        seen.add(scope.id)
+        replacements = [
+            scope_id
+            for scope_id, value in _events(store, "selection.scope")
+            if value.get("supersedes") == scope.id
+        ]
+        if not replacements:
+            return scope
+        if len(replacements) != 1:
+            raise ScopeError("saved scope history is ambiguous; nothing started")
+        scope = load_scope(store, replacements[0])
+
+
+def _current_scopes(store, label):
+    return [
+        scope
+        for scope in _unfinished_scopes(store)
+        if scope.label and scope.label.casefold() == label.casefold()
+    ]
+
+
+def _unfinished_scopes(store):
+    scopes: dict[str, Scope] = {}
+    seen_tasks: set[str] = set()
+    for _, value in _events(store, "selection.task"):
+        task_id = str(value.get("task_id", ""))
+        if not task_id or task_id in seen_tasks:
+            continue
+        seen_tasks.add(task_id)
+        task = store.get_task(task_id)
+        if task is None or task["status"] not in ("OPEN", "CLAIMED"):
+            continue
+        scope_id = value.get("scope_id")
+        if not isinstance(scope_id, str) or not scope_id:
+            raise ScopeError("unfinished task has malformed saved scope history; nothing started")
+        scope = _current_scope(store, load_scope(store, scope_id))
+        if scope.label:
+            scopes[scope.id] = scope
+    return list(scopes.values())
+
+
+def _unfinished_scope(store):
+    scopes = _unfinished_scopes(store)
+    if not scopes:
+        return None
+    if len(scopes) == 1:
+        return scopes[0]
+    labels = sorted({scope.label for scope in scopes if scope.label})
+    raise ScopeError(
+        "unfinished work belongs to multiple saved labels ("
+        + ", ".join(repr(label) for label in labels)
+        + "); rerun with --label to choose one"
+    )
 
 
 def drains_candidate(store, task, scope):
