@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import IO, Any
 
 DEFAULT_HEARTBEAT_SECONDS = 60.0
+DEFAULT_CAPACITY_PROGRESS_SECONDS = 60.0
 POLL_SECONDS = 2.0
 
 _STAGE_LABEL = {"IMPLEMENT": "implementation", "IMPLEMENTATION": "implementation", "REVIEW": "review", "VALIDATE": "validation", "VALIDATION": "validation"}
@@ -31,16 +32,31 @@ class ProgressReporter:
         self._clock = clock
         self._lock = threading.Lock()
         self._started = clock()
+        self._last_channel_output: dict[str, float] = {}
 
     def line(self, text: str) -> None:
         stamp = _duration(self._clock() - self._started)
         with self._lock:
-            stream = self._stream or sys.stderr
-            try:
-                stream.write(f"[{stamp}] {text}\n")
-                stream.flush()
-            except (OSError, ValueError):  # a closed terminal must not kill the window
-                pass
+            self._write(stamp, text)
+
+    def rate_limited_line(self, channel: str, text: str, interval_seconds: float) -> bool:
+        """Print the first channel update, then at most one per interval."""
+        with self._lock:
+            now = self._clock()
+            previous = self._last_channel_output.get(channel)
+            if previous is not None and now - previous < interval_seconds:
+                return False
+            self._last_channel_output[channel] = now
+            self._write(_duration(now - self._started), text)
+            return True
+
+    def _write(self, stamp: str, text: str) -> None:
+        stream = self._stream or sys.stderr
+        try:
+            stream.write(f"[{stamp}] {text}\n")
+            stream.flush()
+        except (OSError, ValueError):  # a closed terminal must not kill the window
+            pass
 
 
 def _duration(seconds: float) -> str:
@@ -204,7 +220,15 @@ class TaskMonitor:
             conn.close()
 
 
-def with_progress(hooks: Any, db_path: Path, reporter: ProgressReporter, *, heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS, poll_seconds: float = POLL_SECONDS) -> Any:
+def with_progress(
+    hooks: Any,
+    db_path: Path,
+    reporter: ProgressReporter,
+    *,
+    heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
+    capacity_progress_seconds: float = DEFAULT_CAPACITY_PROGRESS_SECONDS,
+    poll_seconds: float = POLL_SECONDS,
+) -> Any:
     """Copy of the wave hooks whose task runner and PR opener report progress; everything else is untouched."""
     run_task, open_pr = hooks.run_task, hooks.open_pr
 
@@ -232,11 +256,14 @@ def with_progress(hooks: Any, db_path: Path, reporter: ProgressReporter, *, hear
         return url
 
     def capacity(state: dict[str, Any]) -> None:
-        waiting = "; ".join(f"task {task}: {why}" for task, why in list(state.get("waiting", {}).items())[:3])
-        reporter.line(
+        waiting_count = len(state.get("waiting", {}))
+        reporter.rate_limited_line(
+            "capacity",
             f"capacity: coding {state['coding']}/{state['coding_limit']}; "
             f"verification {state['verification']}/{state['verification_limit']}; "
-            f"{state['coding_idle_reason']}" + (f"; {waiting}" if waiting else "")
+            f"{state['coding_idle_reason']}"
+            + (f"; {waiting_count} task(s) waiting" if waiting_count else ""),
+            capacity_progress_seconds,
         )
         if hooks.on_capacity is not None:
             hooks.on_capacity(state)
@@ -249,6 +276,8 @@ def with_progress(hooks: Any, db_path: Path, reporter: ProgressReporter, *, hear
         hooks, run_task=run, open_pr=None if open_pr is None else pr, on_capacity=capacity,
         retarget=(lambda ref: with_progress(
             retarget(ref), db_path, reporter,
-            heartbeat_seconds=heartbeat_seconds, poll_seconds=poll_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+            capacity_progress_seconds=capacity_progress_seconds,
+            poll_seconds=poll_seconds,
         )) if callable(retarget) else None,
     )
