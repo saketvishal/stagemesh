@@ -181,13 +181,14 @@ def resolve_executable(executable: str, provider_name: str | None = None) -> str
 
 
 def _complete_codex_executable(executable: str) -> str:
-    """Keep a detached npm Codex binary with its identical packaged tool host."""
+    """Use the complete binary bundled with a recognized npm Codex install."""
     path = Path(executable)
     if sys.platform != "win32" or path.name.casefold() != "codex.exe":
         return executable
     if path.with_name("codex-code-mode-host.exe").is_file():
         return executable
     package = path.parent / "node_modules" / "@openai" / "codex"
+    trusted_npm_root = (path.parent / "codex.cmd").is_file() and (package / "package.json").is_file()
     patterns = (
         "node_modules/@openai/codex-win32-*/vendor/*/bin/codex.exe",
         "vendor/*/bin/codex.exe",
@@ -195,7 +196,9 @@ def _complete_codex_executable(executable: str) -> str:
     for pattern in patterns:
         for candidate in sorted(package.glob(pattern)):
             try:
-                if candidate.with_name("codex-code-mode-host.exe").is_file() and filecmp.cmp(path, candidate, shallow=False):
+                complete = candidate.with_name("codex-code-mode-host.exe").is_file()
+                identical = complete and filecmp.cmp(path, candidate, shallow=False)
+                if complete and (identical or trusted_npm_root):
                     return str(candidate)
             except OSError:
                 continue

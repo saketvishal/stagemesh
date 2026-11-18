@@ -7,13 +7,17 @@ from stagemesh import providers
 from stagemesh.execution import capacity_evidence
 
 
-def codex_package(tmp_path: Path, content: bytes = b"same-codex") -> tuple[Path, Path]:
+def codex_package(tmp_path: Path, content: bytes = b"same-codex", *, trusted_npm: bool = False) -> tuple[Path, Path]:
     detached = tmp_path / "codex.exe"
     detached.write_bytes(b"same-codex")
-    packaged = tmp_path / "node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+    package = tmp_path / "node_modules/@openai/codex"
+    packaged = package / "node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
     packaged.parent.mkdir(parents=True)
     packaged.write_bytes(content)
     packaged.with_name("codex-code-mode-host.exe").write_bytes(b"host")
+    if trusted_npm:
+        (tmp_path / "codex.cmd").write_text("@node node_modules/@openai/codex/bin/codex.js %*", encoding="utf-8")
+        (package / "package.json").write_text('{"name":"@openai/codex"}', encoding="utf-8")
     return detached, packaged
 
 
@@ -29,10 +33,16 @@ def test_windows_codex_uses_identical_complete_package(monkeypatch, tmp_path):
     assert summary["REVIEW"]["source"] == "default"
 
 
-def test_windows_codex_never_changes_version(monkeypatch, tmp_path):
+def test_windows_codex_keeps_arbitrary_different_binary(monkeypatch, tmp_path):
     detached, _ = codex_package(tmp_path, b"different-codex")
     monkeypatch.setattr(sys, "platform", "win32")
     assert providers._complete_codex_executable(str(detached)) == str(detached)
+
+
+def test_windows_codex_uses_paired_package_for_stale_npm_binary(monkeypatch, tmp_path):
+    detached, packaged = codex_package(tmp_path, b"current-codex", trusted_npm=True)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert providers._complete_codex_executable(str(detached)) == str(packaged)
 
 
 def test_stale_codex_path_fallback_uses_complete_package(monkeypatch, tmp_path):
