@@ -127,6 +127,7 @@ from .provider_acceptance import (
     run_provider_acceptance,
 )
 from .provider_catalog import (
+    PROVIDER_CATALOG,
     balanced_provider_pools,
     discovered_provider_entries,
     migrate_unsafe_bundled_provider_commands,
@@ -281,13 +282,16 @@ def _ensure_provider_registry(
     providers = data.get("providers", {})
     if not isinstance(providers, dict):
         raise ConfigValidationError("providers must be an object")
-    hardened = migrate_unsafe_bundled_provider_commands(providers)
+    hardened = set(migrate_unsafe_bundled_provider_commands(providers))
     available = discovered_provider_entries()
     changed = bool(hardened)
     for name, entry in available.items():
         if name not in providers:
             providers[name] = entry
             changed = True
+    if _ensure_project_agy_settings(project, providers):
+        hardened.add("agy")
+        changed = True
     if "providers" not in data:
         data["providers"] = providers
         changed = True
@@ -298,7 +302,102 @@ def _ensure_provider_registry(
         changed,
         tuple(sorted(str(name) for name in providers)),
         tuple(sorted(available)),
-        hardened,
+        tuple(sorted(hardened)),
+    )
+
+
+def _ensure_project_agy_settings(project: Path, providers: dict[str, object]) -> bool:
+    """Make StageMesh's bundled AGY adapter safely usable without manual setup.
+
+    Customized provider commands remain operator-owned.  Only the exact bundled
+    command receives a project-local settings file, and an existing settings
+    file is never overwritten.
+    """
+    entry = providers.get("agy")
+    if not isinstance(entry, dict):
+        return False
+    command = entry.get("command")
+    bundled = next(item.command for item in PROVIDER_CATALOG if item.name == "agy")
+    if not isinstance(command, str):
+        return False
+    settings_path = (runtime_dir(project) / "agy-settings.json").resolve()
+    managed_command = f"{bundled} --settings {shlex.quote(str(settings_path))}"
+    if command != bundled and not _is_managed_agy_command(command, settings_path, bundled):
+        return False
+    changed = command != managed_command
+    if not settings_path.exists():
+        settings = {
+            "$schema": "https://antigravity.google/schemas/v1/settings.json",
+            "toolPermission": "proceed-in-sandbox",
+            "enableTerminalSandbox": True,
+            "allowNonWorkspaceAccess": False,
+            "permissions": {
+                "allow": [],
+                "deny": [
+                    "write_file(.git/)",
+                    "write_file(.stagemesh/)",
+                    "command(git commit)",
+                    "command(git push)",
+                    "command(git reset)",
+                    "command(git clean)",
+                    "command(git checkout)",
+                    "command(git switch)",
+                    "command(git merge)",
+                    "command(git rebase)",
+                    "command(git cherry-pick)",
+                    "command(git branch)",
+                    "command(git tag)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "mcp(*)",
+                ],
+                "ask": [],
+            },
+        }
+        temporary = settings_path.with_name(f".{settings_path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+            if not settings_path.exists():
+                os.replace(temporary, settings_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        changed = True
+    entry["command"] = managed_command
+    return changed
+
+
+def _is_managed_agy_command(command: str, settings_path: Path, bundled: str) -> bool:
+    """Recognize only StageMesh's own project settings suffix for repair/migration."""
+    try:
+        args = shlex.split(command)
+        bundled_args = shlex.split(bundled)
+    except ValueError:
+        return False
+    if not args or Path(args[0]).stem.casefold() != "agy":
+        return False
+    values: list[str] = []
+    command_args: list[str] = []
+    skip_next = False
+    for index, argument in enumerate(args[1:], start=1):
+        if skip_next:
+            skip_next = False
+            continue
+        if argument == "--settings" and index + 1 < len(args):
+            values.append(args[index + 1])
+            skip_next = True
+        elif argument.startswith("--settings="):
+            values.append(argument.split("=", 1)[1])
+        else:
+            command_args.append(argument)
+    if len(values) != 1:
+        return False
+    if [args[0], *command_args] != bundled_args:
+        return False
+    configured = Path(values[0]).expanduser()
+    return configured == settings_path or (
+        configured.name == settings_path.name
+        and configured.parent.name == settings_path.parent.name
+        and settings_path.parent.name == ".stagemesh"
     )
 
 

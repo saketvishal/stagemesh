@@ -15,7 +15,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from .agent_policy import (
     AgentPolicyError,
@@ -23,7 +23,7 @@ from .agent_policy import (
     agent_policy_prompt,
     load_effective_agent_policy,
 )
-from .agent_skills import SkillPackError, is_frontend_task, skill_prompt
+from .agent_skills import SKILL_ROOT, SkillPackError, is_frontend_task, skill_prompt
 from .attribution import attribution_for_worker
 from .capabilities import (
     OBSERVED_LOAD_REQUIRED,
@@ -104,6 +104,7 @@ from .workspaces import (
 
 MAX_EXECUTION_RESULT_CHARS = 200
 PROVIDER_PERMISSION_DENIED = "provider_permission_denied"
+AGY_SETTINGS_UNAVAILABLE = "agy_settings_unavailable"
 
 
 IMPLEMENTATION_DISCIPLINE = (
@@ -462,40 +463,56 @@ class RuntimeCommandAdapter:
         _record_capability_attachments(store, task_id, self.name, "IMPLEMENT", capability_audit)
         def launch_attempt():  # type: ignore[no-untyped-def]
             try:
-                attempt_proc = subprocess.Popen(
-                    command, cwd=run_path, text=True, encoding="utf-8", errors="replace",
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env=provider_environment(run_path, provider_name=self.name), **popen_session_kwargs(),
+                attempt_proc, temporary_settings = _launch_provider_process(
+                    command,
+                    run_path,
+                    cwd=run_path,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=provider_environment(run_path, provider_name=self.name),
+                    **popen_session_kwargs(),
+                )
+            except ProviderValidationError:
+                return None, ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    capacity_failure=True,
+                    failure_reason=AGY_SETTINGS_UNAVAILABLE,
                 )
             except FileNotFoundError as exc:
                 is_capacity, launch_reason = classify_failure(1, exc=exc)
                 return None, ExecutionResult(
                     ExecutionStatus.FAILED, capacity_failure=is_capacity, failure_reason=launch_reason
                 )
-            identity = popen_identity(attempt_proc)
-            attempt_execution_id = store.start_execution(
-                task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION, actor=self.name,
-                pid=identity.pid, process_create_time=identity.create_time, boot_id=identity.boot_id,
-                executable=identity.executable,
-            )
-            store.add_audit_event(
-                "agent_policy.activated",
-                {
-                    "task_id": task_id,
-                    "provider": self.name,
-                    "stage": "IMPLEMENT",
-                    "policy_id": effective_agent_policy.policy_id,
-                    "policy_hash": effective_agent_policy.digest,
-                    "execution_id": attempt_execution_id,
-                    "activation_evidence": "provider-process-started-with-policy-prompt",
-                },
-            )
-            _record_capability_activations(
-                store, task_id, self.name, "IMPLEMENT", capability_audit
-            )
-            lease.bind_execution(attempt_execution_id)
-            attempt_call = CallRecorder(store, task_id, purpose, self.name)
+            attempt_execution_id: str | None = None
+            attempt_call: CallRecorder | None = None
             try:
+                identity = popen_identity(attempt_proc)
+                attempt_execution_id = store.start_execution(
+                    task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION, actor=self.name,
+                    pid=identity.pid, process_create_time=identity.create_time, boot_id=identity.boot_id,
+                    executable=identity.executable,
+                )
+                store.add_audit_event(
+                    "agent_policy.activated",
+                    {
+                        "task_id": task_id,
+                        "provider": self.name,
+                        "stage": "IMPLEMENT",
+                        "policy_id": effective_agent_policy.policy_id,
+                        "policy_hash": effective_agent_policy.digest,
+                        "execution_id": attempt_execution_id,
+                        "activation_evidence": "provider-process-started-with-policy-prompt",
+                    },
+                )
+                _record_capability_activations(
+                    store, task_id, self.name, "IMPLEMENT", capability_audit
+                )
+                lease.bind_execution(attempt_execution_id)
+                attempt_call = CallRecorder(store, task_id, purpose, self.name)
                 out, err, attempt_timed_out = communicate_bounded(
                     attempt_proc, provider_input, provider_timeout_seconds(self.timeout_seconds)
                 )
@@ -503,9 +520,14 @@ class RuntimeCommandAdapter:
                 lease.after_agent()
             except Exception as exc:
                 failure = _execution_result(exc)
-                attempt_call.finish("failed", failure)
-                store.finish_execution(attempt_execution_id, ExecutionStatus.FAILED, result=failure)
+                if attempt_call is not None:
+                    attempt_call.finish("failed", failure)
+                if attempt_execution_id is not None:
+                    store.finish_execution(attempt_execution_id, ExecutionStatus.FAILED, result=failure)
                 raise
+            finally:
+                _remove_temporary_provider_settings(temporary_settings)
+            assert attempt_execution_id is not None and attempt_call is not None
             return (
                 attempt_proc, attempt_execution_id, attempt_call, out, err, attempt_timed_out,
                 attempt_proc.returncode,
@@ -998,8 +1020,9 @@ class RuntimeCommandAdapter:
                 _record_capability_attachments(store, task_id, self.name, "REVIEW", capability_audit)
             cleanup_confirmed = False  # an interrupted Popen attempt may already have created a child
             try:
-                proc = subprocess.Popen(
+                proc, temporary_settings = _launch_provider_process(
                     command,
+                    review_path,
                     cwd=review_path,
                     text=True,
                     encoding="utf-8",
@@ -1010,18 +1033,23 @@ class RuntimeCommandAdapter:
                     env=_review_provider_environment(Path(project), review_path, self.name),
                     **popen_session_kwargs(),
                 )
+            except ProviderValidationError:
+                cleanup_confirmed = True
+                return _review_infrastructure_failure(AGY_SETTINGS_UNAVAILABLE)
             except FileNotFoundError:
                 cleanup_confirmed = True  # construction failed without returning a child
                 return _review_infrastructure_failure("provider_unavailable")
-            except OSError:
-                cleanup_confirmed = True
-                raise
-            if store is not None and task_id is not None:
-                _record_capability_activations(
-                    store, task_id, self.name, "REVIEW", capability_audit
+            try:
+                if store is not None and task_id is not None:
+                    _record_capability_activations(
+                        store, task_id, self.name, "REVIEW", capability_audit
+                    )
+                note_review_identity(command_identity)
+                stdout, stderr, timed_out = communicate_bounded(
+                    proc, provider_input, provider_timeout_seconds(self.timeout_seconds)
                 )
-            note_review_identity(command_identity)
-            stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
+            finally:
+                _remove_temporary_provider_settings(temporary_settings)
             cleanup_confirmed = True
             note_call_usage(extract_usage(stdout, stderr))  # the caller records the call (it owns the store and the purpose)
             if timed_out:
@@ -1314,7 +1342,7 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
             if not any(args[index : index + 2] == ["--deny", rule] for index in range(len(args) - 1)):
                 args.extend(("--deny", rule))
         return args
-    if executable in {"agy", "agy.exe"}:
+    if executable in {"agy", "agy.exe", "agy.cmd", "agy.bat"}:
         args = _without_option(args, "--dangerously-skip-permissions")
         for flag in ("--sandbox", "--disable-slash-commands"):
             args = _ensure_flag(args, flag)
@@ -1333,7 +1361,20 @@ def _command_and_input(command: tuple[str, ...], prompt: str, *, structured_revi
                     return [*args[: index + 1], prompt, *args[index + 1 :]], ""
                 return args, ""
         return [args[0], "-p", prompt, *args[1:]], ""
-    if executable in {"agy", "agy.exe"}:
+    if executable in {"agy", "agy.exe", "agy.cmd", "agy.bat"}:
+        if executable in {"agy.cmd", "agy.bat"}:
+            for flag in ("-p", "--print", "--prompt"):
+                args = _without_prompt_option(args, flag)
+            args = _set_command_option(args, "--input-format", "stream-json")
+            args = _set_command_option(args, "--output-format", "stream-json")
+            if structured_review:
+                args = _set_command_option(args, "--json-schema", REVIEW_JSON_SCHEMA)
+            provider_input = json.dumps(
+                {"event": "user", "message": {"content": prompt}},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return args, provider_input + "\n"
         if structured_review:
             args = _ensure_arg(_ensure_arg(args, "--output-format", "json"), "--json-schema", REVIEW_JSON_SCHEMA)
         for flag in ("-p", "--print", "--prompt"):
@@ -1346,18 +1387,161 @@ def _command_and_input(command: tuple[str, ...], prompt: str, *, structured_revi
     return args, prompt
 
 
+def _agy_command_with_builtin_skill_access(
+    command: Sequence[str], cwd: Path
+) -> tuple[list[str], Path | None]:
+    """Give AGY read-only access to the verified bundled skills for one process.
+
+    AGY correctly treats package resources outside the task worktree as
+    non-workspace files.  StageMesh therefore derives an ephemeral settings
+    file from the operator-selected project settings, adds only the bundled
+    skill root as a readable path, and explicitly denies writes to that root.
+    The caller removes the temporary file after the provider exits.
+    """
+    args = list(command)
+    if not args or Path(args[0]).name.casefold() not in {"agy", "agy.exe", "agy.cmd", "agy.bat"}:
+        return args, None
+    option_index: int | None = None
+    settings_value: str | None = None
+    settings_equals = False
+    for index, argument in enumerate(args[1:], start=1):
+        if argument == "--settings" and index + 1 < len(args):
+            option_index, settings_value = index, args[index + 1]
+            break
+        if argument.startswith("--settings="):
+            option_index, settings_value = index, argument.split("=", 1)[1]
+            settings_equals = True
+            break
+    if option_index is None or not settings_value:
+        raise ProviderValidationError("AGY requires an explicit settings file for unattended skill access")
+    try:
+        if settings_value.lstrip().startswith("{"):
+            payload = json.loads(settings_value)
+        else:
+            settings_path = Path(settings_value).expanduser()
+            if not settings_path.is_absolute():
+                settings_path = cwd / settings_path
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderValidationError("AGY settings are unavailable or invalid") from exc
+    if not isinstance(payload, dict):
+        raise ProviderValidationError("AGY settings root must be an object")
+    permissions = payload.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        raise ProviderValidationError("AGY settings permissions must be an object")
+    allow = permissions.setdefault("allow", [])
+    deny = permissions.setdefault("deny", [])
+    ask = permissions.setdefault("ask", [])
+    if not isinstance(allow, list) or not all(isinstance(item, str) for item in allow):
+        raise ProviderValidationError("AGY settings permissions.allow must be a list of strings")
+    if not isinstance(deny, list) or not all(isinstance(item, str) for item in deny):
+        raise ProviderValidationError("AGY settings permissions.deny must be a list of strings")
+    if not isinstance(ask, list) or not all(isinstance(item, str) for item in ask):
+        raise ProviderValidationError("AGY settings permissions.ask must be a list of strings")
+    skill_root = SKILL_ROOT.resolve().as_posix()
+    read_rule = f"read_file({skill_root})"
+    write_rule = f"write_file({skill_root})"
+    if read_rule not in allow:
+        allow.append(read_rule)
+    if write_rule not in deny:
+        deny.append(write_rule)
+    descriptor, temporary_name = tempfile.mkstemp(prefix="stagemesh-agy-settings-", suffix=".json")
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+        try:
+            temporary_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    if settings_equals:
+        args[option_index] = f"--settings={temporary_path}"
+    else:
+        args[option_index + 1] = str(temporary_path)
+    return args, temporary_path
+
+
+def _remove_temporary_provider_settings(path: Path | None) -> None:
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
+def _launch_provider_process(
+    command: Sequence[str], settings_cwd: Path, **popen_kwargs: Any
+) -> tuple[subprocess.Popen[str], Path | None]:
+    """Launch a provider and remove derived settings if process creation is interrupted."""
+    launch_command, temporary_settings = _agy_command_with_builtin_skill_access(
+        command, settings_cwd
+    )
+    try:
+        proc = subprocess.Popen(launch_command, **popen_kwargs)
+    except BaseException:
+        _remove_temporary_provider_settings(temporary_settings)
+        raise
+    return proc, temporary_settings
+
+
 def _ensure_arg(args: list[str], flag: str, value: str) -> list[str]:
     if flag in args:
         return args
     return [*args, flag, value]
 
 
+def _without_prompt_option(args: list[str], flag: str) -> list[str]:
+    """Remove a prompt option and its value without consuming the next option."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument == flag:
+            index += 1
+            if index < len(args) and not args[index].startswith("-"):
+                index += 1
+            continue
+        if argument.startswith(f"{flag}="):
+            index += 1
+            continue
+        cleaned.append(argument)
+        index += 1
+    return cleaned
+
+
+def _set_command_option(args: list[str], flag: str, value: str) -> list[str]:
+    """Set one command option value, replacing either supported spelling."""
+    for index, argument in enumerate(args):
+        if argument == flag:
+            updated = list(args)
+            if index + 1 < len(updated):
+                updated[index + 1] = value
+            else:
+                updated.append(value)
+            return updated
+        if argument.startswith(f"{flag}="):
+            updated = list(args)
+            updated[index] = f"{flag}={value}"
+            return updated
+    return [*args, flag, value]
+
+
 def _provider_text_response(stdout: str) -> str:
+    event_response = provider_event_response(stdout)
+    if event_response is not None:
+        return event_response
     text = stdout.strip()
     try:
         payload = json.loads(text)
     except (TypeError, json.JSONDecodeError):
         return text
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("status"), str)
+        and payload["status"].casefold() != "success"
+    ):
+        return ""
     if isinstance(payload, dict) and isinstance(payload.get("text"), str):
         return payload["text"].strip()
     if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):

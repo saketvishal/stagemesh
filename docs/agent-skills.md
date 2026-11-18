@@ -91,8 +91,12 @@ validation limits. Reviews receive verification guidance only and remain read-on
 Codex/Claude receive these through their usual stdin prompt; Grok/Agy through their existing single-turn argument. Full bodies stay on
 disk, keeping CLI arguments bounded. Providers read the files with their normal tools, or Python `Path.read_text` if a native Skill
 tool is unavailable. Linked companions remain next to the selected skill. Example scripts are references, not runtime dependencies.
+For Agy, StageMesh derives a short-lived copy of the operator-selected settings for each provider process, grants only read access to
+the verified bundled-skill directory, explicitly denies writes to that directory, and deletes the copy when the process exits. The
+project settings file is not changed and no broad non-workspace or dangerous permission bypass is enabled.
 
-The wheel includes `stagemesh/skill_packs/`, including companion references, licenses and `manifest.json`. No runtime network fetch
+The source tree includes `stagemesh/skill_packs/`; the wheel contains the same verified resources in its compact `stagemesh/_sp/`
+layout, including companion references, licenses and `manifest.json`. No runtime network fetch
 or editable checkout is required. Before dispatch, StageMesh verifies each selected skill, companion and license against its exact
 upstream Git blob recorded in the manifest. If a selected resource is missing/corrupted, implementation returns FAILED or review
 returns INFRASTRUCTURE_FAILURE with `skill_pack_unavailable`; reinstall a complete runtime rather than continuing without guidance.
