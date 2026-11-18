@@ -37,7 +37,7 @@ from stagemesh.runtime_freshness import RuntimeFreshness
 from stagemesh.survivor_wave import RepoState, format_report, load_wave_contract, run_wave
 
 
-def test_full_ci_runs_once_for_feature_batch_and_main_remains_authoritative() -> None:
+def test_full_ci_runs_once_for_feature_batch_without_post_merge_duplicate() -> None:
     workflow = (
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
@@ -46,7 +46,7 @@ def test_full_ci_runs_once_for_feature_batch_and_main_remains_authoritative() ->
     assert "pull_request:" in trigger
     assert "merge_group:" in trigger
     assert "workflow_dispatch:" in trigger
-    assert "push:\n    branches: [main]" in trigger
+    assert "push:\n    branches: [main]" not in trigger
     assert "schedule:\n    - cron:" in trigger
 
 

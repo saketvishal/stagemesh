@@ -70,6 +70,32 @@ def test_review_git_history_is_readable_without_source_object_access(tmp_path):
     assert "+after" in diff.stdout
 
 
+def test_agy_review_patch_is_exact_and_fails_closed_when_oversized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import providers
+    from stagemesh.provider_acceptance import _manual_review_candidate, _prepare_smoke_project
+    from stagemesh.providers import _agy_review_patch, _prepare_review_checkout
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _prepare_smoke_project(source)
+    candidate = _manual_review_candidate(source)
+    review = tmp_path / "review"
+    assert _prepare_review_checkout(source, review, candidate) is None
+
+    patch, error = _agy_review_patch(review, candidate)
+
+    assert error is None
+    assert "provider-smoke.txt" in patch
+    assert "-before" in patch and "+after" in patch
+
+    monkeypatch.setattr(providers, "MAX_AGY_REVIEW_PATCH_CHARS", 10)
+    patch, error = _agy_review_patch(review, candidate)
+    assert patch == ""
+    assert error is not None and "exceeds the bounded prompt limit" in error
+
+
 def test_provider_smoke_runs_selected_provider_in_temporary_fixture(tmp_path: Path) -> None:
     project = tmp_path / "project"
     runtime = project / ".stagemesh"

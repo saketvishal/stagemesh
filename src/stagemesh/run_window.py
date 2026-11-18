@@ -1585,12 +1585,36 @@ def _finish(
 # --- the report -----------------------------------------------------------------------------------------------------------------
 
 
+def _format_scope_summary(scope: dict[str, Any]) -> str:
+    """Human summary; the persisted JSON report retains complete exclusions."""
+    label = scope.get("label")
+    selector = f"label {label!r}" if label else "unfiltered"
+    summary = (
+        f"{selector}; {scope.get('eligible', 0)} eligible of "
+        f"{scope.get('matching', 0)} matching; {scope.get('blocked', 0)} blocked; "
+        f"{scope.get('excluded', 0)} excluded"
+    )
+    dependencies = scope.get("out_of_scope_dependencies") or []
+    if dependencies:
+        summary += f"; {len(dependencies)} out-of-scope dependency blocker(s)"
+    if scope.get("source_fresh") is False:
+        summary += "; source scan is stale"
+    return summary
+
+
+def _format_task_ids(task_ids: list[str], *, limit: int = 8) -> str:
+    shown = task_ids[:limit]
+    rendered = ", ".join(shown)
+    remaining = len(task_ids) - len(shown)
+    return rendered + (f", ... (+{remaining} more)" if remaining else "")
+
+
 def format_window_report(report: WindowReport) -> str:
     verdict = "REFUSED TO START" if report.refused else "OK" if report.ok else "STOPPED"
     minutes = max(0.0, report.finished_at - report.started_at) / 60
     lines = [f"run window {report.window_id}: {verdict} ({minutes:.1f} min of {report.options.duration_seconds / 60:.0f}, mode {report.options.integration_mode}, ci-mode {report.options.ci_mode})"]
     if report.scope:
-        lines.append("scope: " + json.dumps(report.scope, sort_keys=True))
+        lines.append("scope: " + _format_scope_summary(report.scope))
     if report.stop_reason:
         lines.append(f"  stopped by: {report.stop_reason}")
     elif report.time_limit_reached:
@@ -1654,7 +1678,7 @@ def format_window_report(report: WindowReport) -> str:
         lines.append(
             "left alone: "  # one cause on several tasks is one entry, not a repeated request
             + "; ".join(
-                f"{', '.join(entry['tasks'])} ({entry['reason']})"
+                f"{_format_task_ids(entry['tasks'])} ({entry['reason']})"
                 for entry in consolidate_blockers(((task_id, str(reason)) for task_id, reason in ordered), exact=True)
             )
         )
