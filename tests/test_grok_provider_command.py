@@ -159,22 +159,25 @@ def test_unsafe_grok_tool_selection_stays_on_the_unattended_default() -> None:
     assert command[command.index("--tools") + 1] == "Read,Grep,Edit,Bash"
 
 
-def test_agy_provider_prompt_is_passed_as_print_argument() -> None:
+def test_agy_provider_prompt_is_passed_as_stream_json() -> None:
     command, stdin = _command_and_input(("agy", "--mode", "accept-edits"), "do the task")
 
-    assert command[:5] == ["agy", "--print", "do the task", "--mode", "accept-edits"]
+    assert command[:3] == ["agy", "--mode", "accept-edits"]
+    assert command[command.index("--input-format") + 1] == "stream-json"
+    assert command[command.index("--output-format") + 1] == "stream-json"
     assert "--sandbox" in command and "--disable-slash-commands" in command
-    assert stdin == ""
+    assert json.loads(stdin) == {"event": "user", "message": {"content": "do the task"}}
 
 
-def test_agy_review_uses_json_schema_print_mode() -> None:
+def test_agy_review_uses_json_schema_stream_mode() -> None:
     command, stdin = _command_and_input(("agy", "--mode", "accept-edits"), "review it", structured_review=True)
 
-    assert command[:3] == ["agy", "--print", "review it"]
-    assert command[command.index("--output-format") + 1] == "json"
+    assert command[:3] == ["agy", "--mode", "accept-edits"]
+    assert command[command.index("--input-format") + 1] == "stream-json"
+    assert command[command.index("--output-format") + 1] == "stream-json"
     schema = json.loads(command[command.index("--json-schema") + 1])
     assert schema["required"] == ["decision"]
-    assert stdin == ""
+    assert json.loads(stdin) == {"event": "user", "message": {"content": "review it"}}
 
 
 @pytest.mark.parametrize("equals_form", [False, True])
@@ -211,7 +214,22 @@ def test_agy_gets_ephemeral_read_only_access_to_bundled_skills(
     skill_root = SKILL_ROOT.resolve().as_posix()
     assert f"read_file({skill_root})" in derived["permissions"]["allow"]
     assert f"write_file({skill_root})" in derived["permissions"]["deny"]
+    skill_files = sorted(
+        path.resolve().as_posix()
+        for path in SKILL_ROOT.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    assert skill_files
+    assert all(
+        f"read_file({skill_file})" in derived["permissions"]["allow"]
+        for skill_file in skill_files
+    )
+    assert all(
+        f"write_file({skill_file})" in derived["permissions"]["deny"]
+        for skill_file in skill_files
+    )
     assert derived["permissions"]["allow"][0] == "read_file(.)"
+    assert "read_file(*)" not in derived["permissions"]["allow"]
     assert json.loads(settings.read_text(encoding="utf-8")) == original
 
     _remove_temporary_provider_settings(temporary)
@@ -242,7 +260,46 @@ def test_agy_inline_settings_receive_the_same_bounded_skill_access(tmp_path: Pat
     derived = json.loads(temporary.read_text(encoding="utf-8"))
     skill_root = SKILL_ROOT.resolve().as_posix()
     assert f"read_file({skill_root})" in derived["permissions"]["allow"]
+    assert any(
+        rule.startswith(f"read_file({skill_root}/")
+        for rule in derived["permissions"]["allow"]
+    )
     assert prepared[1] == f"--settings={temporary}"
+    _remove_temporary_provider_settings(temporary)
+
+
+def test_agy_skill_access_is_exact_deterministic_and_does_not_follow_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import providers
+
+    skill_root = tmp_path / "skills"
+    nested = skill_root / "nested"
+    nested.mkdir(parents=True)
+    first = skill_root / "a.md"
+    second = nested / "z.md"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    monkeypatch.setattr(providers, "SKILL_ROOT", skill_root)
+    inline = json.dumps(
+        {"toolPermission": "proceed-in-sandbox", "permissions": {"allow": [], "deny": [], "ask": []}}
+    )
+
+    _prepared, temporary = _agy_command_with_builtin_skill_access(
+        ["agy", f"--settings={inline}"], tmp_path
+    )
+
+    assert temporary is not None
+    derived = json.loads(temporary.read_text(encoding="utf-8"))
+    root = skill_root.resolve().as_posix()
+    exact_reads = [f"read_file({first.resolve().as_posix()})", f"read_file({second.resolve().as_posix()})"]
+    exact_writes = [
+        f"write_file({first.resolve().as_posix()})",
+        f"write_file({second.resolve().as_posix()})",
+    ]
+    assert derived["permissions"]["allow"] == [f"read_file({root})", *exact_reads]
+    assert derived["permissions"]["deny"] == [f"write_file({root})", *exact_writes]
+    assert "read_file(*)" not in derived["permissions"]["allow"]
     _remove_temporary_provider_settings(temporary)
 
 

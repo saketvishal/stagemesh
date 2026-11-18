@@ -85,6 +85,39 @@ def test_bad_durations_are_rejected(text: str) -> None:
         rw.parse_duration(text)
 
 
+def test_human_scope_summary_omits_full_exclusion_dump() -> None:
+    scope = {
+        "label": "mobile",
+        "matching": 2,
+        "eligible": 0,
+        "blocked": 2,
+        "excluded": 129,
+        "exclusions": [
+            {"task_id": str(task_id), "reason": "blocked"}
+            for task_id in range(1, 130)
+        ],
+        "out_of_scope_dependencies": [],
+        "source_fresh": True,
+    }
+
+    report = rw.WindowReport("scope-test", rw.WindowOptions(), scope=scope)
+    human = rw.format_window_report(report)
+
+    assert rw._format_scope_summary(scope) == (
+        "label 'mobile'; 0 eligible of 2 matching; 2 blocked; 129 excluded"
+    )
+    assert "scope: label 'mobile'; 0 eligible of 2 matching" in human
+    assert "task_id" not in human
+    assert report.to_dict()["scope"] == scope
+
+
+def test_human_left_alone_task_ids_are_bounded() -> None:
+    rendered = rw._format_task_ids([str(task_id) for task_id in range(1, 130)])
+
+    assert rendered == "1, 2, 3, 4, 5, 6, 7, 8, ... (+121 more)"
+    assert len(rendered) < 60
+
+
 def test_selection_picks_only_runnable_tasks_and_never_blocked_parked_or_claimed_ones(tmp_path: Path) -> None:
     store, _project = make_store(tmp_path, ["10", "2", "T-blocked", "T-parked", "T-claimed", "T-done"])
     store.advance_task("T-done", Stage.DONE)

@@ -157,9 +157,17 @@ def test_init_generates_least_privilege_project_settings_for_discovered_agy(
     assert settings["toolPermission"] == "proceed-in-sandbox"
     assert settings["enableTerminalSandbox"] is True
     assert settings["allowNonWorkspaceAccess"] is False
-    assert {"write_file(.git/)", "read_url(*)", "execute_url(*)", "mcp(*)"} <= set(
-        settings["permissions"]["deny"]
-    )
+    assert "$schema" not in settings
+    assert settings["permissions"]["allow"] == []
+    assert {
+        "write_file(.git/)",
+        "command(git commit)",
+        "command(git push)",
+        "command(git reset)",
+        "read_url(*)",
+        "execute_url(*)",
+        "mcp(*)",
+    } <= set(settings["permissions"]["deny"])
 
     custom = {**settings, "permissions": {**settings["permissions"], "allow": ["read_file(extra/)"]}}
     settings_path.write_text(json.dumps(custom), encoding="utf-8")
@@ -173,6 +181,43 @@ def test_init_generates_least_privilege_project_settings_for_discovered_agy(
     assert repaired["hardened"] == ["agy"]
     assert settings_path.is_file()
     assert shlex.split(load_config(tmp_path).provider_commands["agy"])[-1] == str(settings_path)
+
+
+def test_init_migrates_only_the_exact_0617_generated_agy_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / ".stagemesh/config.json"
+    path.parent.mkdir()
+    bundled = provider_catalog.PROVIDER_CATALOG[3].command
+    settings_path = (tmp_path / ".stagemesh/agy-settings.json").resolve()
+    path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "agy": {
+                        "command": f"{bundled} --settings {shlex.quote(str(settings_path))}",
+                        "capabilities": ["IMPLEMENT", "REVIEW"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy = cli_module._legacy_0617_generated_agy_settings()
+    settings_path.write_text(json.dumps(legacy), encoding="utf-8")
+    monkeypatch.setattr(cli_module, "discovered_provider_entries", dict)
+
+    assert cli_module.main(["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]) == 0
+
+    report = json.loads(capsys.readouterr().out)["provider_registry"]
+    assert report["hardened"] == ["agy"]
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == cli_module._generated_agy_settings()
+
+    customized = {**legacy, "customSetting": True}
+    settings_path.write_text(json.dumps(customized), encoding="utf-8")
+    assert cli_module.main(["--project", str(tmp_path), "init", "--json", "--allow-incomplete"]) == 0
+    capsys.readouterr()
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == customized
 
 
 def test_init_repairs_only_stagemesh_managed_agy_settings_after_project_move(

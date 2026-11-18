@@ -325,45 +325,72 @@ def _ensure_project_agy_settings(project: Path, providers: dict[str, object]) ->
     if command != bundled and not _is_managed_agy_command(command, settings_path, bundled):
         return False
     changed = command != managed_command
+    settings = _generated_agy_settings()
     if not settings_path.exists():
-        settings = {
-            "$schema": "https://antigravity.google/schemas/v1/settings.json",
-            "toolPermission": "proceed-in-sandbox",
-            "enableTerminalSandbox": True,
-            "allowNonWorkspaceAccess": False,
-            "permissions": {
-                "allow": [],
-                "deny": [
-                    "write_file(.git/)",
-                    "write_file(.stagemesh/)",
-                    "command(git commit)",
-                    "command(git push)",
-                    "command(git reset)",
-                    "command(git clean)",
-                    "command(git checkout)",
-                    "command(git switch)",
-                    "command(git merge)",
-                    "command(git rebase)",
-                    "command(git cherry-pick)",
-                    "command(git branch)",
-                    "command(git tag)",
-                    "read_url(*)",
-                    "execute_url(*)",
-                    "mcp(*)",
-                ],
-                "ask": [],
-            },
-        }
-        temporary = settings_path.with_name(f".{settings_path.name}.{os.getpid()}.tmp")
-        try:
-            temporary.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-            if not settings_path.exists():
-                os.replace(temporary, settings_path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _write_generated_agy_settings(settings_path, settings, replace=False)
         changed = True
+    else:
+        try:
+            existing_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            existing_settings = None
+        legacy_settings = _legacy_0617_generated_agy_settings()
+        if existing_settings == legacy_settings:
+            _write_generated_agy_settings(settings_path, settings, replace=True)
+            changed = True
     entry["command"] = managed_command
     return changed
+
+
+def _generated_agy_settings() -> dict[str, object]:
+    """Return only settings accepted by the bundled headless AGY CLI."""
+    return {
+        "toolPermission": "proceed-in-sandbox",
+        "enableTerminalSandbox": True,
+        "allowNonWorkspaceAccess": False,
+        "permissions": {
+            "allow": [],
+            "deny": [
+                "write_file(.git/)",
+                "write_file(.stagemesh/)",
+                "command(git commit)",
+                "command(git push)",
+                "command(git reset)",
+                "command(git clean)",
+                "command(git checkout)",
+                "command(git switch)",
+                "command(git merge)",
+                "command(git rebase)",
+                "command(git cherry-pick)",
+                "command(git branch)",
+                "command(git tag)",
+                "read_url(*)",
+                "execute_url(*)",
+                "mcp(*)",
+            ],
+            "ask": [],
+        },
+    }
+
+
+def _legacy_0617_generated_agy_settings() -> dict[str, object]:
+    settings = _generated_agy_settings()
+    return {
+        "$schema": "https://antigravity.google/schemas/v1/settings.json",
+        **settings,
+    }
+
+
+def _write_generated_agy_settings(
+    settings_path: Path, settings: dict[str, object], *, replace: bool
+) -> None:
+    temporary = settings_path.with_name(f".{settings_path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        if replace or not settings_path.exists():
+            os.replace(temporary, settings_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _is_managed_agy_command(command: str, settings_path: Path, bundled: str) -> bool:
@@ -2876,8 +2903,6 @@ def _prepare_selection_scope(store, project, config, args, *, task_id=None):
                 _recover_all_dead(store)
             refresh(store)
             args.scope_report = preview(store, project, _selection_policy(config, args))
-            if not getattr(args, "json", False):
-                print("active scope: " + json.dumps(args.scope_report, sort_keys=True), file=sys.stderr)
         return scope
     except ScopeError as exc:
         if getattr(args, "json", False):

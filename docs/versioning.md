@@ -1,10 +1,12 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.18 restores compact live
-run-window output by rate-limiting scheduler-capacity chatter without delaying
-task, provider, review, failure, or heartbeat events.
-See the [0.6.18 release notes](releases/0.6.18.md),
+files as reinstallable package points. Version 0.6.19 corrects Agy's Windows
+headless permission boundary, keeps large scope diagnostics out of normal
+terminal output, and removes the redundant post-merge CI run while retaining
+pull-request, merge-queue, scheduled, and manual validation.
+See the [0.6.19 release notes](releases/0.6.19.md),
+[0.6.18 release notes](releases/0.6.18.md),
 [0.6.17 release notes](releases/0.6.17.md),
 [0.6.16 release notes](releases/0.6.16.md),
 [0.6.15 release notes](releases/0.6.15.md),
@@ -25,14 +27,14 @@ See the [0.6.18 release notes](releases/0.6.18.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.18` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.19` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.18
+python -m pip install --no-cache-dir stagemesh==0.6.19
 ```
 
-The preceding `0.6.17` release remains available for rollback. The older
+The preceding `0.6.18` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -41,6 +43,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.19`: compact scope output, exact headless Agy permissions, and no duplicate post-merge CI.
 - `0.6.18`: compact, rate-limited run-window capacity progress.
 - `0.6.17`: safe automatic Agy setup and read-only bundled-skill access.
 - `0.6.16`: governed SDD initialization, truthful readiness, and Unicode-safe Windows output.

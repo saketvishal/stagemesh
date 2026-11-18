@@ -146,6 +146,7 @@ FRONTEND_DESIGN_DISCIPLINE = (
 
 MAX_SPEC_PROMPT_CHARS = 12000
 MAX_SPEC_PROMPT_CHARS_PER_FILE = 5000
+MAX_AGY_REVIEW_PATCH_CHARS = 120000
 
 
 class ProviderValidationError(ValueError):
@@ -970,6 +971,19 @@ class RuntimeCommandAdapter:
                 return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
             except CapabilityRegistryError as exc:
                 return _review_infrastructure_failure(f"capability_unavailable: {exc}")
+            if self.name.casefold() == "agy":
+                patch, patch_error = _agy_review_patch(review_path, candidate_sha)
+                if patch_error:
+                    return _review_infrastructure_failure(patch_error)
+                review_prompt += (
+                    "\nAGY headless review boundary:\n"
+                    "- Do not invoke terminal, shell, Git, browser, file URL, web, or MCP tools.\n"
+                    "- StageMesh prepared the exact candidate patch below and owns Git operations.\n"
+                    "- Use native read-file tools inside the review workspace only when more file context is needed.\n"
+                    "- Base the structured verdict on this patch and the bounded workspace context.\n\n"
+                    "Exact candidate patch:\n```diff\n"
+                    f"{patch}\n```\n"
+                )
             configured_command = self.command_for("review")
             evidence_mode = skill_evidence_mode(review_path)
             mcp_requested = any(item.get("kind") == "mcp" for item in capability_audit)
@@ -1362,28 +1376,18 @@ def _command_and_input(command: tuple[str, ...], prompt: str, *, structured_revi
                 return args, ""
         return [args[0], "-p", prompt, *args[1:]], ""
     if executable in {"agy", "agy.exe", "agy.cmd", "agy.bat"}:
-        if executable in {"agy.cmd", "agy.bat"}:
-            for flag in ("-p", "--print", "--prompt"):
-                args = _without_prompt_option(args, flag)
-            args = _set_command_option(args, "--input-format", "stream-json")
-            args = _set_command_option(args, "--output-format", "stream-json")
-            if structured_review:
-                args = _set_command_option(args, "--json-schema", REVIEW_JSON_SCHEMA)
-            provider_input = json.dumps(
-                {"event": "user", "message": {"content": prompt}},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            return args, provider_input + "\n"
-        if structured_review:
-            args = _ensure_arg(_ensure_arg(args, "--output-format", "json"), "--json-schema", REVIEW_JSON_SCHEMA)
         for flag in ("-p", "--print", "--prompt"):
-            if flag in args:
-                index = args.index(flag)
-                if index == len(args) - 1 or args[index + 1].startswith("-"):
-                    return [*args[: index + 1], prompt, *args[index + 1 :]], ""
-                return args, ""
-        return [args[0], "--print", prompt, *args[1:]], ""
+            args = _without_prompt_option(args, flag)
+        args = _set_command_option(args, "--input-format", "stream-json")
+        args = _set_command_option(args, "--output-format", "stream-json")
+        if structured_review:
+            args = _set_command_option(args, "--json-schema", REVIEW_JSON_SCHEMA)
+        provider_input = json.dumps(
+            {"event": "user", "message": {"content": prompt}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return args, provider_input + "\n"
     return args, prompt
 
 
@@ -1438,13 +1442,34 @@ def _agy_command_with_builtin_skill_access(
         raise ProviderValidationError("AGY settings permissions.deny must be a list of strings")
     if not isinstance(ask, list) or not all(isinstance(item, str) for item in ask):
         raise ProviderValidationError("AGY settings permissions.ask must be a list of strings")
-    skill_root = SKILL_ROOT.resolve().as_posix()
+    try:
+        resolved_skill_root = SKILL_ROOT.resolve(strict=True)
+        skill_files: list[str] = []
+        for candidate in SKILL_ROOT.rglob("*"):
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            resolved_candidate = candidate.resolve(strict=True)
+            if not resolved_candidate.is_relative_to(resolved_skill_root):
+                raise ProviderValidationError(
+                    "bundled AGY skill resource resolves outside the verified skill root"
+                )
+            skill_files.append(resolved_candidate.as_posix())
+    except OSError as exc:
+        raise ProviderValidationError("bundled AGY skill resources are unavailable") from exc
+    skill_root = resolved_skill_root.as_posix()
     read_rule = f"read_file({skill_root})"
     write_rule = f"write_file({skill_root})"
     if read_rule not in allow:
         allow.append(read_rule)
     if write_rule not in deny:
         deny.append(write_rule)
+    for skill_file in sorted(skill_files):
+        exact_read_rule = f"read_file({skill_file})"
+        exact_write_rule = f"write_file({skill_file})"
+        if exact_read_rule not in allow:
+            allow.append(exact_read_rule)
+        if exact_write_rule not in deny:
+            deny.append(exact_write_rule)
     descriptor, temporary_name = tempfile.mkstemp(prefix="stagemesh-agy-settings-", suffix=".json")
     temporary_path = Path(temporary_name)
     try:
@@ -1920,6 +1945,11 @@ def _build_task_prompt(
             policy_project, effective_contract, planning_baseline_sha
         )
         policy_text = agent_policy_prompt(policy)
+    git_guidance = (
+        "- Do not invoke terminal, shell, or Git. Use native file tools; StageMesh owns Git and validation.\n"
+        if provider_name and provider_name.casefold() == "agy"
+        else "- You may use read-only git commands such as status, diff, log, show, and rev-parse.\n"
+    )
     return (
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
@@ -1938,7 +1968,7 @@ def _build_task_prompt(
         "Workspace rules:\n"
         "- Edit files only. Do not run git commit, checkout, switch, reset, rebase, merge, cherry-pick, branch, tag, "
         "amend, or any command that moves HEAD or rewrites history.\n"
-        "- You may use read-only git commands such as status, diff, log, show, and rev-parse.\n"
+        f"{git_guidance}"
         "- Leave the finished changes in the working tree. StageMesh owns all Git commits and will create the "
         "implementation candidate itself.\n"
         "- If no code change is needed, explain why and leave the tree unchanged.\n"
@@ -2182,6 +2212,36 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
 def _git_output(path: Path, *args: str) -> str:
     result = subprocess.run(["git", *args], cwd=path, text=True, capture_output=True, check=False)
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _agy_review_patch(review_path: Path, candidate_sha: str) -> tuple[str, str | None]:
+    result = subprocess.run(
+        [
+            "git",
+            "show",
+            "--format=fuller",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+            candidate_sha,
+        ],
+        cwd=review_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = _bounded_process_output(result)
+        return "", "AGY review patch preparation failed" + (f": {detail}" if detail else "")
+    patch = result.stdout.rstrip()
+    if len(patch) > MAX_AGY_REVIEW_PATCH_CHARS:
+        return "", (
+            "AGY review patch exceeds the bounded prompt limit; use a smaller candidate or "
+            "a different authorized reviewer"
+        )
+    return patch, None
 
 
 def _tracked_content_changed(path: Path) -> bool:

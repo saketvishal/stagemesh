@@ -105,6 +105,9 @@ def test_remediation_skill_cannot_take_over_external_review_or_delivery() -> Non
 
     assert tuple(resources(prompt)) == (RECEIVE_REVIEW, DEBUG, TDD, VERIFY)
     assert "Do not push, publish, post review replies, or contact external systems" in prompt
+    assert "Use the provider's native filesystem/read-file tool when available" in prompt
+    assert "Never open skill paths in a browser or file URL" in prompt
+    assert "never use web, MCP, or terminal tools to read them" in prompt
 
 
 def test_review_receives_verification_only() -> None:
@@ -113,6 +116,18 @@ def test_review_receives_verification_only() -> None:
     assert select_skills(
         "Fix UI regression", contract("Fix UI regression", "web/Intake.tsx"), stage="review"
     ) == (VERIFY,)
+
+
+def test_agy_task_prompt_forbids_terminal_and_keeps_git_with_stagemesh() -> None:
+    prompt = _build_task_prompt(
+        "agy-task",
+        task_row("Fix parser"),
+        provider_name="agy",
+    )
+
+    assert "Do not invoke terminal, shell, or Git" in prompt
+    assert "StageMesh owns Git and validation" in prompt
+    assert "You may use read-only git commands" not in prompt
 
 
 def test_builtin_skill_inventory_reports_exact_pinned_pack() -> None:
@@ -370,7 +385,11 @@ def test_each_provider_receives_readable_selected_skill_files(provider: str) -> 
         contract=contract("Fix UI regression", "web/Intake.tsx"),
     )
     command, stdin = _command_and_input((provider,), prompt)
-    delivered = stdin or command[command.index("--print" if provider == "agy" else "-p") + 1]
+    delivered = (
+        json.loads(stdin)["message"]["content"]
+        if provider == "agy"
+        else stdin or command[command.index("-p") + 1]
+    )
 
     assert tuple(resources(delivered)) == (FRONTEND, DEBUG, TDD, VERIFY)
     for path in resources(delivered).values():

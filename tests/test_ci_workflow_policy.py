@@ -151,10 +151,10 @@ def test_full_mode_has_one_authoritative_regression_and_published_evidence() -> 
         assert removed_group not in text
 
 
-def test_main_push_is_smoke_while_schedule_and_manual_runs_are_full() -> None:
+def test_pr_merge_group_schedule_and_manual_runs_avoid_post_merge_duplicate() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     pre_jobs = text[: text.index("\njobs:\n")]
-    assert "  push:\n    branches: [main]" in pre_jobs
+    assert "  push:\n    branches: [main]" not in pre_jobs
     assert "  schedule:\n    - cron:" in pre_jobs
     assert "  workflow_dispatch:\n    inputs:\n      mode:" in pre_jobs
     assert "default: full" in pre_jobs and "options: [full]" in pre_jobs
