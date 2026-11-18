@@ -186,6 +186,7 @@ from .task_sources import (
     GitHubOutboundSync,
     LocalBacklogSource,
     TaskSourceValidationError,
+    reconcile_project_spec_dependencies,
     sync_source,
     task_sources_from_config,
 )
@@ -1188,13 +1189,20 @@ class _SetupError(Exception):
 
 
 def _sync_all_sources(
-    store: Store, project: Path, config, targeted_task_id: str | None, *, preserve_existing_dependencies: bool = False,
+    store: Store,
+    project: Path,
+    config,
+    targeted_task_id: str | None,
+    *,
+    preserve_existing_dependencies: bool = False,
+    integration_ref: str | None = None,
 ) -> None:
     backlog = project / ".stagemesh" / "backlog.json"
     sync_source(store, _filter_targeted_tasks(LocalBacklogSource(backlog).discover(), targeted_task_id),
                 preserve_existing_dependencies=preserve_existing_dependencies)
     for source in task_sources_from_config(config):
-        sync_source(store, _filter_targeted_tasks(source.discover(), targeted_task_id),
+        discovered = reconcile_project_spec_dependencies(source.discover(), project, integration_ref)
+        sync_source(store, _filter_targeted_tasks(discovered, targeted_task_id),
                     preserve_existing_dependencies=preserve_existing_dependencies)
 
 
@@ -1873,6 +1881,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     from .run_window import (
         Check,
         WindowOptions,
+        format_left_alone,
         format_window_report,
         parse_duration,
         planned_selection,
@@ -1955,11 +1964,18 @@ def command_run_window(args: argparse.Namespace) -> int:
     store.migrate()
     try:
         try:
-            scope = _prepare_selection_scope(store, project, config, args)
+            scope = _prepare_selection_scope(store, project, config, args, integration_ref=base_ref)
         except _SetupError as exc:
             return exc.code
         if scope is None:
-            _sync_all_sources(store, project, config, None, preserve_existing_dependencies=True)
+            _sync_all_sources(
+                store,
+                project,
+                config,
+                None,
+                preserve_existing_dependencies=True,
+                integration_ref=base_ref,
+            )
         else:
             options.required_label = scope.label
             options.scope_id = scope.id
@@ -2010,8 +2026,8 @@ def command_run_window(args: argparse.Namespace) -> int:
                 for c in checks:
                     print(f"[{'ok' if c.ok else 'FAIL' if c.fatal else 'warn'}] {c.name}: {c.detail}")
                 print("would run: " + (", ".join(picked) or "nothing (no eligible work)"))
-                for task_id, reason in sorted(skipped.items()):
-                    print(f"left alone {task_id}: {reason}")
+                if skipped:
+                    print(format_left_alone(skipped))
             return 0 if payload["ok"] else 2
         if not args.no_progress:  # progress goes to stderr, so the report (and --json) on stdout is unchanged
             from .progress import ProgressReporter, with_progress
@@ -2883,7 +2899,7 @@ def _selection_policy(config: StageMeshConfig, args: argparse.Namespace) -> Task
     return replace(config.task_selection, required_label=label) if label else config.task_selection
 
 
-def _prepare_selection_scope(store, project, config, args, *, task_id=None):
+def _prepare_selection_scope(store, project, config, args, *, task_id=None, integration_ref=None):
     from .selection_scope import ScopeError, attach, preview, refresh, resolve_scope
 
     try:
@@ -2897,7 +2913,7 @@ def _prepare_selection_scope(store, project, config, args, *, task_id=None):
                 raise ScopeError("saved label scope cannot be combined with --focus, --sprint or --once")
             args.label = scope.label
             args.resume_scope = scope.id
-            attach(store, project, config, scope)
+            attach(store, project, config, scope, integration_ref=integration_ref)
             if not getattr(args, "plan", False):
                 from .run_ready import _recover_all_dead
                 _recover_all_dead(store)

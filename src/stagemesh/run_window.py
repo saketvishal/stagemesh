@@ -945,7 +945,7 @@ def run_window(
         from .selection_scope import ScopeError, attach, refresh, resolve_scope
         try:
             scope = resolve_scope(store, label=options.required_label, resume=options.scope_id)
-            attach(store, project, config, scope)
+            attach(store, project, config, scope, integration_ref=base_ref)
             refresh(store)
             options.required_label, options.scope_id = scope.label, scope.id
         except ScopeError as exc:
@@ -1236,6 +1236,7 @@ def run_window(
                 try:
                     from .task_sources import (
                         LocalBacklogSource,
+                        reconcile_project_spec_dependencies,
                         sync_source,
                         task_sources_from_config,
                     )
@@ -1243,7 +1244,8 @@ def run_window(
                     if backlog.is_file():
                         sync_source(store, LocalBacklogSource(backlog).discover(), preserve_existing_dependencies=True)
                     for source in task_sources_from_config(config):
-                        sync_source(store, source.discover(), preserve_existing_dependencies=True)
+                        discovered = reconcile_project_spec_dependencies(source.discover(), project, base_ref)
+                        sync_source(store, discovered, preserve_existing_dependencies=True)
                 except Exception:
                     pass
             fresh, skipped = (
@@ -1609,6 +1611,15 @@ def _format_task_ids(task_ids: list[str], *, limit: int = 8) -> str:
     return rendered + (f", ... (+{remaining} more)" if remaining else "")
 
 
+def format_left_alone(not_selected: dict[str, str]) -> str:
+    """Compact same-reason task exclusions for human output."""
+    ordered = sorted(not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))
+    return "left alone: " + "; ".join(
+        f"{_format_task_ids(entry['tasks'])} ({entry['reason']})"
+        for entry in consolidate_blockers(ordered, exact=True)
+    )
+
+
 def format_window_report(report: WindowReport) -> str:
     verdict = "REFUSED TO START" if report.refused else "OK" if report.ok else "STOPPED"
     minutes = max(0.0, report.finished_at - report.started_at) / 60
@@ -1674,14 +1685,7 @@ def format_window_report(report: WindowReport) -> str:
     for entry in report.continued:
         lines.append(f"  resumed {entry['task_id']} after the step cap (run {entry['attempt'] + 1}): stage {entry['stage']}, candidate {str(entry['candidate_sha'])[:7]}")
     if report.not_selected:
-        ordered = sorted(report.not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))
-        lines.append(
-            "left alone: "  # one cause on several tasks is one entry, not a repeated request
-            + "; ".join(
-                f"{_format_task_ids(entry['tasks'])} ({entry['reason']})"
-                for entry in consolidate_blockers(((task_id, str(reason)) for task_id, reason in ordered), exact=True)
-            )
-        )
+        lines.append(format_left_alone(report.not_selected))
     for entry in report.follow_ups:
         if entry.get("state") in ("registered", "existing"):
             where = "scheduled" if entry.get("scheduled") else "NOT scheduled (" + str(entry.get("reason", "")) + ")"

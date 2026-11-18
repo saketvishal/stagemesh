@@ -14,7 +14,12 @@ from pathlib import Path
 from .audit import record_audit
 from .auto_plan import cached_state, task_labels
 from .domain import Stage
-from .task_sources import LocalBacklogSource, sync_source, task_sources_from_config
+from .task_sources import (
+    LocalBacklogSource,
+    reconcile_project_spec_dependencies,
+    sync_source,
+    task_sources_from_config,
+)
 
 
 class ScopeError(ValueError):
@@ -149,7 +154,7 @@ def refresh(store):
         callback()
 
 
-def attach(store, project: Path, config, scope):
+def attach(store, project: Path, config, scope, *, integration_ref: str | None = None):
     if scope is None:
         return
     store.selection_scope = scope
@@ -171,6 +176,7 @@ def attach(store, project: Path, config, scope):
                     store.selection_catalog = label_catalog(source.source)
                 discovered.extend(tasks)
             # Publish only after every configured source was read successfully.
+            discovered = reconcile_project_spec_dependencies(discovered, project, integration_ref)
             sync_source(store, discovered, preserve_existing_dependencies=True)
             store.selection_seen = {(task.source, task.source_id) for task in discovered}
             store.selection_discovered = discovered
