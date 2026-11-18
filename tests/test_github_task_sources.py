@@ -26,13 +26,16 @@ from stagemesh.task_sources import (
 _SPEC_PIN = "5d440c450f52253a81cef81c04dd272790bb7299"
 
 
-def _completed_spec_pair(*, state="CLOSED", status="DONE", pin=_SPEC_PIN, include_other=True):
+def _completed_spec_pair(
+    *, state="CLOSED", status="DONE", pin=_SPEC_PIN, include_other=True, declare_spec=True
+):
+    dependencies = (("137",) if declare_spec else ()) + (("20",) if include_other else ())
     implementation = DiscoveredTask(
         "github",
         "138",
         "implementation",
         labels=("stagemesh:ready",),
-        dependencies=("137", "20") if include_other else ("137",),
+        dependencies=dependencies,
         body=(
             "Governing specification issue: #137\n"
             f"Approved specification commit: `{pin}`\n"
@@ -173,7 +176,7 @@ def test_github_dependency_parser_does_not_treat_pull_requests_as_issue_dependen
 
 def test_completed_approved_merged_pinned_spec_satisfies_only_its_bound_dependency():
     tasks = reconcile_completed_spec_dependencies(
-        _completed_spec_pair(), commit_is_merged=lambda commit: commit == _SPEC_PIN
+        _completed_spec_pair(declare_spec=False), commit_is_merged=lambda commit: commit == _SPEC_PIN
     )
 
     assert tasks[0].dependencies == ("20",)
@@ -185,7 +188,7 @@ def test_project_reconciliation_proves_the_pin_is_on_the_integration_branch(tmp_
     pin = commit(project, {"spec.md": "approved\n"}, "merge approved spec")
 
     tasks = reconcile_project_spec_dependencies(
-        _completed_spec_pair(pin=pin), project, "refs/heads/main"
+        _completed_spec_pair(pin=pin, declare_spec=False), project, "refs/heads/main"
     )
 
     assert tasks[0].dependencies == ("20",)
@@ -200,10 +203,10 @@ def test_project_reconciliation_rejects_a_pin_that_exists_only_off_integration(t
     git(project, "switch", "-q", "main")
 
     tasks = reconcile_project_spec_dependencies(
-        _completed_spec_pair(pin=pin), project, "refs/heads/main"
+        _completed_spec_pair(pin=pin, declare_spec=False), project, "refs/heads/main"
     )
 
-    assert tasks[0].dependencies == ("137", "20")
+    assert tasks[0].dependencies == ("20", "137")
     assert tasks[0].satisfied_dependencies == ()
 
 
@@ -243,7 +246,8 @@ def test_verified_spec_completion_clears_stale_edge_during_preserving_refresh(tm
         assert store.incomplete_dependencies("138") == ["137"]
 
         discovered = reconcile_completed_spec_dependencies(
-            _completed_spec_pair(include_other=False), commit_is_merged=lambda _commit: True
+            _completed_spec_pair(include_other=False, declare_spec=False),
+            commit_is_merged=lambda _commit: True,
         )
         sync_source(store, discovered, preserve_existing_dependencies=True)
 
@@ -268,7 +272,7 @@ def test_normal_source_refresh_reconciles_completed_spec_dependency(tmp_path, mo
 
     class Source:
         def discover(self):
-            return _completed_spec_pair(pin=pin, include_other=False)
+            return _completed_spec_pair(pin=pin, include_other=False, declare_spec=False)
 
     try:
         sync_source(
@@ -299,6 +303,48 @@ def test_normal_source_refresh_reconciles_completed_spec_dependency(tmp_path, mo
 
         assert store.incomplete_dependencies("138") == []
         assert Scheduler(store).decision("138").eligible
+    finally:
+        store.close()
+
+
+def test_normal_refresh_restores_governing_spec_hold_until_pin_is_on_integration(
+    tmp_path, monkeypatch
+):
+    project = init_repo(tmp_path / "project")
+    commit(project, {"base.md": "base\n"}, "base")
+    git(project, "switch", "-q", "-c", "unmerged-spec")
+    pin = commit(project, {"spec.md": "not merged\n"}, "unmerged spec")
+    git(project, "switch", "-q", "main")
+    store = _store(tmp_path)
+
+    class Source:
+        def discover(self):
+            return _completed_spec_pair(pin=pin, include_other=False, declare_spec=False)
+
+    try:
+        sync_source(
+            store,
+            [
+                DiscoveredTask(
+                    "github", "137", "unfinished spec", eligible=False, labels=("stagemesh:blocked",)
+                ),
+                DiscoveredTask("github", "138", "implementation", labels=("stagemesh:ready",)),
+            ],
+        )
+        assert store.incomplete_dependencies("138") == []
+        monkeypatch.setattr("stagemesh.cli.task_sources_from_config", lambda _config: [Source()])
+
+        _sync_all_sources(
+            store,
+            project,
+            None,
+            None,
+            preserve_existing_dependencies=True,
+            integration_ref="refs/heads/main",
+        )
+
+        assert store.incomplete_dependencies("138") == ["137"]
+        assert Scheduler(store).decision("138").reason == "waiting for 137"
     finally:
         store.close()
 
