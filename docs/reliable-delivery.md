@@ -104,6 +104,17 @@ may write only its task challenge artifact; it cannot modify the spec, approval,
 or production source. `task-doctor` reports paths, presence, policy and status
 without exposing challenge or spec contents.
 
+For a challenge with a verified receipt older than the contract-aware review
+cutover, or after the frozen planning spec changes, an operator may run
+`stagemesh refresh-planning-challenge --task <id> --reason "<what changed>"`.
+The command refuses accepted or approved planning and any task with active work.
+For a non-accepting challenge it moves the exact old artifact into project-local
+history, records its digest and the operator's reason in the audit trail, and lets
+the next normal run invoke the configured independent challenger again. A challenge
+already produced by the current protocol cannot be re-rolled: its decisions must be
+resolved or its planning inputs revised. StageMesh-launched provider processes are
+refused, and StageMesh never silently replaces a challenge.
+
 After admission, the exact-contract/exact-baseline accepted spec and accepted
 challenge are delivered as bounded JSON data to the initial implementation and
 independent review prompts. Review compares the delivered capability with the

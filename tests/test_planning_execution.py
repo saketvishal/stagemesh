@@ -21,13 +21,18 @@ from stagemesh.planning_execution import (
 )
 from stagemesh.recovery import task_doctor
 from stagemesh.spec_planning import (
+    CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH,
     NEXT_APPROVE_SPEC,
     NEXT_REVISE_SPEC,
+    PLANNING_CHALLENGE_RETIRED_EVENT,
+    PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
+    PlanningChallengeRefreshRefusal,
     freeze_planning_challenge,
     freeze_planning_spec,
     load_planning_artifacts,
     load_planning_challenge,
     planning_artifact_paths,
+    retire_planning_challenge,
 )
 
 PROVIDER = r'''
@@ -175,6 +180,7 @@ def test_run_ready_executes_distinct_roles_then_stops_for_human_approval(tmp_pat
     assert receipts["challenger"]["provider_invoked"] is True
     assert receipts["planner"]["execution_verified"] is True
     assert receipts["challenger"]["execution_verified"] is True
+    assert receipts["challenger"]["review_protocol_version"] == PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION
     assert receipts["planner"]["command_digest"] != receipts["challenger"]["command_digest"]
     assert store.conn.execute(
         "SELECT COUNT(*) FROM audit_events WHERE event_type IN (?, ?)",
@@ -253,6 +259,22 @@ def test_accountable_gate_surfaces_challenge_decisions_before_missing_approval(t
     assert "Confirm whether this task is authorized" in result["message"]
 
 
+def test_current_protocol_human_decision_cannot_be_rerolled(tmp_path: Path):
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="human"),
+    )
+    code, result = _run(project)
+    assert code != 0 and result["detail"]["next_action"] == "resolve_planning_challenge_decisions"
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        with pytest.raises(PlanningChallengeRefreshRefusal, match="already used the contract-aware review protocol"):
+            retire_planning_challenge(store, project, "T-1", reason="try the same review again")
+    finally:
+        store.close()
+
+
 def test_challenger_receives_authoritative_task_contract(tmp_path: Path):
     project = _project(
         tmp_path,
@@ -270,6 +292,70 @@ def test_challenger_receives_authoritative_task_contract(tmp_path: Path):
     assert load_planning_challenge(project, "T-1")["verdict"] == "accept"
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     try:
+        assert planning_execution_receipts(store, "T-1")["challenger"]["execution_verified"] is True
+    finally:
+        store.close()
+
+
+def test_explicit_refresh_preserves_old_decision_then_reruns_current_independent_challenger(tmp_path: Path):
+    script = _script(tmp_path)
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(script, challenger_mode="human"),
+    )
+    contract_path = project / ".stagemesh" / "contracts" / "T-1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["objective"] = "REQUIRED_CONTRACT_BEHAVIOR"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    code, result = _run(project)
+    assert code != 0 and result["detail"]["next_action"] == "resolve_planning_challenge_decisions"
+    old_challenge = load_planning_challenge(project, "T-1")
+    old_digest = freeze_planning_challenge(old_challenge).digest
+
+    config_path = project / ".stagemesh" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["providers"]["challenger"] = shlex.join([sys.executable, str(script), "contract-aware"])
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        rows = store.conn.execute(
+            "SELECT rowid, payload FROM audit_events WHERE event_type=?",
+            (CHALLENGER_RECEIPT,),
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if payload.get("artifact_digest") == old_digest:
+                payload.pop("review_protocol_version", None)  # artifact produced before the protocol receipt existed
+                store.conn.execute(
+                    "UPDATE audit_events SET payload=?, created_at=? WHERE rowid=?",
+                    (
+                        json.dumps(payload, sort_keys=True),
+                        CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH - 1,
+                        row["rowid"],
+                    ),
+                )
+        store.conn.commit()
+        retired = retire_planning_challenge(
+            store,
+            project,
+            "T-1",
+            reason="the current challenger now receives the authoritative task contract",
+        )
+        assert retired["retired_challenge_hash"] == old_digest
+        assert json.loads((project / retired["archive_path"]).read_text(encoding="utf-8"))["verdict"] == "needs-human-decision"
+        assert len(list(store.task_audit_events(PLANNING_CHALLENGE_RETIRED_EVENT, "T-1"))) == 1
+    finally:
+        store.close()
+
+    code, result = _run(project)
+
+    assert code != 0 and result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    assert load_planning_challenge(project, "T-1")["verdict"] == "accept"
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        challenger_events = list(store.task_audit_events(CHALLENGER_RECEIPT, "T-1"))
+        assert len(challenger_events) == 2
         assert planning_execution_receipts(store, "T-1")["challenger"]["execution_verified"] is True
     finally:
         store.close()

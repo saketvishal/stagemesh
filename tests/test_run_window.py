@@ -106,7 +106,7 @@ def test_planning_human_decision_is_not_hidden_by_resume_or_other_approvals(tmp_
         {
             "1": RunResult(
                 "REFUSED:planning_gate",
-                "independent planning challenge requires a human decision: choose the layout",
+                "independent planning challenge requires a human decision: confirm whether this task is authorized",
                 1,
             ),
             "2": RunResult("REFUSED:approval_missing", "no approval artifact exists for this task", 1),
@@ -114,9 +114,54 @@ def test_planning_human_decision_is_not_hidden_by_resume_or_other_approvals(tmp_
     )
     try:
         assert report.next_command.startswith("operator decision required for task(s) 1")
-        assert "record their answers" in report.next_command
+        assert "record their answers or corrected context" in report.next_command
+        assert "current-protocol decisions require a revised frozen plan" in report.next_command
+        assert "refresh-planning-challenge" not in report.next_command
         assert "approve-planning --task 1" not in report.next_command
         assert "approve-planning --task 2" not in report.next_command
+    finally:
+        store.close()
+
+
+def test_current_protocol_planning_decision_does_not_suggest_reroll(tmp_path: Path) -> None:
+    report, store, _rig, _options = go(
+        tmp_path,
+        ["1"],
+        {
+            "1": RunResult(
+                "REFUSED:planning_gate",
+                "independent planning challenge requires a human decision: choose the retention period",
+                1,
+            )
+        },
+    )
+    try:
+        assert "current-protocol decisions require a revised frozen plan" in report.next_command
+        assert "refresh-planning-challenge" not in report.next_command
+    finally:
+        store.close()
+
+
+def test_multiple_planning_decisions_never_print_a_fake_combined_command(tmp_path: Path) -> None:
+    report, store, _rig, _options = go(
+        tmp_path,
+        ["1", "2"],
+        {
+            "1": RunResult(
+                "REFUSED:planning_gate",
+                "independent planning challenge requires a human decision: confirm whether this task is authorized",
+                1,
+            ),
+            "2": RunResult(
+                "REFUSED:planning_gate",
+                "independent planning challenge requires a human decision: choose the retention period",
+                1,
+            ),
+        },
+    )
+    try:
+        assert "task(s) 1, 2" in report.next_command
+        assert "refresh-planning-challenge --task" not in report.next_command
     finally:
         store.close()
 
