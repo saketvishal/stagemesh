@@ -49,6 +49,8 @@ from .review import adverse_gate
 from .scheduling import Scheduler
 from .spec_planning import (
     BOUNDARY_PICKUP,
+    NEXT_APPROVE_SPEC,
+    NEXT_RESOLVE_CHALLENGE_DECISIONS,
     check_accountable_approval,
     evaluate_planning_gate,
     load_planning_artifacts,
@@ -385,6 +387,41 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             next_action=exc.code,
             planning_gate_reason=str(exc),
         ) from exc
+    spec_payload, approval = load_planning_artifacts(project, task_id)
+    challenge_payload = load_planning_challenge(project, task_id)
+    preapproval = evaluate_planning_gate(
+        enabled=True,
+        spec_payload=spec_payload,
+        approval=None,
+        contract_hash=contract_hash,
+        baseline_sha=baseline,
+        require_challenge=require_challenge,
+        challenge_payload=challenge_payload,
+    )
+    if (
+        not preapproval.allowed
+        and preapproval.next_action != NEXT_APPROVE_SPEC
+    ):
+        reason = preapproval.reason
+        required_decisions: list[str] = []
+        if (
+            preapproval.next_action == NEXT_RESOLVE_CHALLENGE_DECISIONS
+            and isinstance(challenge_payload, dict)
+            and isinstance(challenge_payload.get("required_decisions"), list)
+        ):
+            required_decisions = [
+                item for item in challenge_payload["required_decisions"] if isinstance(item, str)
+            ]
+            if required_decisions:
+                reason += ": " + json.dumps(required_decisions, ensure_ascii=True)
+        raise RunReadyRefusal(
+            "planning_gate",
+            f"task {task_id} is blocked before implementation: {reason}",
+            task_id=task_id,
+            next_action=preapproval.next_action,
+            planning_gate_reason=preapproval.reason,
+            required_decisions=required_decisions,
+        )
     if accountable:
         approval_decision = check_accountable_approval(
             store, project, task_id, BOUNDARY_PICKUP, contract_hash=contract_hash, baseline_sha=baseline
@@ -398,8 +435,6 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
                 approval=refusal_detail(approval_decision, BOUNDARY_PICKUP),
             )
         return
-    spec_payload, approval = load_planning_artifacts(project, task_id)
-    challenge_payload = load_planning_challenge(project, task_id)
     decision = evaluate_planning_gate(
         enabled=True,
         spec_payload=spec_payload,

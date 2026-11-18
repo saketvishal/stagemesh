@@ -85,6 +85,42 @@ def test_bad_durations_are_rejected(text: str) -> None:
         rw.parse_duration(text)
 
 
+def test_missing_accountable_approval_reports_the_exact_operator_action(tmp_path: Path) -> None:
+    report, store, _rig, _options = go(
+        tmp_path,
+        ["1"],
+        {"1": RunResult("REFUSED:approval_missing", "no approval artifact exists for this task", 1)},
+    )
+    try:
+        assert "operator approval required" in report.next_command
+        assert "stagemesh approve-planning --task 1" in report.next_command
+        assert "run-window" not in report.next_command
+    finally:
+        store.close()
+
+
+def test_planning_human_decision_is_not_hidden_by_resume_or_other_approvals(tmp_path: Path) -> None:
+    report, store, _rig, _options = go(
+        tmp_path,
+        ["1", "2"],
+        {
+            "1": RunResult(
+                "REFUSED:planning_gate",
+                "independent planning challenge requires a human decision: choose the layout",
+                1,
+            ),
+            "2": RunResult("REFUSED:approval_missing", "no approval artifact exists for this task", 1),
+        },
+    )
+    try:
+        assert report.next_command.startswith("operator decision required for task(s) 1")
+        assert "record their answers" in report.next_command
+        assert "approve-planning --task 1" not in report.next_command
+        assert "approve-planning --task 2" not in report.next_command
+    finally:
+        store.close()
+
+
 def test_human_scope_summary_omits_full_exclusion_dump() -> None:
     scope = {
         "label": "mobile",
