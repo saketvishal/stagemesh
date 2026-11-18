@@ -199,3 +199,54 @@ def test_progress_and_retarget_preserve_publisher_deadline(tmp_path):
     wrapped.retarget("refs/heads/wave/recovery-fixture").open_pr.set_deadline(456)
     assert deadlines == [123, 456]
     store.close()
+
+
+def test_capacity_progress_is_compact_and_rate_limited(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    stream = WatchedStream()
+    now = [100.0]
+    reporter = ProgressReporter(stream, clock=lambda: now[0])
+    rig = Rig(project)
+    plain = rig.hooks()
+    forwarded: list[dict[str, object]] = []
+    plain.on_capacity = forwarded.append
+    hooks = with_progress(
+        plain,
+        project / ".stagemesh/stagemesh.sqlite3",
+        reporter,
+        capacity_progress_seconds=60,
+    )
+
+    first = {
+        "coding": 2,
+        "coding_limit": 2,
+        "verification": 1,
+        "verification_limit": 2,
+        "coding_idle_reason": "coding capacity occupied",
+        "waiting": {"T-2": "coding capacity occupied", "T-3": "scope conflict"},
+    }
+    changed = {**first, "verification": 2, "waiting": {"T-4": "verification occupied"}}
+    hooks.on_capacity(first)
+    assert stream.getvalue().count("\n") == 1
+    assert "coding 2/2" in stream.getvalue()
+    assert "verification 1/2" in stream.getvalue()
+    assert "2 task(s) waiting" in stream.getvalue()
+
+    now[0] += 5
+    hooks.on_capacity(changed)
+    assert stream.getvalue().count("\n") == 1
+    reporter.line("task T-1: implementation started (provider claude)")
+    assert stream.getvalue().count("\n") == 2
+    assert "implementation started" in stream.getvalue()
+
+    now[0] += 55
+    hooks.on_capacity(changed)
+
+    lines = stream.getvalue().splitlines()
+    assert len(lines) == 3
+    assert "verification 2/2" in lines[-1]
+    assert "1 task(s) waiting" in lines[-1]
+    assert "T-2" not in stream.getvalue() and "scope conflict" not in stream.getvalue()
+    assert stream.flushes >= 3
+    assert forwarded == [first, changed, changed]
+    store.close()
