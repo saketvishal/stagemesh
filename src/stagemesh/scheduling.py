@@ -44,6 +44,8 @@ class Scheduler:
 
 def _source_refusal_reason(store: Store, task: Any) -> str | None:
     source_id = task["source_id"]
+    if task["source"] == "provider-acceptance":
+        return "internal provider acceptance record"
     if store.source_admission_pending(str(task["source"]), source_id):
         return "source synchronization incomplete"
     if task["source"] != "github":

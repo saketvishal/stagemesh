@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.22 keeps executed planning
-moving when a provider returns a useful finding beyond the per-summary bound,
-while retaining strict validation for malformed artifacts.
-See the [0.6.22 release notes](releases/0.6.22.md),
+files as reinstallable package points. Version 0.6.23 accepts one unambiguous
+provider planning object through common presentation wrappers and prevents
+internal provider-acceptance records from entering project scheduling.
+See the [0.6.23 release notes](releases/0.6.23.md),
+[0.6.22 release notes](releases/0.6.22.md),
 [0.6.21 release notes](releases/0.6.21.md),
 [0.6.20 release notes](releases/0.6.20.md),
 [0.6.19 release notes](releases/0.6.19.md),
@@ -29,14 +30,14 @@ See the [0.6.22 release notes](releases/0.6.22.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.22` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.23` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.22
+python -m pip install --no-cache-dir stagemesh==0.6.23
 ```
 
-The preceding `0.6.21` release remains available for rollback. The older
+The preceding `0.6.22` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -45,6 +46,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.23`: unambiguous wrapped planning JSON and internal acceptance-task isolation.
 - `0.6.22`: visibly bound overlong provider finding summaries without discarding executed planning.
 - `0.6.21`: retain governing-spec holds until exact merged-pin proof succeeds.
 - `0.6.20`: compact plan exclusions and fail-closed completed-spec dependency reconciliation.

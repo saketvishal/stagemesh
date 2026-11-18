@@ -24,8 +24,87 @@ from stagemesh.provider_acceptance import (
     live_provider_readiness,
     record_live_provider_acceptance,
     run_live_provider_smoke,
+    run_provider_acceptance,
 )
 from stagemesh.providers import RuntimeCommandAdapter
+from stagemesh.scheduling import Scheduler
+
+
+def test_deterministic_provider_acceptance_record_is_not_project_work(tmp_path: Path) -> None:
+    store = Store(tmp_path / "stagemesh.sqlite3")
+    store.migrate()
+
+    result = run_provider_acceptance(store, tmp_path)
+
+    task = store.conn.execute(
+        "SELECT stage, status, source FROM tasks WHERE source='provider-acceptance'"
+    ).fetchone()
+    assert result.status == "PASS"
+    assert dict(task) == {
+        "stage": "DONE",
+        "status": "DONE",
+        "source": "provider-acceptance",
+    }
+    store.close()
+
+
+def test_internal_provider_acceptance_record_is_never_schedulable(tmp_path: Path) -> None:
+    store = Store(tmp_path / "stagemesh.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task(
+        "provider acceptance", source="provider-acceptance", source_id="provider-acceptance"
+    )
+
+    decision = Scheduler(store).decision(task_id)
+
+    assert decision.eligible is False
+    assert decision.reason == "internal provider acceptance record"
+    store.close()
+
+
+def test_deterministic_provider_acceptance_closes_record_after_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import provider_acceptance
+
+    store = Store(tmp_path / "stagemesh.sqlite3")
+    store.migrate()
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("synthetic provider failed")
+
+    monkeypatch.setattr(provider_acceptance.DryRunProviderAdapter, "execute", fail)
+
+    with pytest.raises(RuntimeError, match="synthetic provider failed"):
+        run_provider_acceptance(store, tmp_path)
+
+    task = store.conn.execute(
+        "SELECT stage, status FROM tasks WHERE source='provider-acceptance'"
+    ).fetchone()
+    assert tuple(task) == ("DONE", "DONE")
+    store.close()
+
+
+def test_upgrade_retires_legacy_open_provider_acceptance_record(tmp_path: Path) -> None:
+    database = tmp_path / "stagemesh.sqlite3"
+    store = Store(database)
+    store.migrate()
+    task_id = store.upsert_task(
+        "provider acceptance", source="provider-acceptance", source_id="provider-acceptance"
+    )
+    store.conn.execute("DELETE FROM schema_migrations WHERE version>=9")
+    store.conn.execute("DELETE FROM migration_audit WHERE version>=9")
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(database)
+    upgraded.migrate()
+
+    task = upgraded.get_task(task_id)
+    assert task["stage"] == "DONE"
+    assert task["status"] == "DONE"
+    assert upgraded.schema_version() >= 9
+    upgraded.close()
 
 
 def test_missing_tool_host_is_not_treated_as_a_working_provider(tmp_path):

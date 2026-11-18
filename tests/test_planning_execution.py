@@ -33,21 +33,31 @@ import json, pathlib, sys
 mode = sys.argv[1]
 if mode == "mutate":
     pathlib.Path("README.md").write_text("provider-local mutation\n", encoding="utf-8")
-if mode in {"planner", "mutate"}:
-    print(json.dumps({
+if mode in {"planner", "mutate", "wrapped-planner"}:
+    payload = {
         "behavior": ["Keep the requested behavior bounded"],
         "non_goals": ["Do not widen the contract"],
         "affected_paths": ["README.md"],
         "acceptance_checks": ["inspect the exact candidate"],
         "decisions": [],
         "spec_refs": [],
-    }))
-elif mode == "challenger":
-    print(json.dumps({
+    }
+    if mode == "wrapped-planner":
+        print("Here is the requested object:\n```json\n" + json.dumps(payload) + "\n```")
+    else:
+        print(json.dumps(payload))
+elif mode in {"challenger", "wrapped-challenger", "ambiguous-challenger"}:
+    payload = {
         "verdict": "accept",
         "findings": [{"kind": "missing-test", "summary": "Inspect README explicitly"}],
         "required_decisions": [],
-    }))
+    }
+    if mode == "wrapped-challenger":
+        print("Independent challenge complete.\n```json\n" + json.dumps(payload) + "\n```\nEnd.")
+    elif mode == "ambiguous-challenger":
+        print(json.dumps(payload) + "\n" + json.dumps({**payload, "verdict": "revise"}))
+    else:
+        print(json.dumps(payload))
 elif mode == "revise":
     print(json.dumps({
         "verdict": "revise",
@@ -215,6 +225,39 @@ def test_malformed_challenger_output_fails_closed_after_trusted_planner(tmp_path
     statuses = [row["status"] for row in store.conn.execute("SELECT status FROM executions ORDER BY started_at")]
     assert statuses == ["SUCCEEDED", "FAILED"]
     store.close()
+
+
+def test_wrapped_provider_objects_complete_both_planning_roles(tmp_path: Path):
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(
+            _script(tmp_path),
+            planner_mode="wrapped-planner",
+            challenger_mode="wrapped-challenger",
+        ),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    assert load_planning_artifacts(project, "T-1")[0] is not None
+    assert load_planning_challenge(project, "T-1")["verdict"] == "accept"
+
+
+def test_multiple_provider_objects_remain_ambiguous_and_fail_closed(tmp_path: Path):
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="ambiguous-challenger"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
+    assert result["detail"]["next_action"] == "challenger_invalid"
+    assert load_planning_challenge(project, "T-1") is None
 
 
 def test_distinct_names_with_the_same_command_are_not_independent(tmp_path: Path):

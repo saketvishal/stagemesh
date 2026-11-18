@@ -340,12 +340,7 @@ def _run_role(
             raise PlanningExecutionError(
                 f"{purpose}_invalid", f"{purpose} output exceeds {_OUTPUT_LIMIT} characters"
             )
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise PlanningExecutionError(f"{purpose}_invalid", f"{purpose} output is not JSON") from exc
-        if not isinstance(payload, dict):
-            raise PlanningExecutionError(f"{purpose}_invalid", f"{purpose} output must be a JSON object")
+        payload = _provider_json_object(text, purpose)
         accepted = accept(payload)
         status, failure = ExecutionStatus.SUCCEEDED, None
         return accepted, {**identity, "execution_id": execution_id}
@@ -370,6 +365,55 @@ def _run_role(
             )
         if cleanup_confirmed:
             _cleanup_review_workspace(temp_dir)
+
+
+def _provider_json_object(text: str, purpose: str) -> dict[str, Any]:
+    """Parse one provider JSON object while tolerating presentation wrappers.
+
+    Headless providers sometimes put the requested object in a Markdown fence
+    or add one short sentence around it. The object remains the only protocol
+    input: malformed braces, a second object, arrays, and scalars all fail
+    closed instead of letting StageMesh guess which answer is authoritative.
+    """
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = _single_embedded_json_object(text)
+        if payload is None:
+            raise PlanningExecutionError(
+                f"{purpose}_invalid", f"{purpose} output is not one JSON object"
+            ) from None
+    if not isinstance(payload, dict):
+        raise PlanningExecutionError(
+            f"{purpose}_invalid", f"{purpose} output must be a JSON object"
+        )
+    return payload
+
+
+def _single_embedded_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    found: list[tuple[int, int, dict[str, Any]]] = []
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start < 0:
+            break
+        try:
+            payload, width = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        end = start + width
+        if isinstance(payload, dict):
+            found.append((start, end, payload))
+        index = max(end, start + 1)
+    if len(found) != 1:
+        return None
+    start, end, payload = found[0]
+    outside = text[:start] + text[end:]
+    if any(token in outside for token in ("{", "}", "[", "]")):
+        return None
+    return payload
 
 
 def _planner_prompt(task_id: str, title: str, contract_json: str) -> str:

@@ -176,6 +176,18 @@ def test_selection_picks_only_runnable_tasks_and_never_blocked_parked_or_claimed
     assert "not picked automatically" in named["T-blocked"] and named["T-nope"] == "no such task"
 
 
+def test_selection_never_admits_internal_provider_acceptance_record(tmp_path: Path) -> None:
+    store, _project = make_store(tmp_path, [])
+    task_id = store.upsert_task(
+        "provider acceptance", source="provider-acceptance", source_id="provider-acceptance"
+    )
+
+    picked, skipped = rw.select_tasks(store, attempted=set(), limit=10)
+
+    assert picked == []
+    assert skipped == {task_id: "internal provider acceptance record"}
+
+
 def test_named_ineligible_github_issue_reports_source_reason(tmp_path: Path) -> None:
     store, _project = make_store(tmp_path, [])
     store.cache_source(
