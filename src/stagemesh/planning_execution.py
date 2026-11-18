@@ -44,8 +44,10 @@ from .spec_planning import (
     MAX_CANONICAL_CHARS,
     MAX_ITEMS,
     MAX_TEXT_CHARS,
+    PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
     TRUNCATED_TEXT_SUFFIX,
     PlanningBudgetError,
+    PlanningChallengeRefreshRefusal,
     PlanningSpecError,
     fit_provider_planning_challenge,
     fit_provider_planning_spec,
@@ -55,6 +57,7 @@ from .spec_planning import (
     load_planning_challenge,
     planning_artifact_paths,
     planning_challenge_path,
+    reconcile_planning_challenge_retirement,
     validate_planning_spec,
 )
 
@@ -79,6 +82,10 @@ def ensure_executed_planning(
     config: StageMeshConfig,
 ) -> None:
     """Produce missing configured planning artifacts; never overwrite manual or stale evidence."""
+    try:
+        reconcile_planning_challenge_retirement(store, project, task_id)
+    except PlanningChallengeRefreshRefusal as exc:
+        raise PlanningExecutionError(exc.code, str(exc)) from exc
     spec_payload, _approval = load_planning_artifacts(project, task_id)
     spec_path, _ = planning_artifact_paths(project, task_id)
     if spec_payload is None and spec_path.is_file():
@@ -218,6 +225,7 @@ def ensure_executed_planning(
         frozen_challenge.digest,
         execution,
         planning_spec_hash=frozen_spec.digest,
+        review_protocol_version=PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
     )
     _write_new(challenge_path, frozen_challenge.canonical_json)
 
@@ -600,6 +608,7 @@ def _record_receipt(
     execution: dict[str, Any],
     *,
     planning_spec_hash: str | None = None,
+    review_protocol_version: int | None = None,
 ) -> None:
     store.add_audit_event(
         event_type,
@@ -614,6 +623,7 @@ def _record_receipt(
             "alias_digests": execution["alias_digests"],
             "execution_id": execution["execution_id"],
             "provider_invoked": True,
+            "review_protocol_version": review_protocol_version,
         },
     )
 
@@ -669,6 +679,7 @@ def _latest_receipt(
                 "baseline_sha",
                 "contract_digest",
                 "provider_invoked",
+                "review_protocol_version",
             )
         }
     return None

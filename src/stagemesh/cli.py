@@ -179,7 +179,12 @@ from .runtime_info import format_runtime, runtime_info
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
 from .spec_integrity import resolve_pinned_adapter, run_openspec_validation, spec_audit_report
-from .spec_planning import PlanningApprovalRefusal, record_planning_approval
+from .spec_planning import (
+    PlanningApprovalRefusal,
+    PlanningChallengeRefreshRefusal,
+    record_planning_approval,
+    retire_planning_challenge,
+)
 from .spec_refs import SpecAdapterError
 from .stage_dispatch import stage_dispatch_refusal
 from .task_sources import (
@@ -1755,6 +1760,25 @@ def command_approve_planning(args: argparse.Namespace) -> int:
             print(f"  baseline: {report['baseline_sha']}")
             print(f"  authority: {report['authority_id']} ({report['authority_hash']})")
             print(f"  artifact: {report['approval_path']}")
+        return report
+
+    return _repair_command(args, run)
+
+
+def command_refresh_planning_challenge(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        try:
+            report = retire_planning_challenge(store, project, args.task, reason=args.reason)
+        except PlanningChallengeRefreshRefusal as exc:
+            raise RecoveryRefusal(exc.code, str(exc)) from exc
+        if not args.json:
+            print(
+                f"task {args.task}: non-accepting planning challenge retired "
+                f"({report['retired_challenge_hash'][:12]})"
+            )
+            print(f"  preserved: {report['archive_path']}")
+            print(f"  audit event: {report['audit_event_id']}")
+            print(f"next: {report['next_action']}")
         return report
 
     return _repair_command(args, run)
@@ -6032,6 +6056,7 @@ _COMMAND_GROUPS = (
             "finding-disposition",
             "delivery-unblock",
             "approve-planning",
+            "refresh-planning-challenge",
             "advance-baseline",
             "survivor-wave",
             "follow-up",
@@ -6287,6 +6312,16 @@ def build_parser() -> argparse.ArgumentParser:
     approve_planning.add_argument("--task", required=True)
     approve_planning.add_argument("--json", action="store_true")
     approve_planning.set_defaults(func=command_approve_planning)
+    refresh_planning_challenge = sub.add_parser(
+        "refresh-planning-challenge",
+        help="Operator-only: preserve and retire a non-accepting planning challenge so the next run challenges the current plan again",
+    )
+    refresh_planning_challenge.add_argument("--task", required=True)
+    refresh_planning_challenge.add_argument(
+        "--reason", required=True, help="Why the existing non-accepting challenge must be run again (recorded in the audit trail)"
+    )
+    refresh_planning_challenge.add_argument("--json", action="store_true")
+    refresh_planning_challenge.set_defaults(func=command_refresh_planning_challenge)
     advance = sub.add_parser(
         "advance-baseline",
         help="Move a task's baseline forward to the integration ref, reset its idle worktree and restart IMPLEMENT (audited; old state preserved)",

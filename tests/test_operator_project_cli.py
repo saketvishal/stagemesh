@@ -5,9 +5,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from stagemesh import api_server, cli, ui_launcher
+from stagemesh import api_server, cli, spec_planning, ui_launcher
 from stagemesh.persistence import Store
 from stagemesh.registry import GlobalRegistry, ProjectRegistration
+from stagemesh.spec_planning import (
+    CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH,
+    PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT,
+    PLANNING_CHALLENGE_RETIRE_INTENT_EVENT,
+    PLANNING_CHALLENGE_RETIRED_EVENT,
+    PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
+    freeze_planning_challenge,
+    freeze_planning_spec,
+    reconcile_planning_challenge_retirement,
+)
+from stagemesh.stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 
 
 class FakeServer:
@@ -174,6 +185,81 @@ def _approve(path, task_id: str, capsys, *extra: str) -> tuple[int, dict]:
     return code, json.loads(capsys.readouterr().out)
 
 
+def _refreshable_challenge(
+    path,
+    task_id: str,
+    *,
+    verdict: str = "needs-human-decision",
+    review_protocol: int | None = None,
+    legacy_authorization: bool = True,
+    legacy_receipt: bool = True,
+) -> bytes:
+    planning = path / ".stagemesh" / "planning"
+    spec = json.loads((planning / f"{task_id}.spec.json").read_text(encoding="utf-8"))
+    challenge = {
+        "version": 1,
+        "planning_spec_hash": freeze_planning_spec(spec).digest,
+        "planner_provider": "planner",
+        "challenger_provider": "challenger",
+        "verdict": verdict,
+        "findings": (
+            []
+            if verdict == "accept"
+            else [{"kind": "human-decision", "summary": "The recorded context needs another independent review"}]
+        ),
+        "required_decisions": (
+            ["Confirm whether this task is authorized for implementation"]
+            if verdict == "needs-human-decision" and legacy_authorization
+            else (["Choose the product retention period"] if verdict == "needs-human-decision" else [])
+        ),
+    }
+    payload = json.dumps(challenge, indent=2).encode()
+    (planning / f"{task_id}.challenge.json").write_bytes(payload)
+    frozen = freeze_planning_challenge(challenge)
+    store = Store(cli.db_path(path))
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=None,
+        kind="REVIEW",
+        actor="challenger",
+    )
+    store.finish_execution(execution_id, "SUCCEEDED", actor="challenger")
+    receipt = {
+        "task_id": task_id,
+        "artifact_digest": frozen.digest,
+        "provider": "challenger",
+        "execution_id": execution_id,
+        "provider_invoked": True,
+    }
+    if review_protocol is not None:
+        receipt["review_protocol_version"] = review_protocol
+    receipt_id = store.add_audit_event("planning.challenge_produced", receipt)
+    if legacy_receipt:
+        store.conn.execute(
+            "UPDATE audit_events SET created_at=? WHERE id=?",
+            (CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH - 1, receipt_id),
+        )
+        store.conn.commit()
+    store.close()
+    return payload
+
+
+def _refresh_challenge(path, task_id: str, capsys, reason: str = "the governing task now records the decision") -> tuple[int, dict]:
+    code = cli.main(
+        [
+            "--project",
+            str(path),
+            "refresh-planning-challenge",
+            "--task",
+            task_id,
+            "--reason",
+            reason,
+            "--json",
+        ]
+    )
+    return code, json.loads(capsys.readouterr().out)
+
+
 def test_approve_planning_records_receipt_artifact_and_returns_bound_identities(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
     project = tmp_path / "project"
@@ -273,3 +359,324 @@ def test_approve_planning_accepts_no_approver_override():
     for flag in ("--approver", "--approver-id", "--actor", "--config"):
         with pytest.raises(SystemExit):
             parser.parse_args(["approve-planning", "--task", "t-1", flag, "someone:else"])
+
+
+# --- refresh-planning-challenge -----------------------------------------------------------------------------------
+
+
+def test_refresh_planning_challenge_preserves_exact_artifact_and_records_audit(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(project, task_id)
+
+    code, report = _refresh_challenge(project, task_id, capsys)
+
+    assert code == 0 and report["retired_verdict"] == "needs-human-decision"
+    assert not (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").exists()
+    assert (project / report["archive_path"]).read_bytes() == original
+    store = Store(cli.db_path(project))
+    try:
+        event = list(store.task_audit_events(PLANNING_CHALLENGE_RETIRED_EVENT, task_id))
+        assert len(event) == 1
+        payload = json.loads(event[0]["payload"])
+        assert payload["artifact_digest"] == report["retired_challenge_hash"]
+        assert payload["archive_path"] == report["archive_path"]
+        assert payload["reason"] == "the governing task now records the decision"
+    finally:
+        store.close()
+    code, refusal = _refresh_challenge(project, task_id, capsys, reason="try again")
+    assert code == 2 and refusal["code"] == "challenge_missing"
+    assert len(list((project / ".stagemesh" / "planning" / "history").glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize("protected", ["accepted", "approved", "receipt", "active", "claim"])
+def test_refresh_planning_challenge_refuses_protected_state(tmp_path, monkeypatch, capsys, protected):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    _refreshable_challenge(project, task_id, verdict="accept" if protected == "accepted" else "needs-human-decision")
+    if protected == "approved":
+        (project / ".stagemesh" / "planning" / f"{task_id}.approval.json").write_text("{}", encoding="utf-8")
+    if protected == "receipt":
+        challenge = json.loads(
+            (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_text(encoding="utf-8")
+        )
+        store = Store(cli.db_path(project))
+        store.record_planning_approval(
+            {
+                "task_id": task_id,
+                "receipt_id": "approval-existing",
+                "planning_challenge_hash": freeze_planning_challenge(challenge).digest,
+            }
+        )
+        store.close()
+    if protected == "active":
+        store = Store(cli.db_path(project))
+        store.start_execution(task_id=task_id, claim_id=None, kind="REVIEW")
+        store.close()
+    if protected == "claim":
+        store = Store(cli.db_path(project))
+        assert store.acquire_claim(task_id, "test-worker") is not None
+        store.close()
+
+    code, refusal = _refresh_challenge(project, task_id, capsys)
+
+    expected = {
+        "accepted": "challenge_accepted",
+        "approved": "approval_exists",
+        "receipt": "approval_exists",
+        "active": "execution_active",
+        "claim": "claim_active",
+    }
+    assert code == 2 and refusal["code"] == expected[protected]
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").exists()
+    history = project / ".stagemesh" / "planning" / "history"
+    assert not history.exists() or not list(history.glob("*.json"))
+
+
+def test_refresh_planning_challenge_refuses_provider_process(tmp_path, monkeypatch, capsys):
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(project, task_id)
+    monkeypatch.setenv("STAGEMESH_PROVIDER_PROCESS", "1")
+
+    code, refusal = _refresh_challenge(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "operator_decision"
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_bytes() == original
+
+
+def test_refresh_planning_challenge_cannot_reroll_current_protocol(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(
+        project,
+        task_id,
+        review_protocol=PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
+    )
+
+    code, refusal = _refresh_challenge(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "challenge_context_unchanged"
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_bytes() == original
+
+
+def test_refresh_planning_challenge_refuses_unlabelled_post_cutover_receipt(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(
+        project,
+        task_id,
+        legacy_authorization=False,
+        legacy_receipt=False,
+    )
+
+    code, refusal = _refresh_challenge(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "challenge_context_unchanged"
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("defect", ["missing-receipt", "invalid-protocol", "actor-mismatch"])
+def test_refresh_planning_challenge_requires_verified_challenger_receipt(
+    tmp_path, monkeypatch, capsys, defect
+):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(project, task_id)
+    store = Store(cli.db_path(project))
+    if defect == "missing-receipt":
+        store.conn.execute("DELETE FROM audit_events WHERE event_type='planning.challenge_produced'")
+    elif defect == "invalid-protocol":
+        row = store.conn.execute(
+            "SELECT rowid, payload FROM audit_events WHERE event_type='planning.challenge_produced'"
+        ).fetchone()
+        payload = json.loads(row["payload"])
+        payload["review_protocol_version"] = True
+        store.conn.execute("UPDATE audit_events SET payload=? WHERE rowid=?", (json.dumps(payload), row["rowid"]))
+    else:
+        store.conn.execute("UPDATE executions SET actor='different-challenger' WHERE actor='challenger'")
+    store.conn.commit()
+    store.close()
+
+    code, refusal = _refresh_challenge(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "challenger_execution_unverified"
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_bytes() == original
+
+
+def test_refresh_planning_challenge_allows_current_protocol_after_planning_inputs_change(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    _refreshable_challenge(
+        project,
+        task_id,
+        review_protocol=PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
+        legacy_authorization=False,
+    )
+    spec_path = project / ".stagemesh" / "planning" / f"{task_id}.spec.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["decisions"] = [{"question": "Retention period", "resolution": "30 days"}]
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    code, report = _refresh_challenge(project, task_id, capsys, reason="the planning spec now records the decision")
+
+    assert code == 0 and report["retired_verdict"] == "needs-human-decision"
+
+
+def test_refresh_planning_challenge_restores_current_artifact_if_audit_write_fails(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(project, task_id)
+
+    add_audit_event = Store.add_audit_event
+
+    def fail_completion(self, event_type, payload=None):  # type: ignore[no-untyped-def]
+        if event_type == PLANNING_CHALLENGE_RETIRED_EVENT:
+            raise RuntimeError("audit unavailable")
+        return add_audit_event(self, event_type, payload)
+
+    monkeypatch.setattr(Store, "add_audit_event", fail_completion)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        cli.main(
+            [
+                "--project",
+                str(project),
+                "refresh-planning-challenge",
+                "--task",
+                task_id,
+                "--reason",
+                "context changed",
+                "--json",
+            ]
+        )
+
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_bytes() == original
+    history = project / ".stagemesh" / "planning" / "history"
+    assert not list(history.glob("*.json"))
+    store = Store(cli.db_path(project))
+    try:
+        assert len(list(store.task_audit_events(PLANNING_CHALLENGE_RETIRE_INTENT_EVENT, task_id))) == 1
+        aborted = list(store.task_audit_events(PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT, task_id))
+        assert len(aborted) == 1 and json.loads(aborted[0]["payload"])["restored"] is True
+        assert not list(store.task_audit_events(PLANNING_CHALLENGE_RETIRED_EVENT, task_id))
+    finally:
+        store.close()
+
+
+def test_refresh_planning_challenge_refuses_concurrent_stage_dispatch(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(project, task_id)
+    store = Store(cli.db_path(project))
+    database = connected_dispatch_database(store.conn)
+    assert database is not None
+
+    with stage_dispatch_lock(database, task_id).hold("test-stage"):
+        code, refusal = _refresh_challenge(project, task_id, capsys)
+
+    store.close()
+    assert code == 2 and refusal["code"] == "stage_dispatch_active"
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_bytes() == original
+
+
+def test_refresh_planning_challenge_refuses_unsafe_history_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    original = _refreshable_challenge(project, task_id)
+    real_check = spec_planning._is_link_or_junction
+    monkeypatch.setattr(
+        spec_planning,
+        "_is_link_or_junction",
+        lambda path: path.name == "history" or real_check(path),
+    )
+
+    code, refusal = _refresh_challenge(project, task_id, capsys)
+
+    assert code == 2 and refusal["code"] == "unsafe_history_path"
+    assert (project / ".stagemesh" / "planning" / f"{task_id}.challenge.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("moved", [False, True])
+def test_interrupted_refresh_intent_is_reconciled_without_losing_artifact(tmp_path, moved):
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    _refreshable_challenge(project, task_id)
+    challenge_path = project / ".stagemesh" / "planning" / f"{task_id}.challenge.json"
+    digest = freeze_planning_challenge(json.loads(challenge_path.read_text(encoding="utf-8"))).digest
+    history = challenge_path.parent / "history"
+    history.mkdir()
+    archive = history / f"{challenge_path.stem}.{digest}.interrupted.json"
+    payload = {
+        "task_id": task_id,
+        "artifact_digest": digest,
+        "verdict": "needs-human-decision",
+        "reason": "simulate an interrupted operator process",
+        "archive_path": archive.relative_to(project).as_posix(),
+    }
+    store = Store(cli.db_path(project))
+    intent_id = store.add_audit_event(PLANNING_CHALLENGE_RETIRE_INTENT_EVENT, payload)
+    if moved:
+        challenge_path.replace(archive)
+
+    assert len(reconcile_planning_challenge_retirement(store, project, task_id)) == 1
+
+    event_type = PLANNING_CHALLENGE_RETIRED_EVENT if moved else PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT
+    event = list(store.task_audit_events(event_type, task_id))[-1]
+    assert json.loads(event["payload"])["intent_event_id"] == intent_id
+    assert archive.exists() is moved
+    assert challenge_path.exists() is (not moved)
+    store.close()
+
+
+@pytest.mark.parametrize("previously_moved", [False, True])
+def test_refresh_retry_reconciles_prior_open_intent_before_starting_again(
+    tmp_path, monkeypatch, capsys, previously_moved
+):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_PROCESS", raising=False)
+    project = tmp_path / "project"
+    task_id = _approval_project(project)
+    _refreshable_challenge(project, task_id)
+    challenge_path = project / ".stagemesh" / "planning" / f"{task_id}.challenge.json"
+    digest = freeze_planning_challenge(json.loads(challenge_path.read_text(encoding="utf-8"))).digest
+    history = challenge_path.parent / "history"
+    history.mkdir()
+    archive = history / f"{challenge_path.stem}.{digest}.prior-intent.json"
+    store = Store(cli.db_path(project))
+    store.add_audit_event(
+        PLANNING_CHALLENGE_RETIRE_INTENT_EVENT,
+        {
+            "task_id": task_id,
+            "artifact_digest": digest,
+            "verdict": "needs-human-decision",
+            "reason": "prior interrupted command",
+            "archive_path": archive.relative_to(project).as_posix(),
+        },
+    )
+    store.close()
+    if previously_moved:
+        challenge_path.replace(archive)
+
+    code, report = _refresh_challenge(project, task_id, capsys, reason="retry after interruption")
+
+    assert code == 0 and report["retired_challenge_hash"] == digest
+    store = Store(cli.db_path(project))
+    try:
+        assert reconcile_planning_challenge_retirement(store, project, task_id) == ()
+        assert list(store.task_audit_events(PLANNING_CHALLENGE_RETIRED_EVENT, task_id))
+        if not previously_moved:
+            assert list(store.task_audit_events(PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT, task_id))
+    finally:
+        store.close()

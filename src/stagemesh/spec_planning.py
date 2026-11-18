@@ -12,11 +12,14 @@ import os
 import re
 import uuid
 from collections.abc import Iterable
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .concurrency import IntegrationLockTimeout
 from .contracts import ContractError, _relative_paths
+from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 
 if TYPE_CHECKING:
     from .persistence import Store
@@ -27,6 +30,7 @@ MAX_CANONICAL_CHARS = 8000
 TRUNCATED_TEXT_SUFFIX = " ... [truncated by StageMesh]"
 PLANNING_SPEC_VERSION = 1
 PLANNING_CHALLENGE_VERSION = 1
+PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION = 2
 RESERVED_PATH_ROOTS = (".git", ".stagemesh")
 CHALLENGE_VERDICTS = ("accept", "revise", "needs-human-decision")
 CHALLENGE_FINDING_KINDS = (
@@ -38,6 +42,7 @@ CHALLENGE_FINDING_KINDS = (
     "scope-risk",
     "unsupported-assumption",
 )
+CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH = 1_795_030_433  # merge 82130322, 2026-11-18T13:33:53-06:00
 
 _LIST_FIELDS = ("behavior", "non_goals", "affected_paths", "acceptance_checks")
 _REQUIRED_LISTS = ("behavior", "affected_paths", "acceptance_checks")  # non_goals may be legitimately empty
@@ -1016,6 +1021,10 @@ def _canonical_identity(value: Any) -> bool:
 PROVIDER_PROCESS_ENV = "STAGEMESH_PROVIDER_PROCESS"
 _APPROVAL_BLOCKING_EXECUTIONS = frozenset({"IMPLEMENTATION", "REVIEW", "INTEGRATION"})
 _RECEIPT_KEYS = _APPROVAL_FIELDS | {"event", "created_at"}
+PLANNING_CHALLENGE_RETIRED_EVENT = "planning.challenge_retired"
+PLANNING_CHALLENGE_RETIRE_INTENT_EVENT = "planning.challenge_retire_intent"
+PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT = "planning.challenge_retire_aborted"
+PLANNING_CHALLENGER_RECEIPT_EVENT = "planning.challenge_produced"
 
 
 class PlanningApprovalRefusal(Exception):
@@ -1025,6 +1034,371 @@ class PlanningApprovalRefusal(Exception):
         super().__init__(message)
         self.code = code
         self.next_action = next_action
+
+
+class PlanningChallengeRefreshRefusal(Exception):
+    """An explicit challenge refresh was refused; ``code`` is stable for scripts."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def retire_planning_challenge(
+    store: Store,
+    project: Path,
+    task_id: str,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Retire one non-accepting challenge so the normal runner can challenge the current plan again.
+
+    This is deliberately narrower than deleting a planning artifact. The old bytes are moved to project-local history,
+    accepted or approved planning is immutable, active work blocks the action, and a durable audit event names the exact
+    retired digest. The next ordinary run creates a new challenge through the configured independent provider.
+    """
+    if os.environ.get(PROVIDER_PROCESS_ENV):
+        raise PlanningChallengeRefreshRefusal(
+            "operator_decision",
+            "refreshing a planning challenge is an operator decision; it cannot run inside a provider process",
+        )
+    if not isinstance(task_id, str) or task_id in ("", ".", "..") or Path(task_id).name != task_id or "\\" in task_id:
+        raise PlanningChallengeRefreshRefusal("invalid_task", "task id must be a plain identifier")
+    reason = " ".join(str(reason).split())
+    if not reason:
+        raise PlanningChallengeRefreshRefusal("reason_required", "a non-empty refresh reason is required")
+    if len(reason) > MAX_TEXT_CHARS:
+        raise PlanningChallengeRefreshRefusal(
+            "reason_too_long", f"refresh reason is {len(reason)} characters; the limit is {MAX_TEXT_CHARS}"
+        )
+    entered = False
+    try:
+        admission = nullcontext()
+        database = connected_dispatch_database(store.conn)
+        if database is not None:
+            admission = stage_dispatch_lock(database, task_id).hold(f"refresh-planning-challenge:{task_id}")
+        with admission:
+            entered = True
+            return _retire_planning_challenge_owned(store, project, task_id, reason)
+    except (IntegrationLockTimeout, OSError) as exc:
+        if entered:
+            raise
+        raise PlanningChallengeRefreshRefusal(
+            "stage_dispatch_active",
+            f"task {task_id} is entering or running a stage; refresh after the current stage finishes",
+        ) from exc
+
+
+def _retire_planning_challenge_owned(
+    store: Store,
+    project: Path,
+    task_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Retire the challenge while holding the same task lock used by stage dispatch."""
+    reconciled = reconcile_planning_challenge_retirement(store, project, task_id)
+    challenge_path = planning_challenge_path(project, task_id)
+    if reconciled and not challenge_path.exists():
+        recovered = reconciled[-1]
+        return {
+            "task_id": task_id,
+            "retired_challenge_hash": recovered["artifact_digest"],
+            "retired_verdict": recovered.get("verdict", "unknown"),
+            "reason": "completed a previously authorized interrupted refresh",
+            "archive_path": recovered["archive_path"],
+            "audit_event_id": recovered["event_id"],
+            "next_action": "stagemesh run-window",
+        }
+    if store.get_task(task_id) is None:
+        raise PlanningChallengeRefreshRefusal("task_missing", f"task {task_id} is not present in the StageMesh ledger")
+    if store.has_active_claim(task_id):
+        raise PlanningChallengeRefreshRefusal(
+            "claim_active", f"task {task_id} has an active claim; refresh after it finishes"
+        )
+    active = sorted(store.active_execution_kinds(task_id))
+    if active:
+        raise PlanningChallengeRefreshRefusal(
+            "execution_active",
+            f"task {task_id} has active {', '.join(kind.lower() for kind in active)} execution; refresh after it finishes",
+        )
+
+    _, approval_path = planning_artifact_paths(project, task_id)
+    if approval_path.exists():
+        raise PlanningChallengeRefreshRefusal(
+            "approval_exists",
+            "the current planning challenge is already bound by an approval artifact; refresh is not allowed",
+        )
+    challenge_payload = load_planning_challenge(project, task_id)
+    if challenge_payload is None:
+        code = "challenge_invalid" if challenge_path.exists() else "challenge_missing"
+        message = "the current planning challenge is unreadable or malformed" if challenge_path.exists() else "no planning challenge exists"
+        raise PlanningChallengeRefreshRefusal(code, message)
+    challenge, problems = validate_planning_challenge(challenge_payload)
+    if challenge is None:
+        raise PlanningChallengeRefreshRefusal("challenge_invalid", "; ".join(problems))
+    if challenge.verdict == "accept":
+        raise PlanningChallengeRefreshRefusal(
+            "challenge_accepted",
+            "the current planning challenge is accepted; approve it or revise the planning inputs instead of refreshing it",
+        )
+
+    frozen = freeze_planning_challenge(challenge_payload)
+    if any(
+        approval.get("planning_challenge_hash") == frozen.digest
+        for approval in store.planning_approval_receipts(task_id)
+    ):
+        raise PlanningChallengeRefreshRefusal(
+            "approval_exists",
+            "the current planning challenge is already bound by a durable approval receipt; refresh is not allowed",
+        )
+    receipts = _challenge_receipts_for_refresh(store, task_id, frozen.digest)
+    if not receipts:
+        raise PlanningChallengeRefreshRefusal(
+            "challenger_execution_unverified",
+            "the current planning challenge is not bound to a successful StageMesh challenger execution",
+        )
+    review_protocols: list[int | None] = []
+    receipt_times: list[float] = []
+    for receipt in receipts:
+        review_protocol = receipt.get("review_protocol_version")
+        if review_protocol is not None and (
+            isinstance(review_protocol, bool) or not isinstance(review_protocol, int) or review_protocol < 1
+        ):
+            raise PlanningChallengeRefreshRefusal(
+                "challenger_execution_unverified",
+                "the current planning challenge has an invalid review protocol receipt",
+            )
+        review_protocols.append(review_protocol)
+        created_at = receipt.get("_created_at")
+        if isinstance(created_at, bool) or not isinstance(created_at, (int, float)) or created_at <= 0:
+            raise PlanningChallengeRefreshRefusal(
+                "challenger_execution_unverified",
+                "the current planning challenge receipt has no trustworthy creation time",
+            )
+        receipt_times.append(float(created_at))
+    spec_payload, _ = load_planning_artifacts(project, task_id)
+    try:
+        current_spec_hash = freeze_planning_spec(spec_payload).digest
+    except PlanningSpecError as exc:
+        raise PlanningChallengeRefreshRefusal(
+            "planning_spec_invalid", "the current planning spec must be valid before its challenge can be refreshed"
+        ) from exc
+    planning_inputs_changed = current_spec_hash != challenge.planning_spec_hash
+    if (
+        not planning_inputs_changed
+        and (
+            any(
+                protocol is not None and protocol >= PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION
+                for protocol in review_protocols
+            )
+            or any(created_at >= CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH for created_at in receipt_times)
+        )
+    ):
+        raise PlanningChallengeRefreshRefusal(
+            "challenge_context_unchanged",
+            "the current challenge already used the contract-aware review protocol; resolve its decisions or revise the planning inputs",
+        )
+    history_dir = _validated_planning_history(project, challenge_path, create=True)
+    archive_path = history_dir / f"{challenge_path.stem}.{frozen.digest}.{uuid.uuid4().hex}.json"
+    intent_payload = {
+        "task_id": task_id,
+        "artifact_digest": frozen.digest,
+        "verdict": challenge.verdict,
+        "reason": reason,
+        "archive_path": archive_path.relative_to(project).as_posix(),
+        "operator_boundary": "operator_cli",
+        "from_review_protocol_versions": review_protocols,
+        "from_receipt_created_at": receipt_times,
+        "to_review_protocol_version": PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
+    }
+    intent_event_id = store.add_audit_event(PLANNING_CHALLENGE_RETIRE_INTENT_EVENT, intent_payload)
+    try:
+        os.replace(challenge_path, archive_path)
+        archived_payload = json.loads(archive_path.read_text(encoding="utf-8"))
+        if freeze_planning_challenge(archived_payload).digest != frozen.digest:
+            raise PlanningChallengeRefreshRefusal(
+                "archive_mismatch", "the archived challenge differs from the challenge that was authorized for refresh"
+            )
+        event_id = store.add_audit_event(
+            PLANNING_CHALLENGE_RETIRED_EVENT,
+            {
+                **intent_payload,
+                "intent_event_id": intent_event_id,
+            },
+        )
+    except BaseException:  # Ctrl+C must restore the authoritative artifact too
+        if _intent_has_terminal_event(store, task_id, intent_event_id, PLANNING_CHALLENGE_RETIRED_EVENT):
+            raise
+        restored = False
+        if archive_path.exists() and not challenge_path.exists():
+            try:
+                os.replace(archive_path, challenge_path)
+                restored = True
+            except OSError:
+                pass
+        with suppress(Exception):  # the durable intent still exposes an interrupted action
+            store.add_audit_event(
+                PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT,
+                {
+                    **intent_payload,
+                    "intent_event_id": intent_event_id,
+                    "restored": restored,
+                },
+            )
+        raise
+    return {
+        "task_id": task_id,
+        "retired_challenge_hash": frozen.digest,
+        "retired_verdict": challenge.verdict,
+        "reason": reason,
+        "archive_path": archive_path.relative_to(project).as_posix(),
+        "audit_event_id": event_id,
+        "next_action": "stagemesh run-window",
+    }
+
+
+def _challenge_receipts_for_refresh(
+    store: Store, task_id: str, artifact_digest: str
+) -> tuple[dict[str, Any], ...]:
+    """Return every matching challenger receipt backed by a successful review execution, newest first."""
+    receipts: list[dict[str, Any]] = []
+    for row in reversed(list(store.task_audit_events(PLANNING_CHALLENGER_RECEIPT_EVENT, task_id))):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(payload, dict)
+            or payload.get("artifact_digest") != artifact_digest
+            or payload.get("provider_invoked") is not True
+        ):
+            continue
+        execution = store.conn.execute(
+            "SELECT kind, status, task_id, actor FROM executions WHERE id=?", (payload.get("execution_id"),)
+        ).fetchone()
+        if (
+            execution is not None
+            and execution["kind"] == "REVIEW"
+            and execution["status"] == "SUCCEEDED"
+            and execution["task_id"] == task_id
+            and execution["actor"] == payload.get("provider")
+        ):
+            receipts.append(payload)
+            receipts[-1]["_created_at"] = row["created_at"]
+    return tuple(receipts)
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(junction and junction())
+
+
+def _validated_planning_history(project: Path, challenge_path: Path, *, create: bool) -> Path:
+    runtime_dir = project / Path(PLANNING_ARTIFACT_DIR).parts[0]
+    planning_dir = challenge_path.parent
+    history_dir = planning_dir / "history"
+    if any(_is_link_or_junction(path) for path in (runtime_dir, planning_dir, history_dir)):
+        raise PlanningChallengeRefreshRefusal(
+            "unsafe_history_path", "planning challenge history must not traverse a symlink or junction"
+        )
+    if create:
+        history_dir.mkdir(parents=True, exist_ok=True)
+    if not history_dir.is_dir():
+        raise PlanningChallengeRefreshRefusal("unsafe_history_path", "planning challenge history directory is unavailable")
+    if (
+        runtime_dir.resolve().parent != project.resolve()
+        or planning_dir.resolve().parent != runtime_dir.resolve()
+        or history_dir.resolve().parent != planning_dir.resolve()
+    ):
+        raise PlanningChallengeRefreshRefusal(
+            "unsafe_history_path", "planning challenge history escaped the project planning directory"
+        )
+    return history_dir
+
+
+def reconcile_planning_challenge_retirement(
+    store: Store, project: Path, task_id: str
+) -> tuple[dict[str, Any], ...]:
+    """Finish or abort durable refresh intents left by an interrupted operator process.
+
+    The task's stage-dispatch lock must already be held by the caller. No provider is invoked here.
+    """
+    terminal_intents: set[str] = set()
+    for event_type in (PLANNING_CHALLENGE_RETIRED_EVENT, PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT):
+        for row in store.task_audit_events(event_type, task_id):
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            intent_id = payload.get("intent_event_id") if isinstance(payload, dict) else None
+            if isinstance(intent_id, str):
+                terminal_intents.add(intent_id)
+
+    reconciled: list[dict[str, Any]] = []
+    challenge_path = planning_challenge_path(project, task_id)
+    for row in store.task_audit_events(PLANNING_CHALLENGE_RETIRE_INTENT_EVENT, task_id):
+        intent_event_id = str(row["id"])
+        if intent_event_id in terminal_intents:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PlanningChallengeRefreshRefusal(
+                "challenge_refresh_incomplete", "a planning challenge refresh intent is malformed"
+            ) from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("artifact_digest"), str):
+            raise PlanningChallengeRefreshRefusal(
+                "challenge_refresh_incomplete", "a planning challenge refresh intent is incomplete"
+            )
+        history_dir = _validated_planning_history(project, challenge_path, create=False)
+        raw_archive = payload.get("archive_path")
+        if not isinstance(raw_archive, str) or Path(raw_archive).is_absolute():
+            raise PlanningChallengeRefreshRefusal(
+                "challenge_refresh_incomplete", "a planning challenge refresh archive path is invalid"
+            )
+        archive_path = project / raw_archive
+        if archive_path.parent.resolve() != history_dir.resolve():
+            raise PlanningChallengeRefreshRefusal(
+                "challenge_refresh_incomplete", "a planning challenge refresh archive escaped its history directory"
+            )
+        expected_digest = payload["artifact_digest"]
+        current_digest = _challenge_file_digest(challenge_path)
+        archive_digest = _challenge_file_digest(archive_path)
+        terminal_payload = {**payload, "intent_event_id": intent_event_id, "reconciled": True}
+        if current_digest == expected_digest and archive_digest is None:
+            event_id = store.add_audit_event(
+                PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT,
+                {**terminal_payload, "restored": True},
+            )
+            event_type = PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT
+        elif current_digest is None and archive_digest == expected_digest:
+            event_id = store.add_audit_event(PLANNING_CHALLENGE_RETIRED_EVENT, terminal_payload)
+            event_type = PLANNING_CHALLENGE_RETIRED_EVENT
+        else:
+            raise PlanningChallengeRefreshRefusal(
+                "challenge_refresh_incomplete",
+                "planning challenge refresh state is ambiguous; the current and archived artifacts do not match its intent",
+            )
+        reconciled.append({**terminal_payload, "event_id": event_id, "event_type": event_type})
+    return tuple(reconciled)
+
+
+def _challenge_file_digest(path: Path) -> str | None:
+    try:
+        return freeze_planning_challenge(json.loads(path.read_text(encoding="utf-8"))).digest
+    except (OSError, ValueError, PlanningSpecError):
+        return None
+
+
+def _intent_has_terminal_event(store: Store, task_id: str, intent_event_id: str, event_type: str) -> bool:
+    for row in store.task_audit_events(event_type, task_id):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("intent_event_id") == intent_event_id:
+            return True
+    return False
 
 
 def record_planning_approval(
@@ -1163,7 +1537,7 @@ APPROVAL_REFUSED_EVENT = "planning_approval.refused"
 APPROVAL_PROMOTION_EVENT = "planning_approval.promotion_evidence"
 
 _PLANNER_RECEIPT_EVENT = "planning.spec_produced"
-_CHALLENGER_RECEIPT_EVENT = "planning.challenge_produced"
+_CHALLENGER_RECEIPT_EVENT = PLANNING_CHALLENGER_RECEIPT_EVENT
 _DERIVATION_EVENT = "candidate.implementation_identity_derived"
 _DERIVATION_KINDS = frozenset({"rebase", "reattribution", "reconstruction"})
 _INTEGRATION_DERIVATION_EVENTS = {

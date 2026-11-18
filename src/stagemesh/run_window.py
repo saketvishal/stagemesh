@@ -829,11 +829,12 @@ def next_command(report: WindowReport) -> str:
         and "independent planning challenge requires a human decision" in t.reason
     ]
     if planning_decisions:
-        return (
+        guidance = (
             "operator decision required for task(s) "
             + ", ".join(planning_decisions)
-            + "; review the decisions above and record their answers in the governing task/spec before rerunning"
+            + "; review the decisions above and record their answers or corrected context in the governing task/spec"
         )
+        return guidance + "; current-protocol decisions require a revised frozen plan and are not re-rolled"
     approvals = [t.task_id for t in report.tasks if t.stop_reason == "REFUSED:approval_missing"]
     if len(approvals) == 1:
         return (
