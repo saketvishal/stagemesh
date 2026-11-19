@@ -9,6 +9,7 @@ import pytest
 from test_run_ready import _project, _run
 from test_spec_planning_gate import _contract_digest, _spec
 
+import stagemesh.cli as cli_module
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
@@ -26,12 +27,16 @@ from stagemesh.spec_planning import (
     NEXT_REVISE_SPEC,
     PLANNING_CHALLENGE_RETIRED_EVENT,
     PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
+    PLANNING_REVISION_ABORTED_EVENT,
+    PLANNING_REVISION_COMPLETED_EVENT,
+    PLANNING_REVISION_INTENT_EVENT,
     PlanningChallengeRefreshRefusal,
     freeze_planning_challenge,
     freeze_planning_spec,
     load_planning_artifacts,
     load_planning_challenge,
     planning_artifact_paths,
+    publish_automatic_planning_revision,
     retire_planning_challenge,
 )
 
@@ -50,6 +55,8 @@ if mode in {"planner", "mutate", "wrapped-planner", "aggregate-planner"}:
         "decisions": [],
         "spec_refs": [],
     }
+    if "Independent review findings:" in prompt:
+        payload["behavior"].append("Incorporate independent review findings")
     if mode == "wrapped-planner":
         print("Here is the requested object:\n```json\n" + json.dumps(payload) + "\n```")
     elif mode == "aggregate-planner":
@@ -108,6 +115,13 @@ elif mode == "revise":
         "findings": [{"kind": "scope-risk", "summary": "Narrow the affected paths"}],
         "required_decisions": [],
     }))
+elif mode == "revise-until-updated":
+    covered = "Incorporate independent review findings" in prompt
+    print(json.dumps({
+        "verdict": "accept" if covered else "revise",
+        "findings": [] if covered else [{"kind": "scope-risk", "summary": "Narrow the affected paths"}],
+        "required_decisions": [],
+    }))
 elif mode == "human":
     print(json.dumps({
         "verdict": "needs-human-decision",
@@ -163,7 +177,7 @@ def test_run_ready_executes_distinct_roles_then_stops_for_human_approval(tmp_pat
 
     code, result = _run(project)
 
-    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate", result
     assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
     assert (project / "README.md").read_text(encoding="utf-8") == before
     spec, approval = load_planning_artifacts(project, "T-1")
@@ -191,6 +205,32 @@ def test_run_ready_executes_distinct_roles_then_stops_for_human_approval(tmp_pat
     assert report["planning"]["challenger_execution"]["provider"] == "challenger"
     assert "Keep the requested behavior bounded" not in json.dumps(report)
     store.close()
+
+
+def test_new_task_is_bound_before_accountable_approval(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    config = _config(_script(tmp_path), challenger_mode="revise-until-updated")
+    config["planning_gate"]["approval_authority"] = {
+        "version": 1,
+        "authority_id": "project-owner:test",
+        "approver_id": "owner:test",
+    }
+    project = _project(tmp_path, ["T-1"], config=config)
+
+    code, result = _run(project)
+
+    assert code != 0 and result["detail"]["next_action"] == "obtain_planning_approval"
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.task_baseline("T-1") == GitWorkspace(project).head()
+        assert store.task_contract("T-1") is not None
+    finally:
+        store.close()
+
+    approved = cli_module.main(
+        ["--project", str(project), "approve-planning", "--task", "T-1", "--json"]
+    )
+    approval = json.loads(capsys.readouterr().out)
+    assert approved == 0 and approval["approver_id"] == "owner:test"
 
 
 def test_approved_executed_artifacts_are_reused_without_another_provider_call(tmp_path: Path):
@@ -228,7 +268,9 @@ def test_approved_executed_artifacts_are_reused_without_another_provider_call(tm
     store.close()
 
 
-def test_revise_verdict_is_preserved_and_blocks_implementation(tmp_path: Path):
+def test_revise_verdict_gets_one_bounded_revision_then_blocks_if_findings_remain(
+    tmp_path: Path,
+) -> None:
     project = _project(
         tmp_path,
         ["T-1"],
@@ -237,9 +279,116 @@ def test_revise_verdict_is_preserved_and_blocks_implementation(tmp_path: Path):
 
     code, result = _run(project)
 
-    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate", result
     assert result["detail"]["next_action"] == NEXT_REVISE_SPEC
     assert load_planning_challenge(project, "T-1")["verdict"] == "revise"
+    spec, _approval = load_planning_artifacts(project, "T-1")
+    assert "Incorporate independent review findings" in spec["behavior"]
+    assert len(result["detail"]["planning_findings"]) == 1
+    assert ".stagemesh/planning/T-1.challenge.json" in result["message"]
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 4
+        assert len(list(store.task_audit_events(PLANNING_REVISION_INTENT_EVENT, "T-1"))) == 1
+        assert len(list(store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1"))) == 1
+        before = store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
+    finally:
+        store.close()
+
+    second_code, second = _run(project)
+
+    assert second_code != 0 and second["detail"]["next_action"] == NEXT_REVISE_SPEC
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == before
+    finally:
+        store.close()
+
+
+def test_revise_without_human_decisions_is_replanned_and_rechallenged_once(
+    tmp_path: Path,
+) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="revise-until-updated"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate", result
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    spec, _approval = load_planning_artifacts(project, "T-1")
+    challenge = load_planning_challenge(project, "T-1")
+    assert "Incorporate independent review findings" in spec["behavior"]
+    assert challenge["verdict"] == "accept"
+    assert challenge["planning_spec_hash"] == freeze_planning_spec(spec).digest
+    history = project / ".stagemesh" / "planning" / "history"
+    assert len(list(history.glob("T-1.spec.*.json"))) == 1
+    assert len(list(history.glob("T-1.challenge.*.json"))) == 1
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 4
+        assert len(list(store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1"))) == 1
+    finally:
+        store.close()
+
+
+def test_interrupted_planning_revision_restores_both_authoritative_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import spec_planning
+
+    project = _project(tmp_path, ["T-1"])
+    current_spec = _spec(
+        contract_hash=_contract_digest(), baseline_sha=GitWorkspace(project).head()
+    )
+    current_frozen = freeze_planning_spec(current_spec)
+    challenge = {
+        "version": 1,
+        "planning_spec_hash": current_frozen.digest,
+        "planner_provider": "planner",
+        "challenger_provider": "challenger",
+        "verdict": "revise",
+        "findings": [{"kind": "missing-test", "summary": "Add the missing test"}],
+        "required_decisions": [],
+    }
+    spec_path, _approval_path = planning_artifact_paths(project, "T-1")
+    challenge_path = spec_path.with_name("T-1.challenge.json")
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(json.dumps(current_spec), encoding="utf-8")
+    challenge_path.write_text(json.dumps(challenge), encoding="utf-8")
+    revised_spec = {**current_spec, "behavior": ["Revised bounded behavior"]}
+    original_replace = spec_planning.os.replace
+    replacements = 0
+
+    def interrupt_second_replace(source, destination):
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            raise OSError("simulated artifact transition interruption")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(spec_planning.os, "replace", interrupt_second_replace)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        store.migrate()
+        assert store.upsert_task("task T-1", source_id="T-1") == "T-1"
+        with pytest.raises(OSError, match="simulated artifact transition interruption"):
+            publish_automatic_planning_revision(
+                store,
+                project,
+                "T-1",
+                current_spec_payload=current_spec,
+                challenge_payload=challenge,
+                revised_spec_payload=revised_spec,
+            )
+        assert freeze_planning_spec(json.loads(spec_path.read_text(encoding="utf-8"))).digest == current_frozen.digest
+        assert freeze_planning_challenge(json.loads(challenge_path.read_text(encoding="utf-8"))).digest == freeze_planning_challenge(challenge).digest
+        assert len(list(store.task_audit_events(PLANNING_REVISION_ABORTED_EVENT, "T-1"))) == 1
+        assert list(store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1")) == []
+    finally:
+        store.close()
 
 
 def test_accountable_gate_surfaces_challenge_decisions_before_missing_approval(tmp_path: Path):
@@ -257,6 +406,12 @@ def test_accountable_gate_surfaces_challenge_decisions_before_missing_approval(t
     assert result["detail"]["next_action"] == "resolve_planning_challenge_decisions"
     assert result["detail"]["required_decisions"] == ["Confirm whether this task is authorized"]
     assert "Confirm whether this task is authorized" in result["message"]
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 2
+        assert list(store.task_audit_events(PLANNING_REVISION_INTENT_EVENT, "T-1")) == []
+    finally:
+        store.close()
 
 
 def test_current_protocol_human_decision_cannot_be_rerolled(tmp_path: Path):

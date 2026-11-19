@@ -16,12 +16,11 @@ from .auto_plan import (
 )
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
-from .contract_binding import contract_for_candidate
+from .contract_binding import bind_task_contract, contract_for_candidate
 from .contract_check import contract_section_sizes
 from .contract_feasibility import check_contract_feasibility
 from .contracts import (
     ContractError,
-    bind_contract,
     canonical_contract_json,
     contract_admission_problem,
     parse_contract,
@@ -51,6 +50,7 @@ from .spec_planning import (
     BOUNDARY_PICKUP,
     NEXT_APPROVE_SPEC,
     NEXT_RESOLVE_CHALLENGE_DECISIONS,
+    NEXT_REVISE_SPEC,
     check_accountable_approval,
     evaluate_planning_gate,
     load_planning_artifacts,
@@ -357,18 +357,21 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
         require_challenge = config.require_plan_challenge
     if not enabled:
         return
+    persisted_baseline = store.task_baseline(task_id)
+    baseline = persisted_baseline or GitWorkspace(project).head()
     record = store.task_contract(task_id)
     if record is not None:
         contract_hash = str(record["digest"])
         contract_json = str(record["canonical_json"])
-    else:  # not yet bound by the coordinator: the on-disk contract is what will be bound
+    else:
         try:
-            bound = bind_contract(project, task_id)
+            bound = bind_task_contract(store, project, task_id, baseline)
             contract_hash = bound.digest
             contract_json = bound.canonical_json
         except (OSError, ValueError, ContractError) as exc:
             raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
-    baseline = store.task_baseline(task_id) or GitWorkspace(project).head()
+    if persisted_baseline is None:
+        baseline = store.set_task_baseline(task_id, baseline)
     try:
         ensure_executed_planning(
             store,
@@ -404,6 +407,7 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
     ):
         reason = preapproval.reason
         required_decisions: list[str] = []
+        planning_findings: list[dict[str, str]] = []
         if (
             preapproval.next_action == NEXT_RESOLVE_CHALLENGE_DECISIONS
             and isinstance(challenge_payload, dict)
@@ -414,6 +418,22 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             ]
             if required_decisions:
                 reason += ": " + json.dumps(required_decisions, ensure_ascii=True)
+        if (
+            preapproval.next_action == NEXT_REVISE_SPEC
+            and isinstance(challenge_payload, dict)
+            and isinstance(challenge_payload.get("findings"), list)
+        ):
+            planning_findings = [
+                {"kind": str(item["kind"]), "summary": str(item["summary"])}
+                for item in challenge_payload["findings"]
+                if isinstance(item, dict)
+                and isinstance(item.get("kind"), str)
+                and isinstance(item.get("summary"), str)
+            ]
+            reason += (
+                f"; {len(planning_findings)} finding(s) saved to "
+                f".stagemesh/planning/{task_id}.challenge.json"
+            )
         raise RunReadyRefusal(
             "planning_gate",
             f"task {task_id} is blocked before implementation: {reason}",
@@ -421,6 +441,7 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             next_action=preapproval.next_action,
             planning_gate_reason=preapproval.reason,
             required_decisions=required_decisions,
+            planning_findings=planning_findings,
         )
     if accountable:
         approval_decision = check_accountable_approval(

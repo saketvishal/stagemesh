@@ -870,6 +870,12 @@ def main() -> int:
         assert "github_acceptance" in gate_names
         assert "live_acceptance" in gate_names
         assert "acceptance" not in gate_names
+        full_gate_names = [name for name, _ in default_gate_commands(include_acceptance=True)]
+        assert full_gate_names[-3:] == [
+            "acceptance",
+            "project_local_acceptance",
+            "development_journey_acceptance",
+        ]
 
     def capacity_registry_rejects_invalid_provider_state(store: Store, project: Path) -> None:
         registry = CapacityRegistry()
@@ -1560,7 +1566,8 @@ def main() -> int:
         matrix = acceptance_matrix()
         assert matrix["status"] == "INCOMPLETE"
         rows = matrix["rows"]
-        assert any(row["status"] == "PROVEN" for row in rows)
+        assert not any(row["status"] == "PROVEN" for row in rows)
+        assert any(row["status"] == "COVERED_NOT_EXECUTED" for row in rows)
         assert any(row["status"] != "PROVEN" for row in rows)
         project.mkdir(parents=True, exist_ok=True)
         output = project / ".stagemesh" / "acceptance-matrix.json"
@@ -1571,13 +1578,30 @@ def main() -> int:
 
     def end_to_end_acceptance_tracks_requested_steps(store: Store, project: Path) -> None:
         data = end_to_end_acceptance()
-        assert data["status"] == "COMPLETE"
-        assert data["proven"] == data["total"] == 18
+        assert data["status"] == "INCOMPLETE"
+        assert data["proven"] == 0 and data["total"] == 18
+        assert data["receipt_problem"] == "development journey has not been executed"
         steps = data["steps"]
         assert [step["step"] for step in steps] == list(range(1, 19))
         requirements = {step["requirement"] for step in steps}
-        assert "interrupt validation" in requirements
-        assert "prove a deliberately broken future feature is rejected by CI" in requirements
+        assert "interrupt active work" in requirements
+        assert "reject a deliberately failing qualification" in requirements
+        receipt = {
+            "schema_version": 1,
+            "candidate_sha": "abc1234",
+            "source_dirty": False,
+            "status": "PASS",
+            "steps": [
+                {"step": step["step"], "status": "PASS", "evidence": f"synthetic step {step['step']}"}
+                for step in steps
+            ],
+        }
+        complete = end_to_end_acceptance(receipt, "abc1234")
+        assert complete["status"] == "COMPLETE" and complete["proven"] == complete["total"] == 18
+        stale = end_to_end_acceptance(receipt, "def5678")
+        assert stale["status"] == "INCOMPLETE" and stale["proven"] == 0
+        failed = end_to_end_acceptance({**receipt, "status": "FAIL"}, "abc1234")
+        assert failed["status"] == "INCOMPLETE" and failed["proven"] == 0
         project.mkdir(parents=True, exist_ok=True)
         output = project / ".stagemesh" / "end-to-end-acceptance.json"
         write_end_to_end_acceptance(output, root=project)

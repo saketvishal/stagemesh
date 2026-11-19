@@ -1025,6 +1025,9 @@ PLANNING_CHALLENGE_RETIRED_EVENT = "planning.challenge_retired"
 PLANNING_CHALLENGE_RETIRE_INTENT_EVENT = "planning.challenge_retire_intent"
 PLANNING_CHALLENGE_RETIRE_ABORTED_EVENT = "planning.challenge_retire_aborted"
 PLANNING_CHALLENGER_RECEIPT_EVENT = "planning.challenge_produced"
+PLANNING_REVISION_INTENT_EVENT = "planning.spec_revision_intent"
+PLANNING_REVISION_COMPLETED_EVENT = "planning.spec_revision_completed"
+PLANNING_REVISION_ABORTED_EVENT = "planning.spec_revision_aborted"
 
 
 class PlanningApprovalRefusal(Exception):
@@ -1042,6 +1045,202 @@ class PlanningChallengeRefreshRefusal(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class PlanningRevisionRefusal(Exception):
+    """A generated plan could not be revised without weakening its evidence boundary."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def automatic_planning_revision_used(
+    store: Store, task_id: str, current_spec_hash: str
+) -> bool:
+    """Return whether the current generated spec is already the one bounded automatic revision."""
+    for row in store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, task_id):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("to_spec_hash") == current_spec_hash:
+            return True
+    return False
+
+
+def publish_automatic_planning_revision(
+    store: Store,
+    project: Path,
+    task_id: str,
+    *,
+    current_spec_payload: Any,
+    challenge_payload: Any,
+    revised_spec_payload: Any,
+) -> dict[str, Any]:
+    """Replace one unapproved generated plan while preserving exact old artifacts and an audit trail."""
+    if store.get_task(task_id) is None:
+        raise PlanningRevisionRefusal("task_missing", f"task {task_id} is not present in the StageMesh ledger")
+    if store.has_active_claim(task_id):
+        raise PlanningRevisionRefusal("claim_active", f"task {task_id} has an active claim")
+    active = sorted(store.active_execution_kinds(task_id))
+    if active:
+        raise PlanningRevisionRefusal(
+            "execution_active",
+            f"task {task_id} has active {', '.join(kind.lower() for kind in active)} execution",
+        )
+
+    try:
+        current = freeze_planning_spec(current_spec_payload)
+        challenge = freeze_planning_challenge(challenge_payload)
+        revised = freeze_planning_spec(revised_spec_payload)
+    except PlanningSpecError as exc:
+        raise PlanningRevisionRefusal("planning_revision_invalid", str(exc)) from exc
+    if challenge.challenge.planning_spec_hash != current.digest:
+        raise PlanningRevisionRefusal(
+            "planning_revision_stale", "the challenge does not belong to the current planning spec"
+        )
+    if challenge.challenge.verdict != "revise" or challenge.challenge.required_decisions:
+        raise PlanningRevisionRefusal(
+            "planning_revision_not_allowed",
+            "automatic revision requires a revise verdict with no human decisions",
+        )
+    if revised.digest == current.digest:
+        raise PlanningRevisionRefusal(
+            "planning_revision_no_change", "the planner returned the same planning spec after review"
+        )
+    if automatic_planning_revision_used(store, task_id, current.digest):
+        raise PlanningRevisionRefusal(
+            "planning_revision_limit",
+            "the bounded automatic planning revision has already been used for the current spec",
+        )
+
+    spec_path, approval_path = planning_artifact_paths(project, task_id)
+    challenge_path = planning_challenge_path(project, task_id)
+    if approval_path.exists() or any(
+        receipt.get("planning_spec_hash") == current.digest
+        or receipt.get("planning_challenge_hash") == challenge.digest
+        for receipt in store.planning_approval_receipts(task_id)
+    ):
+        raise PlanningRevisionRefusal(
+            "approval_exists", "an approved planning artifact cannot be revised automatically"
+        )
+    if any(
+        path.exists() and _is_link_or_junction(path)
+        for path in (spec_path, challenge_path, approval_path)
+    ):
+        raise PlanningRevisionRefusal(
+            "unsafe_planning_path", "planning artifacts must not be symlinks or junctions"
+        )
+    if _spec_file_digest(spec_path) != current.digest or _challenge_file_digest(challenge_path) != challenge.digest:
+        raise PlanningRevisionRefusal(
+            "planning_revision_race", "the planning artifacts changed before revision publication"
+        )
+
+    try:
+        history_dir = _validated_planning_history(project, challenge_path, create=True)
+    except PlanningChallengeRefreshRefusal as exc:
+        raise PlanningRevisionRefusal(exc.code, str(exc)) from exc
+    revision_id = uuid.uuid4().hex
+    spec_archive = history_dir / f"{spec_path.stem}.{current.digest}.{revision_id}.json"
+    challenge_archive = history_dir / f"{challenge_path.stem}.{challenge.digest}.{revision_id}.json"
+    pending_spec = history_dir / f"{spec_path.stem}.{revised.digest}.{revision_id}.pending.json"
+    intent_payload = {
+        "task_id": task_id,
+        "from_spec_hash": current.digest,
+        "challenge_hash": challenge.digest,
+        "to_spec_hash": revised.digest,
+        "spec_archive_path": spec_archive.relative_to(project).as_posix(),
+        "challenge_archive_path": challenge_archive.relative_to(project).as_posix(),
+        "pending_spec_path": pending_spec.relative_to(project).as_posix(),
+        "revision_limit": 1,
+    }
+    intent_event_id = store.add_audit_event(PLANNING_REVISION_INTENT_EVENT, intent_payload)
+    try:
+        _write_exclusive(
+            pending_spec,
+            json.dumps(revised_spec_payload, sort_keys=True, separators=(",", ":")),
+        )
+        os.replace(spec_path, spec_archive)
+        os.replace(challenge_path, challenge_archive)
+        os.replace(pending_spec, spec_path)
+        if (
+            _spec_file_digest(spec_path) != revised.digest
+            or _spec_file_digest(spec_archive) != current.digest
+            or _challenge_file_digest(challenge_archive) != challenge.digest
+        ):
+            raise PlanningRevisionRefusal(
+                "planning_revision_mismatch", "published planning revision does not match its audit intent"
+            )
+        event_id = store.add_audit_event(
+            PLANNING_REVISION_COMPLETED_EVENT,
+            {**intent_payload, "intent_event_id": intent_event_id},
+        )
+    except BaseException:
+        if _intent_has_terminal_event(store, task_id, intent_event_id, PLANNING_REVISION_COMPLETED_EVENT):
+            raise
+        restored = _rollback_planning_revision(
+            spec_path=spec_path,
+            challenge_path=challenge_path,
+            spec_archive=spec_archive,
+            challenge_archive=challenge_archive,
+            pending_spec=pending_spec,
+            from_spec_hash=current.digest,
+            challenge_hash=challenge.digest,
+            to_spec_hash=revised.digest,
+        )
+        with suppress(Exception):
+            store.add_audit_event(
+                PLANNING_REVISION_ABORTED_EVENT,
+                {**intent_payload, "intent_event_id": intent_event_id, "restored": restored},
+            )
+        raise
+    return {
+        **intent_payload,
+        "intent_event_id": intent_event_id,
+        "audit_event_id": event_id,
+    }
+
+
+def _write_exclusive(path: Path, text: str) -> None:
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(text + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise PlanningRevisionRefusal(
+            "planning_revision_publish_failed",
+            f"planning revision could not be staged: {type(exc).__name__}",
+        ) from exc
+
+
+def _rollback_planning_revision(
+    *,
+    spec_path: Path,
+    challenge_path: Path,
+    spec_archive: Path,
+    challenge_archive: Path,
+    pending_spec: Path,
+    from_spec_hash: str,
+    challenge_hash: str,
+    to_spec_hash: str,
+) -> bool:
+    try:
+        if _spec_file_digest(spec_path) == to_spec_hash:
+            if pending_spec.exists():
+                return False
+            os.replace(spec_path, pending_spec)
+        if not spec_path.exists() and _spec_file_digest(spec_archive) == from_spec_hash:
+            os.replace(spec_archive, spec_path)
+        if not challenge_path.exists() and _challenge_file_digest(challenge_archive) == challenge_hash:
+            os.replace(challenge_archive, challenge_path)
+    except OSError:
+        return False
+    return (
+        _spec_file_digest(spec_path) == from_spec_hash
+        and _challenge_file_digest(challenge_path) == challenge_hash
+    )
 
 
 def retire_planning_challenge(
@@ -1388,6 +1587,110 @@ def _challenge_file_digest(path: Path) -> str | None:
         return freeze_planning_challenge(json.loads(path.read_text(encoding="utf-8"))).digest
     except (OSError, ValueError, PlanningSpecError):
         return None
+
+
+def _spec_file_digest(path: Path) -> str | None:
+    try:
+        return freeze_planning_spec(json.loads(path.read_text(encoding="utf-8"))).digest
+    except (OSError, ValueError, PlanningSpecError):
+        return None
+
+
+def reconcile_automatic_planning_revision(
+    store: Store, project: Path, task_id: str
+) -> tuple[dict[str, Any], ...]:
+    """Finish or roll back an interrupted generated-plan revision without invoking a provider."""
+    terminal_intents: set[str] = set()
+    for event_type in (PLANNING_REVISION_COMPLETED_EVENT, PLANNING_REVISION_ABORTED_EVENT):
+        for row in store.task_audit_events(event_type, task_id):
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            intent_id = payload.get("intent_event_id") if isinstance(payload, dict) else None
+            if isinstance(intent_id, str):
+                terminal_intents.add(intent_id)
+
+    reconciled: list[dict[str, Any]] = []
+    spec_path, _approval_path = planning_artifact_paths(project, task_id)
+    challenge_path = planning_challenge_path(project, task_id)
+    for row in store.task_audit_events(PLANNING_REVISION_INTENT_EVENT, task_id):
+        intent_event_id = str(row["id"])
+        if intent_event_id in terminal_intents:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PlanningRevisionRefusal(
+                "planning_revision_incomplete", "a planning revision intent is malformed"
+            ) from exc
+        required = {
+            "from_spec_hash",
+            "challenge_hash",
+            "to_spec_hash",
+            "spec_archive_path",
+            "challenge_archive_path",
+            "pending_spec_path",
+        }
+        if not isinstance(payload, dict) or any(not isinstance(payload.get(key), str) for key in required):
+            raise PlanningRevisionRefusal(
+                "planning_revision_incomplete", "a planning revision intent is incomplete"
+            )
+        try:
+            history_dir = _validated_planning_history(project, challenge_path, create=False)
+        except PlanningChallengeRefreshRefusal as exc:
+            raise PlanningRevisionRefusal(exc.code, str(exc)) from exc
+        artifact_paths: dict[str, Path] = {}
+        for key in ("spec_archive_path", "challenge_archive_path", "pending_spec_path"):
+            raw = payload[key]
+            if Path(raw).is_absolute():
+                raise PlanningRevisionRefusal(
+                    "planning_revision_incomplete", "a planning revision history path is invalid"
+                )
+            artifact = project / raw
+            if artifact.parent.resolve() != history_dir.resolve() or (
+                artifact.exists() and _is_link_or_junction(artifact)
+            ):
+                raise PlanningRevisionRefusal(
+                    "planning_revision_incomplete", "a planning revision artifact escaped its history directory"
+                )
+            artifact_paths[key] = artifact
+
+        spec_archive = artifact_paths["spec_archive_path"]
+        challenge_archive = artifact_paths["challenge_archive_path"]
+        pending_spec = artifact_paths["pending_spec_path"]
+        terminal_payload = {**payload, "intent_event_id": intent_event_id, "reconciled": True}
+        completed = (
+            _spec_file_digest(spec_path) == payload["to_spec_hash"]
+            and _spec_file_digest(spec_archive) == payload["from_spec_hash"]
+            and _challenge_file_digest(challenge_archive) == payload["challenge_hash"]
+            and not challenge_path.exists()
+        )
+        if completed:
+            event_type = PLANNING_REVISION_COMPLETED_EVENT
+            event_id = store.add_audit_event(event_type, terminal_payload)
+        else:
+            restored = _rollback_planning_revision(
+                spec_path=spec_path,
+                challenge_path=challenge_path,
+                spec_archive=spec_archive,
+                challenge_archive=challenge_archive,
+                pending_spec=pending_spec,
+                from_spec_hash=payload["from_spec_hash"],
+                challenge_hash=payload["challenge_hash"],
+                to_spec_hash=payload["to_spec_hash"],
+            )
+            if not restored:
+                raise PlanningRevisionRefusal(
+                    "planning_revision_incomplete",
+                    "planning revision state is ambiguous; the current and archived artifacts do not match its intent",
+                )
+            event_type = PLANNING_REVISION_ABORTED_EVENT
+            event_id = store.add_audit_event(
+                event_type, {**terminal_payload, "restored": True}
+            )
+        reconciled.append({**terminal_payload, "event_id": event_id, "event_type": event_type})
+    return tuple(reconciled)
 
 
 def _intent_has_terminal_event(store: Store, task_id: str, intent_event_id: str, event_type: str) -> bool:

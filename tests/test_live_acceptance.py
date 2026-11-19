@@ -5,8 +5,11 @@ import urllib.error
 from pathlib import Path
 
 from scripts.live_acceptance import live_acceptance_checks, provider_execution_status
+from stagemesh.ci import default_gate_commands
 from stagemesh.domain import ExecutionKind, ExecutionStatus
+from stagemesh.e2e_acceptance import end_to_end_acceptance
 from stagemesh.persistence import Store
+from stagemesh.qualification import qualification_commands
 
 
 def _store(root: Path) -> Store:
@@ -74,3 +77,38 @@ def test_live_acceptance_reports_github_transport_failure_as_unknown(
         {"name": "github", "status": "UNKNOWN"},
         {"name": "github:sync", "status": "NOT_PROVEN"},
     ]
+
+
+def test_release_qualification_has_one_authoritative_gate_manifest() -> None:
+    assert default_gate_commands(False) == qualification_commands(False)
+    assert default_gate_commands(True) == qualification_commands(True)
+    names = [name for name, _command in qualification_commands(True)]
+    assert len(names) == len(set(names))
+    assert names[-3:] == [
+        "acceptance",
+        "project_local_acceptance",
+        "development_journey_acceptance",
+    ]
+
+
+def test_end_to_end_proof_requires_a_current_clean_executable_receipt() -> None:
+    missing = end_to_end_acceptance()
+    assert missing["status"] == "INCOMPLETE" and missing["proven"] == 0
+    steps = [
+        {"step": row["step"], "status": "PASS", "evidence": f"step {row['step']}"}
+        for row in missing["steps"]
+    ]
+    receipt = {
+        "schema_version": 1,
+        "candidate_sha": "abc1234",
+        "source_dirty": False,
+        "status": "PASS",
+        "steps": steps,
+    }
+    complete = end_to_end_acceptance(receipt, "abc1234")
+    assert complete["status"] == "COMPLETE" and complete["proven"] == complete["total"] == 18
+    assert end_to_end_acceptance(receipt, "def5678")["status"] == "INCOMPLETE"
+    assert end_to_end_acceptance({**receipt, "source_dirty": True}, "abc1234")["status"] == "INCOMPLETE"
+    assert end_to_end_acceptance({**receipt, "status": "FAIL"}, "abc1234")["status"] == "INCOMPLETE"
+    no_evidence = {**receipt, "steps": [{**steps[0], "evidence": ""}, *steps[1:]]}
+    assert end_to_end_acceptance(no_evidence, "abc1234")["status"] == "INCOMPLETE"

@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .acceptance import AcceptanceCheck, proof_gaps
 from .completion_audit import completion_audit
+from .e2e_acceptance import end_to_end_acceptance
 from .external_evidence import external_evidence_records
 from .persistence import Store
+from .qualification import qualification_commands
 from .security import WorkspaceBoundary
 
 
@@ -46,32 +47,29 @@ def release_readiness(
     checks: list[ReadinessCheck] = []
     if run_checks:
         checks = [
-            run_command_check("compile", [sys.executable, "-m", "compileall", "-q", "src", "scripts", "build_backend.py"], root),
-            run_command_check("invariants", [sys.executable, "scripts/invariants.py"], root),
-            run_command_check("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"], root),
-            run_command_check("github_acceptance", [sys.executable, "scripts/github_acceptance.py"], root),
-            run_command_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py", "--json"], root),
-            run_command_check(
-                "install",
-                [sys.executable, "-m", "pip", "install", ".", "--target", ".tmp-install", "--no-cache-dir", "--upgrade"],
-                root,
-            ),
+            run_command_check(name, command, root)
+            for name, command in qualification_commands(include_acceptance)
         ]
-        if include_acceptance:
-            checks.insert(4, run_command_check("acceptance", [sys.executable, "scripts/acceptance.py"], root))
     audit = completion_audit(store, candidate_sha)
     external_gaps = [
         item for item in audit["items"]
         if item["status"] in {"REQUIRES_CREDENTIALS", "MISSING_EXTERNAL_EVIDENCE", "INTERFACE_READY"}
     ]
     evidence = _evidence_summary(store, candidate_sha)
-    local_pass = all(check.status == "PASS" for check in checks) if checks else True
+    journey = None
+    if run_checks and include_acceptance:
+        receipt = root / ".stagemesh" / "reports" / "qualification" / "development-journey.json"
+        journey = end_to_end_acceptance(receipt if receipt.exists() else None, candidate_sha)
+    local_pass = (all(check.status == "PASS" for check in checks) if checks else True) and (
+        journey is None or journey["status"] == "COMPLETE"
+    )
     local_gaps = proof_gaps([AcceptanceCheck(check.name, check.status, check.detail) for check in checks])
     return {
         "generated_at": time.time(),
         "local_status": "PASS" if local_pass else "FAIL",
         "overall_status": "BLOCKED_ON_EXTERNAL_EVIDENCE" if local_pass and external_gaps else ("PASS" if local_pass else "FAIL"),
         "checks": [check.__dict__ for check in checks],
+        "end_to_end": journey,
         "local_proof_gaps": local_gaps,
         "external_evidence": evidence,
         "external_gaps": external_gaps,

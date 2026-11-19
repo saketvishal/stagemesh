@@ -4609,14 +4609,15 @@ def command_acceptance_matrix(args: argparse.Namespace) -> int:
 def command_end_to_end_acceptance(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-    data = end_to_end_acceptance()
+    receipt = project / ".stagemesh" / "reports" / "qualification" / "development-journey.json"
+    data = end_to_end_acceptance(receipt if receipt.exists() else None, candidate_sha(project))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
-        return 0
+        return 0 if data["status"] == "COMPLETE" else 1
     print(f"end-to-end-acceptance: {output}")
-    return 0
+    return 0 if data["status"] == "COMPLETE" else 1
 
 
 def command_registry(args: argparse.Namespace) -> int:
