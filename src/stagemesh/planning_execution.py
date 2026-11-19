@@ -43,6 +43,7 @@ from .queue_control import OperatorStopRequested
 from .research_context import source_snapshot
 from .review_identity import command_snapshot, valid_command_snapshot
 from .spec_planning import (
+    CHALLENGE_FINDING_KINDS,
     MAX_CANONICAL_CHARS,
     MAX_ITEMS,
     MAX_TEXT_CHARS,
@@ -70,7 +71,7 @@ from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 
 PLANNER_RECEIPT = "planning.spec_produced"
 CHALLENGER_RECEIPT = "planning.challenge_produced"
-PLANNER_PROTOCOL_RETRY = "planning.provider_output_retry"
+PLANNING_PROTOCOL_RETRY = "planning.provider_output_retry"
 _OUTPUT_LIMIT = 12_000
 _PLANNER_PATH_PROTOCOL = (
     "affected_paths entries must be project-relative paths using forward slashes. "
@@ -146,7 +147,7 @@ def _ensure_executed_planning_owned(
     if spec_payload is None and config.planner_provider is not None:
         adapter = _role_adapter(config, config.planner_provider)
         task = store.get_task(task_id)
-        planned, execution = _run_planner_role(
+        planned, execution = _run_role(
             store,
             project,
             task_id,
@@ -154,7 +155,8 @@ def _ensure_executed_planning_owned(
             adapter,
             "planner",
             _planner_prompt(task_id, str(task["title"]), contract_json),
-            contract_hash,
+            lambda payload: _freeze_planner(payload, contract_hash, baseline_sha, project),
+            protocol_role="planner",
         )
         frozen, normalized = planned
         _record_receipt(
@@ -255,7 +257,7 @@ def _ensure_executed_planning_owned(
         ):
             adapter = _role_adapter(config, config.planner_provider)
             task = store.get_task(task_id)
-            revised, execution = _run_planner_role(
+            revised, execution = _run_role(
                 store,
                 project,
                 task_id,
@@ -269,7 +271,10 @@ def _ensure_executed_planning_owned(
                     frozen_existing.canonical_json,
                     contract_json,
                 ),
-                contract_hash,
+                lambda payload: _freeze_planner(
+                    payload, contract_hash, baseline_sha, project
+                ),
+                protocol_role="planner",
             )
             revised_frozen, revised_normalized = revised
             _record_receipt(
@@ -319,6 +324,7 @@ def _ensure_executed_planning_owned(
         lambda payload: _freeze_challenge(
             payload, frozen_spec.digest, str(planner["provider"]), adapter.name
         ),
+        protocol_role="challenger",
     )
     _record_receipt(
         store,
@@ -386,6 +392,54 @@ def _configured_adapter(config: StageMeshConfig, provider: str) -> RuntimeComman
 
 
 def _run_role(
+    store: Store,
+    project: Path,
+    task_id: str,
+    baseline_sha: str,
+    adapter: RuntimeCommandAdapter,
+    purpose: str,
+    prompt: str,
+    accept: Callable[[dict[str, Any]], Any],
+    *,
+    protocol_role: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Run one planning role with at most one protocol-only correction."""
+    try:
+        return _run_role_once(
+            store, project, task_id, baseline_sha, adapter, purpose, prompt, accept
+        )
+    except PlanningExecutionError as exc:
+        if protocol_role is None or exc.code not in {
+            f"{purpose}_invalid",
+            f"{protocol_role}_invalid",
+            f"{protocol_role}_over_budget",
+        }:
+            raise
+        store.add_audit_event(
+            PLANNING_PROTOCOL_RETRY,
+            {
+                "task_id": task_id,
+                "provider": adapter.name,
+                "purpose": purpose,
+                "protocol_role": protocol_role,
+                "failed_code": exc.code,
+                "attempt": 2,
+                "max_attempts": 2,
+            },
+        )
+        return _run_role_once(
+            store,
+            project,
+            task_id,
+            baseline_sha,
+            adapter,
+            purpose,
+            _planning_protocol_correction_prompt(protocol_role, prompt, str(exc)),
+            accept,
+        )
+
+
+def _run_role_once(
     store: Store,
     project: Path,
     task_id: str,
@@ -497,63 +551,6 @@ def _run_role(
             _cleanup_review_workspace(temp_dir)
 
 
-def _run_planner_role(
-    store: Store,
-    project: Path,
-    task_id: str,
-    baseline_sha: str,
-    adapter: RuntimeCommandAdapter,
-    purpose: str,
-    prompt: str,
-    contract_hash: str,
-) -> tuple[Any, dict[str, Any]]:
-    """Run a planner with one protocol-only correction, never an open-ended retry."""
-
-    def accept(payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
-        return _freeze_planner(payload, contract_hash, baseline_sha, project)
-
-    try:
-        return _run_role(
-            store,
-            project,
-            task_id,
-            baseline_sha,
-            adapter,
-            purpose,
-            prompt,
-            accept,
-        )
-    except PlanningExecutionError as exc:
-        correctable = {
-            "planner_invalid",
-            "planner_over_budget",
-            f"{purpose}_invalid",
-        }
-        if exc.code not in correctable:
-            raise
-        store.add_audit_event(
-            PLANNER_PROTOCOL_RETRY,
-            {
-                "task_id": task_id,
-                "provider": adapter.name,
-                "purpose": purpose,
-                "failed_code": exc.code,
-                "attempt": 2,
-                "max_attempts": 2,
-            },
-        )
-        return _run_role(
-            store,
-            project,
-            task_id,
-            baseline_sha,
-            adapter,
-            purpose,
-            _planner_protocol_correction_prompt(prompt, str(exc)),
-            accept,
-        )
-
-
 def _provider_json_object(text: str, purpose: str) -> dict[str, Any]:
     """Parse one provider JSON object while tolerating presentation wrappers.
 
@@ -662,19 +659,34 @@ def _planner_revision_prompt(
     )
 
 
-def _planner_protocol_correction_prompt(original_prompt: str, error: str) -> str:
+def _planning_protocol_correction_prompt(
+    protocol_role: str, original_prompt: str, error: str
+) -> str:
     bounded_error = _truncate_provider_text(error)
+    if protocol_role == "planner":
+        rules = _PLANNER_PATH_PROTOCOL
+    elif protocol_role == "challenger":
+        allowed_kinds = ", ".join(CHALLENGE_FINDING_KINDS)
+        rules = (
+            "verdict must be exactly accept, revise, or needs-human-decision. "
+            "findings must be a list of objects containing only kind and summary; "
+            f"kind must be one of: {allowed_kinds}. "
+            "required_decisions must be a list of strings. Do not add unknown fields. "
+        )
+    else:  # pragma: no cover - internal callers select a known role
+        raise ValueError(f"unsupported planning protocol role: {protocol_role}")
     return (
         "StageMesh rejected the previous response because it did not satisfy the planning JSON protocol. "
         "This is the only correction attempt; it is not permission to change scope or make a new product decision. "
         f"Validation error: {bounded_error}\n"
-        + _PLANNER_PATH_PROTOCOL
+        + rules
         + "Return one complete corrected JSON object with no commentary. Re-evaluate the original request below.\n"
         + original_prompt
     )
 
 
 def _challenger_prompt(task_id: str, planning_json: str, contract_json: str) -> str:
+    allowed_kinds = ", ".join(CHALLENGE_FINDING_KINDS)
     return (
         f"Independently challenge the planning spec for task {task_id}. Inspect this exact checkout read-only. "
         "Find omitted requirements, unsupported assumptions, cheaper alternatives, missing tests, objective drift, "
@@ -685,6 +697,7 @@ def _challenger_prompt(task_id: str, planning_json: str, contract_json: str) -> 
         "or governance choice that changes the implementation plan. "
         "Do not edit files. Reply with one JSON object and no progress text containing verdict "
         "(accept, revise, or needs-human-decision), findings (kind/summary objects), and required_decisions (list). "
+        f"Every finding kind must be exactly one of: {allowed_kinds}. "
         f"Return at most {MAX_ITEMS} findings and keep every finding summary to "
         f"{MAX_TEXT_CHARS} characters or fewer. The complete canonical JSON must fit "
         f"{MAX_CANONICAL_CHARS} characters.\nTask contract:\n"

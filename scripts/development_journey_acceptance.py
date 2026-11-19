@@ -49,9 +49,16 @@ if mode == "planner":
     }))
 elif mode == "challenger":
     revised = "Address the independent scope finding" in prompt
+    corrected = "StageMesh rejected the previous response" in prompt
     print(json.dumps({
         "verdict": "accept" if revised else "revise",
-        "findings": [] if revised else [{"kind": "scope-risk", "summary": "Record the bounded output explicitly"}],
+        "findings": (
+            []
+            if revised and corrected
+            else [{"kind": "scope-risk", "summary": "Record the bounded output explicitly"}]
+            if corrected
+            else [{"kind": "accessibility-risk", "summary": "Unsupported provider category"}]
+        ),
         "required_decisions": [],
     }))
 elif mode == "writer":
@@ -377,11 +384,14 @@ def main() -> int:
             correction_count = audit.execute(
                 "SELECT COUNT(*) FROM audit_events WHERE event_type='planning.provider_output_retry'"
             ).fetchone()[0]
-        expect(correction_count == 2, "planner protocol corrections were not bounded and audited")
+        expect(
+            correction_count == 4,
+            "planner and challenger protocol corrections were not bounded and audited",
+        )
         steps.append(
             evidence(
                 17,
-                "reports, planning history, receipts, the durable ledger, and two bounded protocol corrections were written",
+                "reports, planning history, receipts, the durable ledger, and four bounded role protocol corrections were written",
             )
         )
 
