@@ -15,8 +15,8 @@ from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.planning_execution import (
     CHALLENGER_RECEIPT,
-    PLANNER_PROTOCOL_RETRY,
     PLANNER_RECEIPT,
+    PLANNING_PROTOCOL_RETRY,
     PlanningExecutionError,
     _freeze_planner,
     planning_execution_receipts,
@@ -88,13 +88,27 @@ elif mode in {
     "escaped-challenger",
     "nested-duplicate-challenger",
     "truncated-array-challenger",
+    "invalid-kind-once",
+    "always-invalid-kind",
 }:
     payload = {
         "verdict": "accept",
         "findings": [{"kind": "missing-test", "summary": "Inspect README explicitly"}],
         "required_decisions": [],
     }
-    if mode == "wrapped-challenger":
+    correction = "StageMesh rejected the previous response" in prompt
+    if mode == "invalid-kind-once" and not correction:
+        payload["findings"] = [
+            {"kind": "accessibility-risk", "summary": "Verify narrow screen behavior"},
+            {"kind": "performance-risk", "summary": "Verify fixture loading cost"},
+        ]
+        print(json.dumps(payload))
+    elif mode == "always-invalid-kind":
+        payload["findings"] = [
+            {"kind": "accessibility-risk", "summary": "Verify narrow screen behavior"},
+        ]
+        print(json.dumps(payload))
+    elif mode == "wrapped-challenger":
         print("Independent challenge complete.\n```json\n" + json.dumps(payload) + "\n```\nEnd.")
     elif mode == "ambiguous-challenger":
         print(json.dumps(payload) + "\n" + json.dumps({**payload, "verdict": "revise"}))
@@ -570,7 +584,11 @@ def test_malformed_challenger_output_fails_closed_after_trusted_planner(tmp_path
     assert load_planning_challenge(project, "T-1") is None
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     statuses = [row["status"] for row in store.conn.execute("SELECT status FROM executions ORDER BY started_at")]
-    assert statuses == ["SUCCEEDED", "FAILED"]
+    assert statuses == ["SUCCEEDED", "FAILED", "FAILED"]
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE event_type=?",
+        (PLANNING_PROTOCOL_RETRY,),
+    ).fetchone()[0] == 1
     store.close()
 
 
@@ -675,7 +693,7 @@ def test_invalid_revision_spec_refs_receive_one_bounded_protocol_correction(
         assert statuses == ["SUCCEEDED", "SUCCEEDED", "FAILED", "SUCCEEDED", "SUCCEEDED"]
         assert store.conn.execute(
             "SELECT COUNT(*) FROM audit_events WHERE event_type=?",
-            (PLANNER_PROTOCOL_RETRY,),
+            (PLANNING_PROTOCOL_RETRY,),
         ).fetchone()[0] == 1
     finally:
         store.close()
@@ -702,7 +720,70 @@ def test_persistently_invalid_spec_refs_stop_after_one_correction(tmp_path: Path
         assert statuses == ["FAILED", "FAILED"]
         assert store.conn.execute(
             "SELECT COUNT(*) FROM audit_events WHERE event_type=?",
-            (PLANNER_PROTOCOL_RETRY,),
+            (PLANNING_PROTOCOL_RETRY,),
+        ).fetchone()[0] == 1
+    finally:
+        store.close()
+
+
+def test_invalid_challenger_kinds_receive_one_bounded_protocol_correction(
+    tmp_path: Path,
+) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="invalid-kind-once"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    challenge = load_planning_challenge(project, "T-1")
+    assert challenge["findings"] == [
+        {"kind": "missing-test", "summary": "Inspect README explicitly"}
+    ]
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        statuses = [
+            row["status"]
+            for row in store.conn.execute("SELECT status FROM executions ORDER BY started_at")
+        ]
+        assert statuses == ["SUCCEEDED", "FAILED", "SUCCEEDED"]
+        event = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type=?",
+            (PLANNING_PROTOCOL_RETRY,),
+        ).fetchone()
+        assert json.loads(event["payload"])["protocol_role"] == "challenger"
+    finally:
+        store.close()
+
+
+def test_persistently_invalid_challenger_kind_stops_after_one_correction(
+    tmp_path: Path,
+) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="always-invalid-kind"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
+    assert result["detail"]["next_action"] == "challenger_invalid"
+    assert load_planning_artifacts(project, "T-1")[0] is not None
+    assert load_planning_challenge(project, "T-1") is None
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        statuses = [
+            row["status"]
+            for row in store.conn.execute("SELECT status FROM executions ORDER BY started_at")
+        ]
+        assert statuses == ["SUCCEEDED", "FAILED", "FAILED"]
+        assert store.conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type=?",
+            (PLANNING_PROTOCOL_RETRY,),
         ).fetchone()[0] == 1
     finally:
         store.close()
