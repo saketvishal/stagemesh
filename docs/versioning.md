@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.27 replaces static
-end-to-end claims with a current-candidate executable development journey and
-adds one bounded automatic revision for actionable planning findings.
-See the [0.6.27 release notes](releases/0.6.27.md),
+files as reinstallable package points. Version 0.6.28 adds one audited protocol
+correction for malformed planner output and requires provider-authored
+specification references to name exact existing project files.
+See the [0.6.28 release notes](releases/0.6.28.md),
+[0.6.27 release notes](releases/0.6.27.md),
 [0.6.26 release notes](releases/0.6.26.md),
 [0.6.25 release notes](releases/0.6.25.md),
 [0.6.24 release notes](releases/0.6.24.md),
@@ -34,14 +35,14 @@ See the [0.6.27 release notes](releases/0.6.27.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.27` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.28` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.27
+python -m pip install --no-cache-dir stagemesh==0.6.28
 ```
 
-The preceding `0.6.26` release remains available for rollback. The older
+The preceding `0.6.27` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -50,6 +51,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.28`: bounded planner protocol correction and exact existing-file specification references.
 - `0.6.27`: executable current-candidate development qualification, unified release gates, and bounded planner revision.
 - `0.6.26`: audited pre-cutover challenge migration, interruption reconciliation, and reroll prevention.
 - `0.6.25`: contract-aware challenge context, correct planning/approval ordering, and actionable decision reporting.

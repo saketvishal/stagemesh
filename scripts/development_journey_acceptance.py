@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -37,13 +38,14 @@ state = pathlib.Path(sys.argv[2])
 prompt = sys.stdin.read()
 if mode == "planner":
     revised = "Independent review findings:" in prompt
+    corrected = "StageMesh rejected the previous response" in prompt
     print(json.dumps({
         "behavior": ["Create the bounded journey output"] + (["Address the independent scope finding"] if revised else []),
         "non_goals": ["Do not edit files outside the task contract"],
         "affected_paths": ["journey.txt"],
         "acceptance_checks": ["verify journey.txt contains completed"],
         "decisions": [],
-        "spec_refs": [],
+        "spec_refs": ["README.md"] if corrected else ["README.md for qualification context"],
     }))
 elif mode == "challenger":
     revised = "Address the independent scope finding" in prompt
@@ -371,7 +373,17 @@ def main() -> int:
         )
         audit_db = runtime / "stagemesh.sqlite3"
         expect(audit_db.exists() and audit_db.stat().st_size > 0, "durable audit ledger was not written")
-        steps.append(evidence(17, "reports, planning history, receipts, and the durable ledger were written"))
+        with sqlite3.connect(audit_db) as audit:
+            correction_count = audit.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type='planning.provider_output_retry'"
+            ).fetchone()[0]
+        expect(correction_count == 2, "planner protocol corrections were not bounded and audited")
+        steps.append(
+            evidence(
+                17,
+                "reports, planning history, receipts, the durable ledger, and two bounded protocol corrections were written",
+            )
+        )
 
         broken = {
             "schema_version": 1,
