@@ -6,6 +6,8 @@ This is the bounded qualification record for issue #769. It separates implemente
 
 StageMesh no longer treats references to test files as end-to-end proof. CI, the local acceptance report, and release readiness consume one gate manifest from `stagemesh.qualification`. A releasable candidate must execute `scripts/development_journey_acceptance.py` from a clean checkout of that exact commit. The manifest does not repeat the older standalone install gate because this journey performs the clean wheel installation and initialization itself.
 
+The journey deliberately returns malformed planner `spec_refs` before correcting them. A release therefore proves that StageMesh records one bounded protocol-correction attempt, accepts only exact existing non-empty project files as provider-authored specification references, and stops after the second invalid response instead of looping providers.
+
 The disposable journey installs the candidate wheel, initializes a repository, discovers a task, exercises a challenger rejection and one bounded planner revision, stops for accountable approval, interrupts implementation, resumes through validation and two independent review roles, integrates locally, restarts, and proves the completed task is not dispatched again. It writes a candidate-bound receipt under `.stagemesh/reports/qualification/`. Missing, failed, dirty-tree, partial, or stale-candidate receipts remain `INCOMPLETE`.
 
 Component and invariant tests still provide coverage and diagnosis. They do not independently promote a static `PROVEN` or `COMPLETE` result.

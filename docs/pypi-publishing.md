@@ -37,7 +37,7 @@ Release order remains fail closed:
 5. After the workflow succeeds, independently install from the public index in a fresh environment:
 
    ```powershell
-   python -m pip install --no-cache-dir stagemesh==0.6.27
+   python -m pip install --no-cache-dir stagemesh==0.6.28
    stagemesh --version
    stagemesh init
    ```

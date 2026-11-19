@@ -15,6 +15,7 @@ from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.planning_execution import (
     CHALLENGER_RECEIPT,
+    PLANNER_PROTOCOL_RETRY,
     PLANNER_RECEIPT,
     PlanningExecutionError,
     _freeze_planner,
@@ -46,7 +47,14 @@ mode = sys.argv[1]
 prompt = sys.stdin.read()
 if mode == "mutate":
     pathlib.Path("README.md").write_text("provider-local mutation\n", encoding="utf-8")
-if mode in {"planner", "mutate", "wrapped-planner", "aggregate-planner"}:
+if mode in {
+    "planner",
+    "mutate",
+    "wrapped-planner",
+    "aggregate-planner",
+    "invalid-revision-spec-refs",
+    "always-invalid-spec-refs",
+}:
     payload = {
         "behavior": ["Keep the requested behavior bounded"],
         "non_goals": ["Do not widen the contract"],
@@ -57,6 +65,11 @@ if mode in {"planner", "mutate", "wrapped-planner", "aggregate-planner"}:
     }
     if "Independent review findings:" in prompt:
         payload["behavior"].append("Incorporate independent review findings")
+    correction = "StageMesh rejected the previous response" in prompt
+    if mode == "invalid-revision-spec-refs" and "Independent review findings:" in prompt:
+        payload["spec_refs"] = ["README.md"] if correction else ["C:/outside/spec.md"]
+    elif mode == "always-invalid-spec-refs":
+        payload["spec_refs"] = ["Issue #137 and PR #139", "README.md for context"]
     if mode == "wrapped-planner":
         print("Here is the requested object:\n```json\n" + json.dumps(payload) + "\n```")
     elif mode == "aggregate-planner":
@@ -632,6 +645,67 @@ def test_locally_valid_planner_output_is_fitted_to_the_canonical_budget(tmp_path
     assert len(frozen.canonical_json) <= 8_000
     assert len(spec["behavior"]) == len(spec["non_goals"]) == len(spec["acceptance_checks"]) == 20
     assert any(item.endswith("... [truncated by StageMesh]") for item in spec["behavior"])
+
+
+def test_invalid_revision_spec_refs_receive_one_bounded_protocol_correction(
+    tmp_path: Path,
+) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(
+            _script(tmp_path),
+            planner_mode="invalid-revision-spec-refs",
+            challenger_mode="revise-until-updated",
+        ),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate"
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    spec, _ = load_planning_artifacts(project, "T-1")
+    assert spec["spec_refs"] == ["README.md"]
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        statuses = [
+            row["status"]
+            for row in store.conn.execute("SELECT status FROM executions ORDER BY started_at")
+        ]
+        assert statuses == ["SUCCEEDED", "SUCCEEDED", "FAILED", "SUCCEEDED", "SUCCEEDED"]
+        assert store.conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type=?",
+            (PLANNER_PROTOCOL_RETRY,),
+        ).fetchone()[0] == 1
+    finally:
+        store.close()
+
+
+def test_persistently_invalid_spec_refs_stop_after_one_correction(tmp_path: Path) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), planner_mode="always-invalid-spec-refs"),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
+    assert result["detail"]["next_action"] == "planner_invalid"
+    assert load_planning_artifacts(project, "T-1")[0] is None
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        statuses = [
+            row["status"]
+            for row in store.conn.execute("SELECT status FROM executions ORDER BY started_at")
+        ]
+        assert statuses == ["FAILED", "FAILED"]
+        assert store.conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type=?",
+            (PLANNER_PROTOCOL_RETRY,),
+        ).fetchone()[0] == 1
+    finally:
+        store.close()
 
 
 def test_duplicate_provider_json_keys_fail_closed(tmp_path: Path) -> None:
