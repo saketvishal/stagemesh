@@ -319,8 +319,7 @@ def test_default_runtime_provider_commands_are_non_interactive(monkeypatch: pyte
     assert adapters["codex"] == (
         "codex",
         "exec",
-        "--sandbox",
-        "workspace-write",
+        "--approve-for-me",
         "--ignore-user-config",
         "--ephemeral",
     )
@@ -356,8 +355,7 @@ def test_legacy_builtin_provider_commands_are_upgraded_to_write_capable(tmp_path
     assert adapters["codex"] == (
         "codex",
         "exec",
-        "--sandbox",
-        "workspace-write",
+        "--approve-for-me",
         "--ignore-user-config",
         "--ephemeral",
     )
