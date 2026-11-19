@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# This executable intentionally adds the repository's src directory before
+# importing StageMesh so it can validate an uninstalled checkout.
+# ruff: noqa: E402
+
 import argparse
 import contextlib
 import io

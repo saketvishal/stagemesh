@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 RECEIPT = ROOT / ".stagemesh" / "reports" / "qualification" / "development-journey.json"
@@ -78,7 +77,7 @@ def window(
     report: Path,
     *,
     duration: str,
-) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     result = run(
         command(
             python,
@@ -106,14 +105,21 @@ def window(
     )
     if not report.exists():
         raise AssertionError(f"run-window wrote no report: {result.stdout}{result.stderr}")
-    return result, json.loads(report.read_text(encoding="utf-8"))
+    return result, json_object(report.read_text(encoding="utf-8"))
 
 
-def task_result(report: dict[str, Any]) -> dict[str, Any]:
+def json_object(payload: str) -> dict[str, object]:
+    raw: object = json.loads(payload)
+    if not isinstance(raw, dict):
+        raise AssertionError("expected a JSON object")
+    return {str(key): value for key, value in raw.items()}
+
+
+def task_result(report: dict[str, object]) -> dict[str, object]:
     tasks = report.get("tasks")
-    if not isinstance(tasks, list) or not tasks:
+    if not isinstance(tasks, list) or not tasks or not isinstance(tasks[0], dict):
         raise AssertionError(f"run-window did not report the journey task: {report}")
-    return tasks[0]
+    return {str(key): value for key, value in tasks[0].items()}
 
 
 def expect(condition: bool, message: str) -> None:
@@ -123,6 +129,13 @@ def expect(condition: bool, message: str) -> None:
 
 def evidence(step: int, detail: str) -> dict[str, object]:
     return {"step": step, "status": "PASS", "evidence": detail}
+
+
+def step_number(row: dict[str, object]) -> int:
+    value = row.get("step")
+    if not isinstance(value, int):
+        raise AssertionError(f"qualification step has no integer identifier: {row}")
+    return value
 
 
 def main() -> int:
@@ -163,9 +176,10 @@ def main() -> int:
         }
         for provider_path in provider_paths.values():
             write_provider(provider_path)
-        provider_command = lambda role: " ".join(
-            f'"{part}"' for part in (str(python), str(provider_paths[role]), role, str(state))
-        )
+        def provider_command(role: str) -> str:
+            return " ".join(
+                f'"{part}"' for part in (str(python), str(provider_paths[role]), role, str(state))
+            )
         config = {
             "providers": {
                 "planner": provider_command("planner"),
@@ -292,10 +306,16 @@ def main() -> int:
         first_task = task_result(first)
         why = str(first_task.get("why", first_task.get("reason", "")))
         expect("approval" in why.lower(), f"first run did not stop at approval: {first_proc.stdout}{first}")
-        spec = json.loads((runtime / "planning" / f"{TASK_ID}.spec.json").read_text(encoding="utf-8"))
-        challenge = json.loads((runtime / "planning" / f"{TASK_ID}.challenge.json").read_text(encoding="utf-8"))
-        expect("Address the independent scope finding" in spec["behavior"], "planner did not revise the rejected plan")
-        expect(challenge["verdict"] == "accept", "fresh challenge did not accept the revised plan")
+        spec = json_object((runtime / "planning" / f"{TASK_ID}.spec.json").read_text(encoding="utf-8"))
+        challenge = json_object(
+            (runtime / "planning" / f"{TASK_ID}.challenge.json").read_text(encoding="utf-8")
+        )
+        behavior = spec.get("behavior")
+        expect(
+            isinstance(behavior, list) and "Address the independent scope finding" in behavior,
+            "planner did not revise the rejected plan",
+        )
+        expect(challenge.get("verdict") == "accept", "fresh challenge did not accept the revised plan")
         history = runtime / "planning" / "history"
         expect(len(list(history.glob(f"{TASK_ID}.spec.*.json"))) == 1, "the first plan was not archived exactly once")
         expect(len(list(history.glob(f"{TASK_ID}.challenge.*.json"))) == 1, "the first challenge was not archived exactly once")
@@ -310,7 +330,7 @@ def main() -> int:
 
         approved = run(command(python, project, "approve-planning", "--task", TASK_ID, "--json"), project)
         expect(approved.returncode == 0, f"approval failed: {approved.stdout}{approved.stderr}")
-        approval = json.loads(approved.stdout)
+        approval = json_object(approved.stdout)
         expect(approval.get("approver_id") == "owner:journey", "approval was not bound to configured authority")
         steps.append(evidence(8, "operator approval receipt is bound to the accepted plan and authority"))
 
@@ -360,22 +380,52 @@ def main() -> int:
             "status": "FAIL",
             "steps": steps,
         }
-        sys.path.insert(0, str(ROOT / "src"))
-        from stagemesh.e2e_acceptance import end_to_end_acceptance
-
-        expect(end_to_end_acceptance(broken, candidate)["status"] == "INCOMPLETE", "a failed journey was accepted")
+        RECEIPT.parent.mkdir(parents=True, exist_ok=True)
+        RECEIPT.write_text(json.dumps(broken, indent=2, sort_keys=True), encoding="utf-8")
+        broken_output = temp_root / "broken-e2e.json"
+        broken_evaluation = run(
+            command(
+                python,
+                ROOT,
+                "end-to-end-acceptance",
+                "--json",
+                "--output",
+                str(broken_output),
+            ),
+            ROOT,
+        )
+        expect(
+            broken_evaluation.returncode != 0
+            and broken_output.exists()
+            and json_object(broken_output.read_text(encoding="utf-8")).get("status") == "INCOMPLETE",
+            "a failed journey was accepted",
+        )
         steps.append(evidence(18, "the receipt evaluator rejected a deliberately failed journey"))
         receipt = {
             "schema_version": 1,
             "candidate_sha": candidate,
             "source_dirty": source_dirty,
             "status": "PASS",
-            "steps": sorted(steps, key=lambda row: int(row["step"])),
+            "steps": sorted(steps, key=step_number),
         }
-        qualified = end_to_end_acceptance(receipt, candidate)
-        expect(qualified["status"] == "COMPLETE", f"passing journey receipt was not complete: {qualified}")
-        RECEIPT.parent.mkdir(parents=True, exist_ok=True)
         RECEIPT.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
+        passing_output = temp_root / "passing-e2e.json"
+        passing_evaluation = run(
+            command(
+                python,
+                ROOT,
+                "end-to-end-acceptance",
+                "--json",
+                "--output",
+                str(passing_output),
+            ),
+            ROOT,
+        )
+        qualified = json_object(passing_output.read_text(encoding="utf-8"))
+        expect(
+            passing_evaluation.returncode == 0 and qualified.get("status") == "COMPLETE",
+            f"passing journey receipt was not complete: {qualified}",
+        )
         print(json.dumps(qualified, sort_keys=True))
         return 0
     except Exception as exc:  # noqa: BLE001 - every qualification failure must produce a durable failed receipt
@@ -385,7 +435,7 @@ def main() -> int:
             "source_dirty": source_dirty,
             "status": "FAIL",
             "error": str(exc),
-            "steps": sorted(steps, key=lambda row: int(row["step"])),
+            "steps": sorted(steps, key=step_number),
         }
         RECEIPT.parent.mkdir(parents=True, exist_ok=True)
         RECEIPT.write_text(json.dumps(failed, indent=2, sort_keys=True), encoding="utf-8")
