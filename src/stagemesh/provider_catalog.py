@@ -41,7 +41,7 @@ class ProviderDefinition:
 PROVIDER_CATALOG = (
     ProviderDefinition(
         "codex", "codex",
-        "codex exec --sandbox workspace-write --ignore-user-config --ephemeral",
+        "codex exec --approve-for-me --ignore-user-config --ephemeral",
         "codex exec",
         "STAGEMESH_CODEX_CMD", 0, 3,
     ),
@@ -74,7 +74,10 @@ PROVIDER_CATALOG = (
 )
 
 PREVIOUS_UNSAFE_BUNDLED_COMMANDS = {
-    "codex": ("codex exec --sandbox workspace-write",),
+    "codex": (
+        "codex exec --sandbox workspace-write",
+        "codex exec --sandbox workspace-write --ignore-user-config --ephemeral",
+    ),
     "claude": (
         (
             "claude -p --permission-mode acceptEdits --permission-prompts none "
