@@ -28,6 +28,10 @@ def test_release_workflow_is_explicit_oidc_and_exact_artifact_only() -> None:
     assert "attestations: true" in workflow
     assert "actions/upload-artifact@v4" in workflow and "actions/download-artifact@v4" in workflow
     assert "verify_pypi_distribution.py" in workflow
+    journey = workflow.index("python scripts/development_journey_acceptance.py")
+    build = workflow.index("python -m pip wheel")
+    publish = workflow.index("pypa/gh-action-pypi-publish@release/v1")
+    assert journey < build < publish
     assert "password:" not in workflow and "PYPI_API_TOKEN" not in workflow
 
 

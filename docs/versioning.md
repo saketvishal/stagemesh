@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.26 adds an audited, one-time
-migration path for non-accepting planning challenges created before the
-contract-aware review cutover, while refusing current unchanged decisions.
-See the [0.6.26 release notes](releases/0.6.26.md),
+files as reinstallable package points. Version 0.6.27 replaces static
+end-to-end claims with a current-candidate executable development journey and
+adds one bounded automatic revision for actionable planning findings.
+See the [0.6.27 release notes](releases/0.6.27.md),
+[0.6.26 release notes](releases/0.6.26.md),
 [0.6.25 release notes](releases/0.6.25.md),
 [0.6.24 release notes](releases/0.6.24.md),
 [0.6.23 release notes](releases/0.6.23.md),
@@ -33,14 +34,14 @@ See the [0.6.26 release notes](releases/0.6.26.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.26` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.27` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.26
+python -m pip install --no-cache-dir stagemesh==0.6.27
 ```
 
-The preceding `0.6.25` release remains available for rollback. The older
+The preceding `0.6.26` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -49,6 +50,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.27`: executable current-candidate development qualification, unified release gates, and bounded planner revision.
 - `0.6.26`: audited pre-cutover challenge migration, interruption reconciliation, and reroll prevention.
 - `0.6.25`: contract-aware challenge context, correct planning/approval ordering, and actionable decision reporting.
 - `0.6.24`: exact aggregate planning budgets, atomic artifacts, and safe automatic label continuation.

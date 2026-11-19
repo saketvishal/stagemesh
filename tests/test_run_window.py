@@ -142,6 +142,30 @@ def test_current_protocol_planning_decision_does_not_suggest_reroll(tmp_path: Pa
         store.close()
 
 
+def test_remaining_planning_findings_do_not_suggest_an_identical_resume(
+    tmp_path: Path,
+) -> None:
+    report, store, _rig, _options = go(
+        tmp_path,
+        ["138"],
+        {
+            "138": RunResult(
+                "REFUSED:planning_gate",
+                "independent planning challenge requires the spec to be revised; "
+                "18 finding(s) saved to .stagemesh/planning/138.challenge.json",
+                1,
+            )
+        },
+    )
+    try:
+        assert report.next_command.startswith("planning revision still required for task(s) 138")
+        assert ".stagemesh/planning/138.challenge.json" in report.next_command
+        assert "bounded automatic planner revision was already used" in report.next_command
+        assert "stagemesh run-window" not in report.next_command
+    finally:
+        store.close()
+
+
 def test_multiple_planning_decisions_never_print_a_fake_combined_command(tmp_path: Path) -> None:
     report, store, _rig, _options = go(
         tmp_path,

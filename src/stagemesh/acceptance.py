@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .qualification import qualification_commands
 from .security import WorkspaceBoundary
 
 
@@ -32,17 +32,7 @@ def run_check(name: str, command: list[str], cwd: Path) -> AcceptanceCheck:
 
 def local_acceptance_report(root: Path, include_acceptance: bool = True) -> dict[str, object]:
     root = _validate_root(root)
-    checks = [
-        run_check("compile", [sys.executable, "-m", "compileall", "-q", "src", "scripts", "build_backend.py"], root),
-        run_check("invariants", [sys.executable, "scripts/invariants.py"], root),
-        run_check("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"], root),
-        run_check("github_acceptance", [sys.executable, "scripts/github_acceptance.py"], root),
-        run_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py", "--json"], root),
-        run_check("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"], root),
-        run_check("install", [sys.executable, "-m", "pip", "install", ".", "--target", ".tmp-install", "--no-cache-dir", "--upgrade"], root),
-    ]
-    if include_acceptance:
-        checks.insert(2, run_check("acceptance", [sys.executable, "scripts/acceptance.py"], root))
+    checks = [run_check(name, command, root) for name, command in qualification_commands(include_acceptance)]
     gaps = proof_gaps(checks)
     return {
         "generated_at": time.time(),

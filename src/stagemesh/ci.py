@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from .qualification import qualification_commands
 
 
 @dataclass(frozen=True)
@@ -31,17 +32,7 @@ def default_gates(root: Path, include_acceptance: bool = True) -> list[GateResul
 
 
 def default_gate_commands(include_acceptance: bool = True) -> list[tuple[str, list[str]]]:
-    gates = [
-        ("compile", [sys.executable, "-m", "compileall", "-q", "src", "scripts", "build_backend.py"]),
-        ("invariants", [sys.executable, "scripts/invariants.py"]),
-        ("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"]),
-        ("github_acceptance", [sys.executable, "scripts/github_acceptance.py"]),
-        ("live_acceptance", [sys.executable, "scripts/live_acceptance.py"]),
-        ("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"]),
-    ]
-    if include_acceptance:
-        gates.append(("acceptance", [sys.executable, "scripts/project_local_acceptance.py"]))
-    return gates
+    return qualification_commands(include_acceptance)
 
 
 def broken_future_feature_gate(root: Path) -> GateResult:

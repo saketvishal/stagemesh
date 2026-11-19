@@ -835,6 +835,24 @@ def next_command(report: WindowReport) -> str:
             + "; review the decisions above and record their answers or corrected context in the governing task/spec"
         )
         return guidance + "; current-protocol decisions require a revised frozen plan and are not re-rolled"
+    planning_revisions = [
+        t.task_id
+        for t in report.tasks
+        if t.stop_reason == "REFUSED:planning_gate"
+        and "independent planning challenge requires the spec to be revised" in t.reason
+    ]
+    if planning_revisions:
+        paths = ", ".join(
+            f".stagemesh/planning/{task_id}.challenge.json"
+            for task_id in planning_revisions
+        )
+        return (
+            "planning revision still required for task(s) "
+            + ", ".join(planning_revisions)
+            + "; the bounded automatic planner revision was already used; review "
+            + paths
+            + " and revise the governing task/spec before rerunning"
+        )
     approvals = [t.task_id for t in report.tasks if t.stop_reason == "REFUSED:approval_missing"]
     if len(approvals) == 1:
         return (
