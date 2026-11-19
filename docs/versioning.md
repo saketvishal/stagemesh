@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.30 lets a valid follow-up
-challenge converge through one additional bounded planner revision while
-retaining a hard two-revision ceiling.
-See the [0.6.30 release notes](releases/0.6.30.md),
+files as reinstallable package points. Version 0.6.31 prepares conventional
+project-local dependency environments for isolated validation and recovers
+preserved candidates from misclassified missing-tool failures.
+See the [0.6.31 release notes](releases/0.6.31.md),
+[0.6.30 release notes](releases/0.6.30.md),
 [0.6.29 release notes](releases/0.6.29.md),
 [0.6.28 release notes](releases/0.6.28.md),
 [0.6.27 release notes](releases/0.6.27.md),
@@ -37,14 +38,14 @@ See the [0.6.30 release notes](releases/0.6.30.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.30` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.31` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.30
+python -m pip install --no-cache-dir stagemesh==0.6.31
 ```
 
-The preceding `0.6.29` release remains available for rollback. The older
+The preceding `0.6.30` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -53,6 +54,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.31`: zero-configuration isolated dependencies and preserved-candidate recovery for missing validation tools.
 - `0.6.30`: bounded two-round planning convergence and persisted one-revision upgrade recovery.
 - `0.6.29`: shared bounded planning-role correction, including challenger finding schemas.
 - `0.6.28`: bounded planner protocol correction and exact existing-file specification references.
@@ -162,7 +164,9 @@ condition and is never cleared by upgrading.
 
 ### Candidate Python dependency environments
 
-Clients may opt into `.stagemesh/validation-environments.json`:
+StageMesh automatically discovers conventional project-local `.venv` and
+`node_modules` directories adjacent to tracked dependency manifests. Clients
+may override that discovery with `.stagemesh/validation-environments.json`:
 
 ```json
 {
@@ -179,7 +183,8 @@ value is a preinstalled `.venv` in the operator repository. This example also
 supports Windows gate scripts that resolve a relative interpreter from the
 checkout root before setting a backend child working directory. Other clients
 configure their own paths; StageMesh contains no Caventra paths or application
-imports. Without this file, existing behavior is unchanged.
+imports. Without this file, only conventional tracked-manifest environments are
+discovered; untracked declarations never authorize dependency reuse.
 
 Provisioning uses the source environment's own Python with site startup disabled,
 including when StageMesh and the client use different Python minor versions.

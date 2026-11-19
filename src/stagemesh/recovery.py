@@ -51,7 +51,7 @@ from .operator_actions import OperatorActionError, _operator, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .planning_execution import planning_execution_receipts
 from .redaction import redact_mapping
-from .remediation import latest_candidate_findings
+from .remediation import finding_identity, latest_candidate_findings
 from .review import adverse_gate, adverse_outcome
 from .spec_planning import (
     NEXT_APPROVE_SPEC,
@@ -755,11 +755,13 @@ def auto_revalidate_blocked_validation_gates(
     limit: int = 1,
     required_label: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Re-run a blocked validation candidate once after an environment/gate setup failure.
+    """Re-run a validation candidate once after an environment/gate setup failure.
 
     This is for normal recovery after the validation runtime changes (for example a project Python path is now available).
     It does not grant a fresh implementation budget or alter the candidate; it only reruns the bound validation gate once per
-    candidate and contract. A failed recheck must not renew its own retry budget.
+    candidate and contract. It also repairs legacy OPEN/IMPLEMENT tasks that an
+    older runtime incorrectly routed to code remediation after a nested gate
+    executable was missing. A failed recheck must not renew its own retry budget.
     """
     if limit < 1:
         return []
@@ -770,8 +772,6 @@ def auto_revalidate_blocked_validation_gates(
             continue
         if outside_label_selector(store, task, required_label):
             continue
-        if task["status"] != TaskStatus.BLOCKED or task["stage"] != Stage.VALIDATE:
-            continue
         if store.has_active_claim(current_id) or any(row["task_id"] == current_id for row in store.running_executions()):
             continue
         diagnosis = diagnose(store, current_id, project)
@@ -781,6 +781,23 @@ def auto_revalidate_blocked_validation_gates(
         if candidate is None:
             continue
         candidate_sha = str(candidate["sha"])
+        legacy_remediation = None
+        if task["status"] == TaskStatus.BLOCKED and task["stage"] == Stage.VALIDATE:
+            recovery_kind = "blocked_validation_recheck"
+        elif task["status"] == TaskStatus.OPEN and task["stage"] == Stage.IMPLEMENT:
+            if not diagnosis.environment_unavailable:
+                continue
+            legacy_remediation = store.latest_task_remediation(current_id)
+            if (
+                legacy_remediation is None
+                or str(legacy_remediation["stage"]) != str(Stage.VALIDATE)
+                or str(legacy_remediation["candidate_sha"]) != candidate_sha
+                or diagnosis.candidate_sha != candidate_sha
+            ):
+                continue
+            recovery_kind = "misrouted_validation_environment_recheck"
+        else:
+            continue
         evidence = store.conn.execute(
             "SELECT id, created_at, payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
             "ORDER BY created_at DESC, rowid DESC LIMIT 1",
@@ -791,7 +808,41 @@ def auto_revalidate_blocked_validation_gates(
         evidence_id = str(evidence["id"])
         if _auto_revalidation_already_tried(store, current_id, candidate_sha, evidence_id, float(evidence["created_at"])):
             continue
+        if legacy_remediation is not None:
+            store.advance_task(current_id, Stage.VALIDATE)
+            record_audit(
+                store,
+                "task.validation_environment_remediation_reclassified",
+                {
+                    "task_id": current_id,
+                    "candidate_sha": candidate_sha,
+                    "remediation_id": str(legacy_remediation["id"]),
+                    "from_stage": str(Stage.IMPLEMENT),
+                    "to_stage": str(Stage.VALIDATE),
+                    "reason": "missing gate executable is an environment failure, not a code defect",
+                },
+            )
         report = _revalidate(store, project, current_id)
+        closed_findings: list[str] = []
+        cleared_remediations = 0
+        if report.get("status") == str(EvidenceStatus.PASSED):
+            prior_payload = _loads(evidence["payload"])
+            open_ids = {
+                str(row["id"])
+                for row in store.open_findings_for_candidate(current_id, candidate_sha)
+            }
+            for finding in prior_payload.get("findings", []):
+                if not isinstance(finding, dict) or finding.get("code") != "gate_failed":
+                    continue
+                identity = finding_identity(
+                    candidate_sha,
+                    str(finding.get("message", "")),
+                    finding.get("path"),
+                )
+                if identity in open_ids:
+                    store.close_finding(identity)
+                    closed_findings.append(identity)
+            cleared_remediations = store.clear_task_remediations(current_id, str(Stage.VALIDATE))
         payload = {
             "task_id": current_id,
             "candidate_sha": candidate_sha,
@@ -799,9 +850,11 @@ def auto_revalidate_blocked_validation_gates(
             "contract_hash": _loads(evidence["payload"]).get("contract_hash"),
             "reason": "automatic blocked validation gate recheck",
             "validation": report,
+            "closed_environment_findings": closed_findings,
+            "remediations_cleared": cleared_remediations,
         }
         record_audit(store, "task.auto_revalidated_blocked_validation", payload)
-        recovered.append({"task_id": current_id, "auto_recovery": "blocked_validation_recheck", **payload})
+        recovered.append({"task_id": current_id, "auto_recovery": recovery_kind, **payload})
         if len(recovered) >= limit:
             break
     return recovered

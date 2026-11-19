@@ -8,6 +8,8 @@ PLAN -> IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE
 
 Implementation agents run in per-task Git worktrees, not the shared checkout. Validation, review, and integration bind their evidence to the exact candidate SHA. A task cannot reach `DONE` until its contract, validation gates, independent review, and integration prerequisites pass.
 
+Isolated validation automatically detects conventional project-local `.venv` and `node_modules` directories next to tracked dependency manifests. StageMesh copies those dependencies into the temporary candidate checkout only when the candidate declarations still match; dependency changes remain fail-closed and require a matching environment. A project can override the detected mapping with `.stagemesh/validation-environments.json`.
+
 ## Quick start
 
 Install the development checkout:

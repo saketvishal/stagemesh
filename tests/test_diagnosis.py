@@ -227,11 +227,33 @@ def test_classification_of_each_failure_kind(tmp_path: Path) -> None:
     failed_validation(store, "b" * 40, [{"severity": "error", "code": "planned_check_missing_command", "message": "planned check has no command"}])
     assert diagnose(store, TASK).category == VALIDATION_GATE
     failed_validation(store, "c" * 40, [gate_finding("lint", "bash: ruff: command not found", returncode=127)], [{"name": "lint", "status": "FAILED"}])
-    assert diagnose(store, TASK).category == VALIDATION_GATE  # the tool is missing: not a code defect
+    missing_tool = diagnose(store, TASK)
+    assert missing_tool.category == VALIDATION_GATE  # the tool is missing: not a code defect
+    assert missing_tool.environment_unavailable  # a nested shell failure must not be sent to an implementation provider
     failed_validation(store, "d" * 40, [gate_finding("unit", "FAILED tests/test_a.py::test_b - AssertionError")], [{"name": "unit", "status": "FAILED"}])
     assert diagnose(store, TASK).category == IMPLEMENTATION_DEFECT
     store.add_evidence(TASK, "d" * 40, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED, {"findings": [{"code": "integration_rebase_conflict", "message": "conflict in a.py"}]})
     assert diagnose(store, TASK).category == INTEGRATION_CONFLICT
+
+
+def test_missing_tool_text_inside_an_assertion_remains_a_code_failure(tmp_path: Path) -> None:
+    _project, store = _setup(tmp_path, DOCS_CONTRACT)
+    failed_validation(
+        store,
+        "a" * 40,
+        [
+            gate_finding(
+                "unit",
+                "AssertionError: expected 'vitest' is not recognized as an internal or external command",
+            )
+        ],
+        [{"name": "unit", "status": "FAILED"}],
+    )
+
+    result = diagnose(store, TASK)
+
+    assert result.category == IMPLEMENTATION_DEFECT
+    assert not result.environment_unavailable
 
 
 @pytest.mark.parametrize("stop_on_repeat", [False, True])
