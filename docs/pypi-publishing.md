@@ -1,10 +1,11 @@
 # PyPI publishing
 
 StageMesh publishes the `stagemesh` distribution from an explicit, non-prerelease GitHub release. The release workflow checks out the
-exact tag, builds one wheel, verifies its stable version and clean Git provenance, installs it into a fresh environment, and proves that
-the installed `stagemesh` command creates a new project's safe setup without provider calls and truthfully reports that an empty
-project still needs validation and provider configuration. The verified artifact is passed unchanged to a
-separate `pypi` environment job.
+exact tag and first runs the executable development journey against that clean commit. Only an 18-step passing receipt may proceed to
+building the wheel. The workflow then verifies the wheel's stable version and clean Git provenance, installs it into a fresh environment,
+and proves that the installed `stagemesh` command creates a new project's safe setup without provider calls and truthfully reports that
+an empty project still needs validation and provider configuration. The verified artifact is passed unchanged to a separate `pypi`
+environment job.
 
 Bundled skill resources retain their logical source names, upstream URLs, and blob-integrity checks, but the wheel stores their physical
 members under a compact logical-path-derived layout. This avoids default Windows path-length failures in deep virtual environments. Package
@@ -30,9 +31,9 @@ Release order remains fail closed:
 1. Merge the release candidate through protected `main` after its required Windows, Linux, and attribution checks pass.
 2. From the verified merged commit, create and push the matching annotated tag (for example `v0.6.0`).
 3. Publish a non-prerelease GitHub release for that exact tag. This explicit action triggers the PyPI workflow.
-4. Require the `pypi` GitHub environment for the publish job. The workflow refuses mismatched tags, dirty provenance, multiple or
-   unexpected distribution files, unsafe wheel members, installation failure, a missing console entry point, failed setup creation,
-   or a false ready claim for an empty project.
+4. Require the `pypi` GitHub environment for the publish job. The workflow refuses a failed or incomplete development journey,
+   mismatched tags, dirty provenance, multiple or unexpected distribution files, unsafe wheel members, installation failure, a missing
+   console entry point, failed setup creation, or a false ready claim for an empty project.
 5. After the workflow succeeds, independently install from the public index in a fresh environment:
 
    ```powershell

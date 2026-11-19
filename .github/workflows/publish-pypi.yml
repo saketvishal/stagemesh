@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Prove the executable development journey for the exact tag
+        run: python scripts/development_journey_acceptance.py
       - name: Build the exact tagged wheel
         run: python -m pip wheel . --no-deps --no-build-isolation --wheel-dir dist
       - name: Verify metadata, provenance, clean installation, and new-project initialization
