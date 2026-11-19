@@ -160,7 +160,7 @@ def test_remaining_planning_findings_do_not_suggest_an_identical_resume(
     try:
         assert report.next_command.startswith("planning revision still required for task(s) 138")
         assert ".stagemesh/planning/138.challenge.json" in report.next_command
-        assert "bounded automatic planner revision was already used" in report.next_command
+        assert "bounded automatic planner revision limit was reached" in report.next_command
         assert "stagemesh run-window" not in report.next_command
     finally:
         store.close()
