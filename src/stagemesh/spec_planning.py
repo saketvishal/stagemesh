@@ -1028,6 +1028,7 @@ PLANNING_CHALLENGER_RECEIPT_EVENT = "planning.challenge_produced"
 PLANNING_REVISION_INTENT_EVENT = "planning.spec_revision_intent"
 PLANNING_REVISION_COMPLETED_EVENT = "planning.spec_revision_completed"
 PLANNING_REVISION_ABORTED_EVENT = "planning.spec_revision_aborted"
+MAX_AUTOMATIC_PLANNING_REVISIONS = 2
 
 
 class PlanningApprovalRefusal(Exception):
@@ -1055,18 +1056,42 @@ class PlanningRevisionRefusal(Exception):
         self.code = code
 
 
-def automatic_planning_revision_used(
+def automatic_planning_revision_count(
     store: Store, task_id: str, current_spec_hash: str
-) -> bool:
-    """Return whether the current generated spec is already the one bounded automatic revision."""
+) -> int:
+    """Count the completed automatic revision lineage ending at the current spec."""
+    parents: dict[str, str] = {}
+    ambiguous: set[str] = set()
     for row in store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, task_id):
         try:
             payload = json.loads(row["payload"])
         except (TypeError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict) and payload.get("to_spec_hash") == current_spec_hash:
-            return True
-    return False
+        if not isinstance(payload, dict):
+            continue
+        from_hash = payload.get("from_spec_hash")
+        to_hash = payload.get("to_spec_hash")
+        if not (
+            isinstance(from_hash, str)
+            and _CONTRACT_HASH.fullmatch(from_hash)
+            and isinstance(to_hash, str)
+            and _CONTRACT_HASH.fullmatch(to_hash)
+        ):
+            continue
+        previous = parents.setdefault(to_hash, from_hash)
+        if previous != from_hash:
+            ambiguous.add(to_hash)
+
+    count = 0
+    cursor = current_spec_hash
+    seen: set[str] = set()
+    while cursor in parents:
+        if cursor in seen or cursor in ambiguous:
+            return MAX_AUTOMATIC_PLANNING_REVISIONS
+        seen.add(cursor)
+        cursor = parents[cursor]
+        count += 1
+    return count
 
 
 def publish_automatic_planning_revision(
@@ -1109,10 +1134,11 @@ def publish_automatic_planning_revision(
         raise PlanningRevisionRefusal(
             "planning_revision_no_change", "the planner returned the same planning spec after review"
         )
-    if automatic_planning_revision_used(store, task_id, current.digest):
+    revision_count = automatic_planning_revision_count(store, task_id, current.digest)
+    if revision_count >= MAX_AUTOMATIC_PLANNING_REVISIONS:
         raise PlanningRevisionRefusal(
             "planning_revision_limit",
-            "the bounded automatic planning revision has already been used for the current spec",
+            "the bounded automatic planning revision limit has been reached for the current spec lineage",
         )
 
     spec_path, approval_path = planning_artifact_paths(project, task_id)
@@ -1153,7 +1179,8 @@ def publish_automatic_planning_revision(
         "spec_archive_path": spec_archive.relative_to(project).as_posix(),
         "challenge_archive_path": challenge_archive.relative_to(project).as_posix(),
         "pending_spec_path": pending_spec.relative_to(project).as_posix(),
-        "revision_limit": 1,
+        "revision_round": revision_count + 1,
+        "revision_limit": MAX_AUTOMATIC_PLANNING_REVISIONS,
     }
     intent_event_id = store.add_audit_event(PLANNING_REVISION_INTENT_EVENT, intent_payload)
     try:

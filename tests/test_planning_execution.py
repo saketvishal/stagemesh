@@ -24,6 +24,7 @@ from stagemesh.planning_execution import (
 from stagemesh.recovery import task_doctor
 from stagemesh.spec_planning import (
     CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH,
+    MAX_AUTOMATIC_PLANNING_REVISIONS,
     NEXT_APPROVE_SPEC,
     NEXT_REVISE_SPEC,
     PLANNING_CHALLENGE_RETIRED_EVENT,
@@ -65,6 +66,8 @@ if mode in {
     }
     if "Independent review findings:" in prompt:
         payload["behavior"].append("Incorporate independent review findings")
+        if "Incorporate independent review findings" in prompt:
+            payload["behavior"].append("Resolve follow-up review findings")
     correction = "StageMesh rejected the previous response" in prompt
     if mode == "invalid-revision-spec-refs" and "Independent review findings:" in prompt:
         payload["spec_refs"] = ["README.md"] if correction else ["C:/outside/spec.md"]
@@ -147,6 +150,13 @@ elif mode == "revise-until-updated":
     print(json.dumps({
         "verdict": "accept" if covered else "revise",
         "findings": [] if covered else [{"kind": "scope-risk", "summary": "Narrow the affected paths"}],
+        "required_decisions": [],
+    }))
+elif mode == "revise-twice-until-updated":
+    converged = "Resolve follow-up review findings" in prompt
+    print(json.dumps({
+        "verdict": "accept" if converged else "revise",
+        "findings": [] if converged else [{"kind": "scope-risk", "summary": "Resolve the remaining blocker"}],
         "required_decisions": [],
     }))
 elif mode == "human":
@@ -295,7 +305,7 @@ def test_approved_executed_artifacts_are_reused_without_another_provider_call(tm
     store.close()
 
 
-def test_revise_verdict_gets_one_bounded_revision_then_blocks_if_findings_remain(
+def test_revise_verdict_gets_two_bounded_revisions_then_blocks_if_findings_remain(
     tmp_path: Path,
 ) -> None:
     project = _project(
@@ -315,9 +325,16 @@ def test_revise_verdict_gets_one_bounded_revision_then_blocks_if_findings_remain
     assert ".stagemesh/planning/T-1.challenge.json" in result["message"]
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     try:
-        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 4
-        assert len(list(store.task_audit_events(PLANNING_REVISION_INTENT_EVENT, "T-1"))) == 1
-        assert len(list(store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1"))) == 1
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 6
+        assert len(list(store.task_audit_events(PLANNING_REVISION_INTENT_EVENT, "T-1"))) == 2
+        completed = list(
+            store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1")
+        )
+        assert len(completed) == MAX_AUTOMATIC_PLANNING_REVISIONS
+        assert [json.loads(row["payload"])["revision_round"] for row in completed] == [
+            1,
+            2,
+        ]
         before = store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
     finally:
         store.close()
@@ -357,6 +374,83 @@ def test_revise_without_human_decisions_is_replanned_and_rechallenged_once(
     try:
         assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 4
         assert len(list(store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1"))) == 1
+    finally:
+        store.close()
+
+
+def test_follow_up_challenge_converges_after_second_bounded_revision(
+    tmp_path: Path,
+) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(
+            _script(tmp_path), challenger_mode="revise-twice-until-updated"
+        ),
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_gate", result
+    assert result["detail"]["next_action"] == NEXT_APPROVE_SPEC
+    spec, _approval = load_planning_artifacts(project, "T-1")
+    challenge = load_planning_challenge(project, "T-1")
+    assert "Incorporate independent review findings" in spec["behavior"]
+    assert "Resolve follow-up review findings" in spec["behavior"]
+    assert challenge["verdict"] == "accept"
+    history = project / ".stagemesh" / "planning" / "history"
+    assert len(list(history.glob("T-1.spec.*.json"))) == 2
+    assert len(list(history.glob("T-1.challenge.*.json"))) == 2
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 6
+        completed = list(
+            store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1")
+        )
+        assert len(completed) == MAX_AUTOMATIC_PLANNING_REVISIONS
+    finally:
+        store.close()
+
+
+def test_existing_single_revision_state_resumes_after_runtime_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stagemesh import planning_execution
+
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config=_config(_script(tmp_path), challenger_mode="revise"),
+    )
+    monkeypatch.setattr(planning_execution, "MAX_AUTOMATIC_PLANNING_REVISIONS", 1)
+
+    first_code, first = _run(project)
+
+    assert first_code != 0 and first["detail"]["next_action"] == NEXT_REVISE_SPEC
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert len(
+            list(store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1"))
+        ) == 1
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 4
+    finally:
+        store.close()
+
+    monkeypatch.setattr(
+        planning_execution,
+        "MAX_AUTOMATIC_PLANNING_REVISIONS",
+        MAX_AUTOMATIC_PLANNING_REVISIONS,
+    )
+    second_code, second = _run(project)
+
+    assert second_code != 0 and second["detail"]["next_action"] == NEXT_REVISE_SPEC
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        completed = list(
+            store.task_audit_events(PLANNING_REVISION_COMPLETED_EVENT, "T-1")
+        )
+        assert len(completed) == MAX_AUTOMATIC_PLANNING_REVISIONS
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 6
     finally:
         store.close()
 

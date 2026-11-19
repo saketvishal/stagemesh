@@ -849,7 +849,7 @@ def next_command(report: WindowReport) -> str:
         return (
             "planning revision still required for task(s) "
             + ", ".join(planning_revisions)
-            + "; the bounded automatic planner revision was already used; review "
+            + "; the bounded automatic planner revision limit was reached; review "
             + paths
             + " and revise the governing task/spec before rerunning"
         )

@@ -24,7 +24,7 @@ END_TO_END_REQUIREMENTS = (
     EndToEndRequirement(2, "initialize a synthetic project"),
     EndToEndRequirement(3, "discover tasks"),
     EndToEndRequirement(4, "generate and independently challenge the plan"),
-    EndToEndRequirement(5, "revise a rejected plan once"),
+    EndToEndRequirement(5, "converge a rejected plan within the revision bound"),
     EndToEndRequirement(6, "accept the revised plan"),
     EndToEndRequirement(7, "surface the approval boundary"),
     EndToEndRequirement(8, "record accountable approval"),

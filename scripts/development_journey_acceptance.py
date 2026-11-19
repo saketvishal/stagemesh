@@ -38,9 +38,14 @@ state = pathlib.Path(sys.argv[2])
 prompt = sys.stdin.read()
 if mode == "planner":
     revised = "Independent review findings:" in prompt
+    follow_up = "Address the independent scope finding" in prompt
     corrected = "StageMesh rejected the previous response" in prompt
     print(json.dumps({
-        "behavior": ["Create the bounded journey output"] + (["Address the independent scope finding"] if revised else []),
+        "behavior": (
+            ["Create the bounded journey output"]
+            + (["Address the independent scope finding"] if revised else [])
+            + (["Resolve the follow-up convergence finding"] if follow_up else [])
+        ),
         "non_goals": ["Do not edit files outside the task contract"],
         "affected_paths": ["journey.txt"],
         "acceptance_checks": ["verify journey.txt contains completed"],
@@ -49,13 +54,18 @@ if mode == "planner":
     }))
 elif mode == "challenger":
     revised = "Address the independent scope finding" in prompt
+    converged = "Resolve the follow-up convergence finding" in prompt
     corrected = "StageMesh rejected the previous response" in prompt
     print(json.dumps({
-        "verdict": "accept" if revised else "revise",
+        "verdict": "accept" if converged else "revise",
         "findings": (
             []
-            if revised and corrected
-            else [{"kind": "scope-risk", "summary": "Record the bounded output explicitly"}]
+            if converged and corrected
+            else [{"kind": "scope-risk", "summary": (
+                "Resolve the remaining bounded finding"
+                if revised
+                else "Record the bounded output explicitly"
+            )}]
             if corrected
             else [{"kind": "accessibility-risk", "summary": "Unsupported provider category"}]
         ),
@@ -65,7 +75,7 @@ elif mode == "writer":
     if not state.exists():
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text("interrupted-once", encoding="utf-8")
-        time.sleep(10)
+        time.sleep(30)
     pathlib.Path("journey.txt").write_text("completed\\n", encoding="utf-8")
 elif mode.startswith("reviewer"):
     print(json.dumps({"decision": "PASS", "findings": []}))
@@ -321,17 +331,19 @@ def main() -> int:
         )
         behavior = spec.get("behavior")
         expect(
-            isinstance(behavior, list) and "Address the independent scope finding" in behavior,
-            "planner did not revise the rejected plan",
+            isinstance(behavior, list)
+            and "Address the independent scope finding" in behavior
+            and "Resolve the follow-up convergence finding" in behavior,
+            "planner did not converge after two bounded revisions",
         )
         expect(challenge.get("verdict") == "accept", "fresh challenge did not accept the revised plan")
         history = runtime / "planning" / "history"
-        expect(len(list(history.glob(f"{TASK_ID}.spec.*.json"))) == 1, "the first plan was not archived exactly once")
-        expect(len(list(history.glob(f"{TASK_ID}.challenge.*.json"))) == 1, "the first challenge was not archived exactly once")
+        expect(len(list(history.glob(f"{TASK_ID}.spec.*.json"))) == 2, "two superseded plans were not archived")
+        expect(len(list(history.glob(f"{TASK_ID}.challenge.*.json"))) == 2, "two revision challenges were not archived")
         steps.extend(
             (
                 evidence(4, "independent challenger rejected the initial generated plan"),
-                evidence(5, "StageMesh performed exactly one bounded planner revision"),
+                evidence(5, "StageMesh converged through exactly two bounded planner revisions"),
                 evidence(6, "a fresh independent challenge accepted the revised plan"),
                 evidence(7, "run-window stopped before implementation and named accountable approval"),
             )
@@ -343,7 +355,7 @@ def main() -> int:
         expect(approval.get("approver_id") == "owner:journey", "approval was not bound to configured authority")
         steps.append(evidence(8, "operator approval receipt is bound to the accepted plan and authority"))
 
-        interrupted_proc, interrupted = window(python, project, temp_root / "interrupted.json", duration="4s")
+        interrupted_proc, interrupted = window(python, project, temp_root / "interrupted.json", duration="15s")
         expect(state.exists(), f"implementation provider never started: {interrupted_proc.stdout}{interrupted}")
         expect(not (project / "journey.txt").exists(), "the deliberately slow first implementation unexpectedly completed")
         steps.append(evidence(12, "a bounded run-window interrupted an active implementation provider"))
@@ -385,13 +397,13 @@ def main() -> int:
                 "SELECT COUNT(*) FROM audit_events WHERE event_type='planning.provider_output_retry'"
             ).fetchone()[0]
         expect(
-            correction_count == 4,
+            correction_count == 6,
             "planner and challenger protocol corrections were not bounded and audited",
         )
         steps.append(
             evidence(
                 17,
-                "reports, planning history, receipts, the durable ledger, and four bounded role protocol corrections were written",
+                "reports, planning history, receipts, the durable ledger, and six bounded role protocol corrections were written",
             )
         )
 
