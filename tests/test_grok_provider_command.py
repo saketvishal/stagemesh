@@ -416,7 +416,7 @@ def test_saved_provider_commands_are_hardened_at_invocation_time() -> None:
     assert "--dangerously-skip-permissions" not in claude
     assert {"--safe-mode", "--no-chrome", "--strict-mcp-config"} <= set(claude)
     assert "--dangerously-bypass-approvals-and-sandbox" not in codex
-    assert {"--ignore-user-config", "--ephemeral"} <= set(codex)
+    assert {"--approve-for-me", "--ignore-user-config", "--ephemeral"} <= set(codex)
     assert "--dangerously-skip-permissions" not in agy
     assert {"--sandbox", "--disable-slash-commands"} <= set(agy)
 
@@ -443,6 +443,29 @@ def test_agy_default_command_does_not_bypass_permissions() -> None:
 def test_non_grok_provider_keeps_stdin_prompt() -> None:
     command, stdin = _command_and_input(("codex", "exec", "--sandbox", "workspace-write"), "do the task")
 
-    assert command[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
-    assert "--ignore-user-config" in command and "--ephemeral" in command
+    assert command[:2] == ["codex", "exec"]
+    assert "--sandbox" not in command and "workspace-write" not in command
+    assert {"--approve-for-me", "--ignore-user-config", "--ephemeral"} <= set(command)
     assert stdin == "do the task"
+
+
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        ("codex", "exec", "--sandbox", "workspace-write"),
+        ("codex", "exec", "--sandbox=workspace-write"),
+        ("codex", "exec", "-s", "workspace-write"),
+        ("codex", "exec", "-s=workspace-write"),
+    ],
+)
+def test_codex_legacy_sandbox_is_migrated_to_bounded_unattended_approval(
+    legacy: tuple[str, ...],
+) -> None:
+    command, _ = _command_and_input(legacy, "review the candidate")
+
+    assert "--approve-for-me" in command
+    assert not any(
+        token in {"--sandbox", "-s", "workspace-write"}
+        or token.startswith(("--sandbox=", "-s="))
+        for token in command
+    )

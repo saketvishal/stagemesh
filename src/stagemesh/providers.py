@@ -1322,6 +1322,24 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
     executable = Path(args[0]).name.lower() if args else ""
     if executable in {"codex", "codex.exe"}:
         args = _without_option(args, "--dangerously-bypass-approvals-and-sandbox")
+        # Codex execpolicy rules can require an interactive approval even for
+        # read-only Git inspection. StageMesh runs providers unattended, so a
+        # fixed --sandbox value leaves the provider unable to request that
+        # approval and the review fails before `git diff` can execute.
+        #
+        # --approve-for-me is Codex's bounded unattended mode: Codex reviews
+        # requests automatically and selects read-only/workspace-write
+        # isolation for the turn. It is intentionally incompatible with an
+        # explicit --sandbox option, so normalize both long and short legacy
+        # spellings at invocation time. This does not bypass the sandbox.
+        args = _without_option(args, "--sandbox", takes_value=True)
+        args = _without_option(args, "-s", takes_value=True)
+        args = [
+            token
+            for token in args
+            if not token.startswith("--sandbox=") and not token.startswith("-s=")
+        ]
+        args = _ensure_flag(args, "--approve-for-me")
         args = _ensure_flag(args, "--ignore-user-config")
         return _ensure_flag(args, "--ephemeral")
     if executable in {"claude", "claude.exe"}:

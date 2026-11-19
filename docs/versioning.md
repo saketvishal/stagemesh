@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.31 prepares conventional
-project-local dependency environments for isolated validation and recovers
-preserved candidates from misclassified missing-tool failures.
-See the [0.6.31 release notes](releases/0.6.31.md),
+files as reinstallable package points. Version 0.6.32 gives Codex unattended
+review turns bounded automatic approval so read-only Git inspection cannot be
+silently rejected by an interactive execution policy.
+See the [0.6.32 release notes](releases/0.6.32.md),
+[0.6.31 release notes](releases/0.6.31.md),
 [0.6.30 release notes](releases/0.6.30.md),
 [0.6.29 release notes](releases/0.6.29.md),
 [0.6.28 release notes](releases/0.6.28.md),
@@ -38,14 +39,14 @@ See the [0.6.31 release notes](releases/0.6.31.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.31` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.32` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.31
+python -m pip install --no-cache-dir stagemesh==0.6.32
 ```
 
-The preceding `0.6.30` release remains available for rollback. The older
+The preceding `0.6.31` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -54,6 +55,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.32`: bounded automatic Codex approval for unattended read-only review inspection.
 - `0.6.31`: zero-configuration isolated dependencies and preserved-candidate recovery for missing validation tools.
 - `0.6.30`: bounded two-round planning convergence and persisted one-revision upgrade recovery.
 - `0.6.29`: shared bounded planning-role correction, including challenger finding schemas.

@@ -132,6 +132,21 @@ def test_init_migrates_only_exact_unsafe_bundled_defaults_without_provider_calls
     assert "always-approve" not in data["providers"]["grok"]["command"]
 
 
+def test_exact_0631_codex_default_migrates_without_changing_capabilities() -> None:
+    providers: dict[str, object] = {
+        "codex": {
+            "command": "codex exec --sandbox workspace-write --ignore-user-config --ephemeral",
+            "capabilities": ["REVIEW"],
+        }
+    }
+
+    assert provider_catalog.migrate_unsafe_bundled_provider_commands(providers) == ("codex",)
+    assert providers["codex"] == {
+        "command": "codex exec --approve-for-me --ignore-user-config --ephemeral",
+        "capabilities": ["REVIEW"],
+    }
+
+
 def test_init_generates_least_privilege_project_settings_for_discovered_agy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -493,7 +508,7 @@ def test_catalog_discovery_never_persists_command_environment_override(
     assert set(entries) == {"codex"}
     assert "SECRET_VALUE" not in str(entries)
     assert entries["codex"]["command"] == (
-        "codex exec --sandbox workspace-write --ignore-user-config --ephemeral"
+        "codex exec --approve-for-me --ignore-user-config --ephemeral"
     )
 
 
