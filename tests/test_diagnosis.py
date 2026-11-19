@@ -23,7 +23,7 @@ from stagemesh.diagnosis import (
     normalize,
     parse_analysis,
 )
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
+from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, TaskStatus
 from stagemesh.execution import ExecutionResult, Executor
 from stagemesh.git import GitWorkspace
 from stagemesh.providers import _remediation_prompt
