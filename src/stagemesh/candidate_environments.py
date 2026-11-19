@@ -72,22 +72,89 @@ def _write_marker(target: Path, marker: dict[str, str]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _dependency_link(entry: Path, root: Path) -> Path:
+def _tracked_manifest_parents(project: Path, names: tuple[str, ...]) -> tuple[Path, ...]:
+    """Return repository-relative parents for tracked dependency declarations.
+
+    Automatic dependency reuse is deliberately limited to tracked manifests. An
+    untracked package.json or pyproject.toml must not silently authorize copying
+    an adjacent environment into a validation checkout.
+    """
+    pathspecs = [name for name in names]
+    pathspecs.extend(f":(glob)**/{name}" for name in names)
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", *pathspecs],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return ()
+    parents: set[Path] = set()
+    for raw in result.stdout.split("\0"):
+        if not raw:
+            continue
+        path = PurePosixPath(raw)
+        if path.is_absolute() or ".." in path.parts or "\\" in raw:
+            raise ValueError("tracked dependency declaration escapes its repository")
+        parents.add(Path(*path.parent.parts) if path.parent != PurePosixPath(".") else Path())
+    return tuple(sorted(parents, key=lambda item: item.as_posix()))
+
+
+def _automatic_config(project: Path) -> dict[str, object]:
+    """Discover conventional, project-owned dependency environments safely.
+
+    The normal zero-configuration case is a tracked dependency declaration with
+    a sibling .venv or node_modules directory. The existing manifest equality,
+    link-containment and private-copy checks still apply after discovery.
+    """
+    data: dict[str, object] = {"schema_version": 1}
+    python: dict[str, str] = {}
+    node: dict[str, str] = {}
+
+    for parent in _tracked_manifest_parents(
+        project,
+        ("pyproject.toml", "requirements.txt", "requirements-dev.txt", "uv.lock", "poetry.lock"),
+    ):
+        relative = parent / ".venv"
+        if (project / relative).is_dir():
+            key = relative.as_posix()
+            python[key] = key
+
+    for parent in _tracked_manifest_parents(project, ("package.json",)):
+        relative = parent / "node_modules"
+        if (project / relative).is_dir():
+            key = relative.as_posix()
+            node[key] = key
+
+    if python:
+        data["python"] = python
+    if node:
+        data["node"] = node
+    return data
+
+
+def _dependency_link(entry: Path, root: Path, workspace_root: Path | None = None) -> Path:
     try:
         resolved = entry.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ValueError(f"cannot resolve dependency link: {entry}") from exc
-    if not resolved.is_relative_to(root):
-        raise ValueError(f"dependency link escapes its environment: {entry}")
-    return resolved
+    if resolved.is_relative_to(root):
+        return resolved
+    if workspace_root is not None and resolved.is_relative_to(workspace_root):
+        relative = resolved.relative_to(workspace_root)
+        if relative.parts and relative.parts[0] not in {".git", ".stagemesh"}:
+            return resolved
+    raise ValueError(f"dependency link escapes its environment: {entry}")
 
 
-def _check_node_links(target: Path) -> None:
+def _check_node_links(target: Path, checkout: Path) -> None:
     for directory, dirs, files in os.walk(target, followlinks=False):
         for name in [*dirs, *files]:
             entry = Path(directory) / name
             if _is_link(entry):
-                _dependency_link(entry, target)
+                _dependency_link(entry, target, checkout)
                 if name in dirs:
                     dirs.remove(name)  # os.walk may otherwise follow Windows junctions
 
@@ -113,7 +180,14 @@ def _detach_legacy_alias(target: Path, source: Path) -> None:
         target.rmdir()
 
 
-def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -> None:
+def _copy_node_environment(
+    source: Path,
+    target: Path,
+    marker: dict[str, str],
+    *,
+    project: Path,
+    checkout: Path,
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     # Windows readers may hold directory handles without delete sharing. Publish
     # under the workspace lease, with an exclusive directory and readiness marker
@@ -126,7 +200,7 @@ def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -
     else:
         temporary = Path(tempfile.mkdtemp(prefix=".stagemesh-node-", dir=target.parent))
     owned_target = direct
-    links: list[tuple[Path, Path, bool]] = []
+    links: list[tuple[Path, str, Path, bool]] = []
 
     def skip_links(directory: str, names: list[str]) -> list[str]:
         skipped = []
@@ -136,15 +210,25 @@ def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -
                 continue  # readiness belongs to this completed copy, never the source
             entry = Path(directory) / name
             if _is_link(entry):
-                resolved = _dependency_link(entry, source)
-                links.append((entry.relative_to(source), resolved.relative_to(source), resolved.is_dir()))
+                resolved = _dependency_link(entry, source, project)
+                if resolved.is_relative_to(source):
+                    scope, destination = "environment", resolved.relative_to(source)
+                else:
+                    scope, destination = "workspace", resolved.relative_to(project)
+                    candidate_destination = checkout / destination
+                    if not candidate_destination.exists():
+                        raise ValueError(
+                            f"workspace dependency link has no candidate target: {entry}"
+                        )
+                links.append((entry.relative_to(source), scope, destination, resolved.is_dir()))
                 skipped.append(name)
         return skipped
 
     try:
         shutil.copytree(source, temporary, ignore=skip_links, dirs_exist_ok=True)
-        for relative, destination, is_dir in links:
-            link, private = temporary / relative, temporary / destination
+        for relative, scope, destination, is_dir in links:
+            link = temporary / relative
+            private = (temporary if scope == "environment" else checkout) / destination
             if os.name == "nt" and is_dir:
                 continue  # junctions store absolute paths; create them after the atomic move
             else:
@@ -155,9 +239,10 @@ def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -
             owned_target = True
         if os.name == "nt":
             import _winapi
-            for relative, destination, is_dir in links:
+            for relative, scope, destination, is_dir in links:
                 if is_dir:
-                    _winapi.CreateJunction(str(target / destination), str(target / relative))
+                    private = (target if scope == "environment" else checkout) / destination
+                    _winapi.CreateJunction(str(private), str(target / relative))
         _write_marker(target, marker)
     except BaseException:
         if owned_target:
@@ -171,13 +256,17 @@ def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -
 def prepare_candidate_environments(project: Path, checkout: Path) -> None:
     project, checkout = Path(project).resolve(), Path(checkout).resolve()
     config = project / ".stagemesh/validation-environments.json"
-    if not config.exists():
-        return
     if project == checkout:
         raise ValueError("candidate environments require an isolated checkout")
-    data = json.loads(config.read_text(encoding="utf-8"))
+    data = (
+        json.loads(config.read_text(encoding="utf-8"))
+        if config.exists()
+        else _automatic_config(project)
+    )
     if not isinstance(data, dict):
-        raise ValueError("invalid validation-environments configuration")
+        raise TypeError("validation-environments configuration must be an object")
+    if set(data) == {"schema_version"}:
+        return
     if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
         raise ValueError("unsupported validation-environments schema version")
     allowed_keys = {"schema_version", "python", "node"}
@@ -356,8 +445,14 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
             if target.exists() and not legacy_link:
                 if not _managed(target, marker):
                     raise ValueError("refusing to replace an existing candidate environment")
-                _check_node_links(target)
+                _check_node_links(target, checkout)
                 continue
             node_plans.append((source, target, marker))
         for source, target, marker in node_plans:
-            _copy_node_environment(source, target, marker)
+            _copy_node_environment(
+                source,
+                target,
+                marker,
+                project=project,
+                checkout=checkout,
+            )

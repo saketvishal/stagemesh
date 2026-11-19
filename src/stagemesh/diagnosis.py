@@ -512,18 +512,43 @@ def _inconclusive_timeout(finding: dict[str, Any]) -> bool:
     return not _assertion_captured(finding)
 
 
+def _missing_gate_executable(finding: dict[str, Any]) -> bool:
+    """True when a nested shell proves that the gate executable is absent.
+
+    npm and similar launchers may start successfully and then fail to locate a
+    child tool, so there is no outer FileNotFoundError. Match only the shell's
+    canonical missing-command lines and reject captured assertion failures.
+    """
+    if _assertion_captured(finding):
+        return False
+    output = _visible(_gate_output(finding))
+    return bool(
+        re.search(
+            r"(?im)^\s*'[^'\r\n]+'\s+is not recognized as an internal or external command",
+            output,
+        )
+        or re.search(
+            r"(?im)^\s*(?:(?:/[\w./-]+|(?:ba|z|k)?sh):\s*(?:\d+:\s*)?)?"
+            r"[A-Za-z0-9_./@+-]+:\s*(?:command\s+)?not found\s*$",
+            output,
+        )
+    )
+
+
 def _unavailable_launch(finding: dict[str, Any]) -> bool:
     """Only established launch failures justify skipping the first code remediation.
 
     Timeouts, application imports and missing data files can be candidate bugs.
-    For a nested command, require an uncaught OS launch exception in subprocess,
-    not merely an environment-like phrase somewhere in test output.
+    A nested shell's canonical missing-command line is also conclusive; other
+    environment-like phrases still require an uncaught OS launch exception.
     Color codes around that exception are not a different failure.
     """
     if finding.get("failure_kind") == "environment":
         return True
     if finding.get("failure_kind") == "timeout":
         return False
+    if _missing_gate_executable(finding):
+        return True
     stderr = _visible(str(finding.get("stderr") or "")).strip()
     last = stderr.splitlines()[-1] if stderr else ""
     return (
@@ -562,7 +587,14 @@ def _classify(stage: str, codes: set[str], gate_findings: list[dict[str, Any]]) 
             timeout = _gate_timeout_diagnosis(finding)
             if timeout is not None and timeout.get("timeout_class") in NON_CODE_TIMEOUTS:
                 return VALIDATION_GATE
-            if _unavailable_launch(finding) or finding.get("failure_kind") == "environment" or finding.get("returncode") in (126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
+            if _unavailable_launch(finding) or finding.get("failure_kind") == "environment":
+                return VALIDATION_GATE
+            if "modulenotfounderror" in output or "no module named" in output:
+                return VALIDATION_GATE
+            if not _assertion_captured(finding) and (
+                finding.get("returncode") in (126, 127)
+                or any(hint in output for hint in _ENVIRONMENT_HINTS)
+            ):
                 return VALIDATION_GATE
             if (finding.get("failure_kind") == "timeout" or finding.get("returncode") is None) and not _assertion_captured(finding):
                 return VALIDATION_GATE

@@ -10,11 +10,72 @@ from pathlib import Path
 import pytest
 
 from stagemesh.candidate_environments import _relative, prepare_candidate_environments
+from stagemesh.git import GitWorkspace
 
 
 def test_absent_config_does_not_create_environment(tmp_path):
     prepare_candidate_environments(tmp_path, tmp_path / "checkout")
     assert not (tmp_path / "checkout").exists()
+
+
+def test_tracked_conventional_node_environment_is_automatic(tmp_path):
+    project, checkout = tmp_path / "operator", tmp_path / "checkout"
+    project.mkdir()
+    checkout.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.name", "Fixture Owner")
+    git.run("config", "user.email", "owner@example.invalid")
+    manifest = '{"name":"fixture","version":"1.0.0"}'
+    (project / "package.json").write_text(manifest, encoding="utf-8")
+    (checkout / "package.json").write_text(manifest, encoding="utf-8")
+    git.commit_all("tracked manifest")
+    executable = project / "node_modules/.bin/vitest.cmd"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("@echo off\necho ready\n", encoding="utf-8")
+
+    prepare_candidate_environments(project, checkout)
+
+    assert (checkout / "node_modules/.bin/vitest.cmd").read_text(encoding="utf-8") == executable.read_text(encoding="utf-8")
+    assert (checkout / "node_modules/.stagemesh-environment.json").is_file()
+
+
+def test_automatic_node_workspace_link_targets_candidate_checkout(tmp_path):
+    project, checkout = tmp_path / "operator", tmp_path / "checkout"
+    project.mkdir()
+    checkout.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.name", "Fixture Owner")
+    git.run("config", "user.email", "owner@example.invalid")
+    manifest = '{"name":"workspace-root","version":"1.0.0"}'
+    (project / "package.json").write_text(manifest, encoding="utf-8")
+    (checkout / "package.json").write_text(manifest, encoding="utf-8")
+    for root in (project, checkout):
+        package = root / "services/api"
+        package.mkdir(parents=True)
+        (package / "package.json").write_text(
+            '{"name":"@fixture/api","version":"1.0.0"}',
+            encoding="utf-8",
+        )
+    git.commit_all("tracked workspace")
+    link = project / "node_modules/@fixture/api"
+    link.parent.mkdir(parents=True)
+    if os.name == "nt":
+        import _winapi
+
+        try:
+            _winapi.CreateJunction(str(project / "services/api"), str(link))
+        except PermissionError:
+            pytest.skip("this Windows sandbox does not permit junction creation")
+    else:
+        link.symlink_to(project / "services/api", target_is_directory=True)
+
+    prepare_candidate_environments(project, checkout)
+
+    candidate_link = checkout / "node_modules/@fixture/api"
+    assert candidate_link.resolve() == (checkout / "services/api").resolve()
+    assert candidate_link.resolve() != (project / "services/api").resolve()
 
 
 @pytest.mark.parametrize(
