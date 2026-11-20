@@ -83,6 +83,14 @@ from .review_disposition import (
     reconcile_withdrawals,
     unresolved_adverse_review_findings,
 )
+from .review_remediation import (
+    CODE_CHANGE,
+    EXTERNAL_EVIDENCE,
+    HUMAN_DECISION,
+    VALIDATION,
+    remediation_summary,
+    review_remediations,
+)
 from .scheduling import Scheduler
 from .spec_planning import (
     BOUNDARY_IMPLEMENTATION,
@@ -97,7 +105,7 @@ from .spec_planning import (
 from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .task_completion import record_task_owner_state
 from .task_selection import contract_state
-from .validation import Validator
+from .validation import Validator, current_validation_status
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
     WorkspaceMutation,
@@ -403,6 +411,8 @@ class Coordinator:
             record_task_owner_state(self.store, task_id, "task_advanced", self.project)
             return 1
         if stage is Stage.IMPLEMENT:
+            if self._reroute_evidence_remediation(task_id):
+                return 1
             if self._implementation_may_still_run(task_id):
                 return 0
             if self._provider_stalled(task_id):
@@ -634,12 +644,16 @@ class Coordinator:
                         },
                     )
                     return 1
-            if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest):
+            validation_status = current_validation_status(self.store, self.project, task_id, sha, bound)
+            if validation_status is not EvidenceStatus.PASSED:
                 self.validator.validate(self.store, task_id, sha, self.project)
                 if not self._workspace_intact(task_id, sha, "VALIDATE:after_validation"):
                     return 1  # the evidence just recorded is not accepted: the task does not advance or remediate on it
-            if self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest, EvidenceStatus.FAILED):
+                validation_status = current_validation_status(self.store, self.project, task_id, sha, bound)
+            if validation_status is EvidenceStatus.FAILED:
                 return self._remediate_or_block(task_id, sha, Stage.VALIDATE)
+            if validation_status is not EvidenceStatus.PASSED:
+                return 0
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.VALIDATION, bound.digest)
         if stage is Stage.REVIEW:
             if not self._workspace_intact(task_id, sha, "REVIEW:before_review", require=(EvidenceKind.VALIDATION,)):
@@ -1153,6 +1167,10 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
+        if failed_stage is Stage.REVIEW:
+            routed = self._route_review_evidence(task_id, sha)
+            if routed is not None:
+                return routed
         if failed_stage is Stage.INTEGRATE:
             recovered = self._recover_integration(task_id, sha)
             if recovered is not None:
@@ -1196,6 +1214,90 @@ class Coordinator:
             return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, "remediation_budget_exhausted")
         remediation_id = self.store.add_task_remediation(task_id, str(failed_stage), sha)
         return self._queue_remediation(task_id, sha, failed_stage, findings, remediation_id)
+
+    def _reroute_evidence_remediation(self, task_id: str) -> bool:
+        latest = self.store.latest_task_remediation(task_id)
+        candidate = self.store.latest_candidate(task_id)
+        if latest is None or candidate is None or str(latest["stage"]) != str(Stage.REVIEW):
+            return False
+        sha = str(candidate["sha"])
+        if str(latest["candidate_sha"]) != sha:
+            return False
+        routed = self._route_review_evidence(task_id, sha)
+        return routed is not None
+
+    def _route_review_evidence(self, task_id: str, sha: str) -> int | None:
+        requirements = review_remediations(self.store, task_id, sha)
+        if not requirements or any(item.kind == CODE_CHANGE for item in requirements):
+            return None
+        summary = remediation_summary(requirements)
+        if VALIDATION in summary:
+            bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            if current_validation_status(self.store, self.project, task_id, sha, bound) is not EvidenceStatus.PASSED:
+                self.store.advance_task(task_id, Stage.VALIDATE)
+                record_audit(self.store, "task.evidence_remediation_queued", {
+                    "task_id": task_id,
+                    "candidate_sha": sha,
+                    "from_stage": Stage.REVIEW,
+                    "next_stage": Stage.VALIDATE,
+                    "requirements": summary,
+                })
+                record_audit(self.store, "task.recheck_existing_candidate", {
+                    "task_id": task_id,
+                    "candidate_sha": sha,
+                    "reason": "validation evidence remediation preserves the existing candidate",
+                })
+                return 1
+            messages = summary[VALIDATION]
+            self.store.advance_task(task_id, Stage.REVIEW)
+            record_block(
+                self.store,
+                task_id,
+                BlockKind.EXTERNAL_DEPENDENCY,
+                "review requires validation evidence that is not present in the trusted contract or current project profile; "
+                "implementation is not the missing work: " + "; ".join(messages[:3]),
+                stage=str(Stage.REVIEW),
+                candidate_sha=sha,
+                runtime=runtime_fingerprint(self.project),
+                detail={"failure_code": "validation_evidence_unconfigured", "requirements": messages[:20]},
+            )
+            return 1
+        if EXTERNAL_EVIDENCE in summary:
+            messages = summary[EXTERNAL_EVIDENCE]
+            self.store.advance_task(task_id, Stage.REVIEW)
+            record_block(
+                self.store,
+                task_id,
+                BlockKind.EXTERNAL_DEPENDENCY,
+                "external evidence is required for the existing candidate; implementation is not the missing work: "
+                + "; ".join(messages[:3]),
+                stage=str(Stage.REVIEW),
+                candidate_sha=sha,
+                runtime=runtime_fingerprint(self.project),
+                detail={"failure_code": "external_evidence_required", "requirements": messages[:20]},
+            )
+            record_audit(self.store, "task.evidence_remediation_blocked", {
+                "task_id": task_id,
+                "candidate_sha": sha,
+                "requirements": summary,
+            })
+            return 1
+        if HUMAN_DECISION in summary:
+            messages = summary[HUMAN_DECISION]
+            self.store.advance_task(task_id, Stage.REVIEW)
+            record_block(
+                self.store,
+                task_id,
+                BlockKind.HUMAN_DECISION,
+                "a human decision is required for the existing candidate; implementation cannot supply it: "
+                + "; ".join(messages[:3]),
+                stage=str(Stage.REVIEW),
+                candidate_sha=sha,
+                runtime=runtime_fingerprint(self.project),
+                detail={"failure_code": "human_decision_required", "requirements": messages[:20]},
+            )
+            return 1
+        return None
 
     def _queue_remediation(
         self,

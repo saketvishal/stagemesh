@@ -31,6 +31,7 @@ from .remediation import finding_identity, findings_to_verify, unresolved_findin
 from .research_context import accepted_research_evidence
 from .review_disposition import record_review_findings
 from .review_identity import implementation_identity, take_review_identity, valid_command_snapshot
+from .review_remediation import REMEDIATION_KINDS
 from .spec_planning import (
     BOUNDARY_REVIEW,
     accepted_planning_context,
@@ -43,6 +44,8 @@ class ReviewFinding:
     identity: str
     severity: str
     message: str
+    remediation: str = "code_change"
+    path: str | None = None
 
 
 INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
@@ -447,8 +450,10 @@ def _actionable_findings(raw: object) -> tuple[dict[str, str], ...]:
     for item in raw:
         if isinstance(item, dict):
             message, severity, path = item.get("message"), item.get("severity"), item.get("path")
+            declared_remediation = item.get("remediation")
         else:
             message, severity, path = item, None, None
+            declared_remediation = None
         if not isinstance(message, str) or not message.strip() or _placeholder_finding(message):
             continue
         finding = {
@@ -457,6 +462,8 @@ def _actionable_findings(raw: object) -> tuple[dict[str, str], ...]:
         }
         if isinstance(path, str) and path.strip():
             finding["path"] = path.strip()
+        if isinstance(declared_remediation, str) and declared_remediation in REMEDIATION_KINDS:
+            finding["remediation"] = declared_remediation
         kept.append(finding)
     return tuple(kept)
 
@@ -924,7 +931,10 @@ class Reviewer:
                         "Inspect the candidate, then reply with ONE final JSON verdict and nothing else (no progress text): "
                         "{\"decision\":\"PASS\"}, or "
                         "{\"decision\":\"FAIL_WITH_FINDINGS\",\"findings\":[{\"severity\":\"error\",\"message\":\"concrete defect\","
-                        "\"path\":\"file\"}]} with at least one concrete finding, or "
+                        "\"path\":\"file\",\"remediation\":\"code_change\"}]} with at least one concrete finding. "
+                        "Classify remediation as code_change, validation, external_evidence, or human_decision. "
+                        "A missing recorded gate result is validation; missing screenshots, responsive/browser review, native-device "
+                        "proof, or internal acceptance is external_evidence, not a code change. Or reply "
                         "{\"decision\":\"REVIEW_INCOMPLETE\",\"reason\":\"why no verdict was reached\"}."
                     )
                     candidate_review = getattr(adapter, "review_candidate", None)
@@ -1005,7 +1015,8 @@ class Reviewer:
                                 continue
                             findings.append(
                                 ReviewFinding(
-                                    finding_identity(candidate_sha, item["message"], item.get("path")), item["severity"], item["message"]
+                                    finding_identity(candidate_sha, item["message"], item.get("path")), item["severity"], item["message"],
+                                    item.get("remediation", "code_change"), item.get("path"),
                                 )
                             )
             except ContractError as exc:
@@ -1073,6 +1084,15 @@ class Reviewer:
                 finish_running(ExecutionStatus.FAILED, actor=reviewer_provider, result=infrastructure_failure)
                 return EvidenceStatus.CAPACITY
             if findings:
+                review_payload["findings"] = [
+                    {
+                        "severity": finding.severity,
+                        "message": finding.message,
+                        "remediation": finding.remediation,
+                        **({"path": finding.path} if finding.path else {}),
+                    }
+                    for finding in findings
+                ]
                 for finding in findings:
                     identity = finding.identity or finding_identity(candidate_sha, finding.message)
                     store.upsert_finding(identity, task_id, candidate_sha, finding.severity, finding.message)
