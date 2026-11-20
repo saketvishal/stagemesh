@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .auto_plan import GENERATED_BY, AutoPlanError, profile_payload
 from .contract_binding import contract_for_candidate
 from .contracts import (
+    BoundChangeContract,
+    ChangeContract,
     ContractError,
+    GateCommand,
     candidate_workspace,
+    canonical_contract_json,
     changed_files,
     declarative_invariants,
     evaluate_contract,
+    parse_contract,
     scope_classification,
     scope_policy_hash,
     scope_policy_payload,
+    task_contract_path,
 )
 from .candidate_inspection import (
     inspect_candidate_diff,
@@ -54,6 +62,91 @@ from .validation_services import (
     discover_validation_services,
     run_configured_evaluations,
 )
+
+
+def _gate_signature(gate: GateCommand) -> tuple[tuple[str, ...], str | None, tuple[tuple[str, str], ...]]:
+    return tuple(gate.command), gate.cwd, tuple(tuple(item) for item in gate.env)
+
+
+def current_profile_gates(
+    store: Store, project: Path, task_id: str, bound: BoundChangeContract
+) -> tuple[GateCommand, ...]:
+    """Current project-policy gates for a still-bound generated contract."""
+    path = task_contract_path(project, task_id)
+    if path is None:
+        return ()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("generated_by") != GENERATED_BY:
+            return ()
+        if canonical_contract_json(parse_contract(raw)) != bound.canonical_json:
+            return ()
+        planned = profile_payload(store, project, task_id)
+        if planned is None:
+            return ()
+        current = parse_contract(planned[0])
+    except (OSError, ValueError, TypeError, AutoPlanError, ContractError):
+        return ()
+    return current.gates
+
+
+def contract_with_current_profile_gates(
+    store: Store, project: Path, task_id: str, bound: BoundChangeContract
+) -> tuple[ChangeContract, dict[str, Any] | None]:
+    """Add current profile gates without changing the frozen contract's scope authority."""
+    contract = bound.contract
+    existing = {_gate_signature(gate) for gate in contract.gates}
+    names = {gate.name for gate in contract.gates}
+    additions: list[GateCommand] = []
+    for gate in current_profile_gates(store, project, task_id, bound):
+        if _gate_signature(gate) in existing:
+            continue
+        name = gate.name
+        if name in names:
+            name = f"current-profile:{name}"
+        names.add(name)
+        additions.append(replace(gate, name=name))
+    if not additions:
+        return contract, None
+    signatures = [
+        {"name": gate.name, "command": list(gate.command), "cwd": gate.cwd, "env": list(gate.env)}
+        for gate in additions
+    ]
+    digest = hashlib.sha256(json.dumps(signatures, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return replace(contract, required_tests=contract.required_tests + tuple(additions)), {
+        "mode": "additive",
+        "digest": digest,
+        "gates": signatures,
+        "note": "current profile gates strengthen validation; the frozen contract still controls scope",
+    }
+
+
+def current_validation_status(
+    store: Store, project: Path, task_id: str, candidate_sha: str, bound: BoundChangeContract
+) -> EvidenceStatus | None:
+    """Latest validation outcome covering the frozen contract and current additive profile policy."""
+    _contract, policy = contract_with_current_profile_gates(store, project, task_id, bound)
+    rows = store.conn.execute(
+        "SELECT status, payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
+        "ORDER BY created_at DESC, rowid DESC",
+        (task_id, candidate_sha, EvidenceKind.VALIDATION),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("contract_hash") != bound.digest:
+            continue
+        if policy is not None:
+            recorded = payload.get("current_profile_validation")
+            if not isinstance(recorded, dict) or recorded.get("digest") != policy["digest"]:
+                continue
+        try:
+            return EvidenceStatus(str(row["status"]))
+        except ValueError:
+            continue
+    return None
 
 
 def record_e2e_evidence_in_validation(
@@ -121,6 +214,7 @@ class Validator:
         try:
             bound = contract_for_candidate(store, task_id, candidate_sha, project)
             contract = bound.contract
+            contract, current_profile_validation = contract_with_current_profile_gates(store, project, task_id, bound)
             from .config import load_config
 
             project_config = load_config(project)
@@ -397,6 +491,8 @@ class Validator:
                     for gate in evaluation.gates
                 ],
             }
+            if current_profile_validation is not None:
+                payload["current_profile_validation"] = current_profile_validation
             if contract.scope_mode is not None:
                 payload["scope_policy"] = {
                     "task_id": task_id,

@@ -1223,6 +1223,10 @@ REVIEW_JSON_SCHEMA = json.dumps(
                         "severity": {"type": "string"},
                         "message": {"type": "string"},
                         "path": {"type": "string"},
+                        "remediation": {
+                            "type": "string",
+                            "enum": ["code_change", "validation", "external_evidence", "human_decision"],
+                        },
                     },
                     "required": ["severity", "message"],
                     "additionalProperties": True,
