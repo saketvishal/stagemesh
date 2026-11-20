@@ -61,6 +61,45 @@ def test_default_profile_uses_detected_root_gates(tmp_path: Path, capsys) -> Non
     assert any(g["command"][:3] == ["python", "-m", "pytest"] for g in profile.gates.values())
 
 
+def test_init_upgrades_its_exact_npm_test_profile_when_project_adds_aggregate_check(tmp_path: Path) -> None:
+    from stagemesh.profile_default import default_profile, ensure_profile
+
+    package = tmp_path / "package.json"
+    package.write_text(json.dumps({"scripts": {"test": "vitest run"}}), encoding="utf-8")
+    profile_path(tmp_path).parent.mkdir()
+    profile_path(tmp_path).write_text(json.dumps(default_profile(tmp_path), indent=2) + "\n", encoding="utf-8")
+    assert [gate["command"] for gate in load_profile(tmp_path).gates.values()] == [["npm", "test"]]
+
+    package.write_text(
+        json.dumps({"scripts": {"test": "vitest run", "check": "npm run lint && npm test && npm run build"}}),
+        encoding="utf-8",
+    )
+    status, _detail = ensure_profile(tmp_path)
+
+    assert status == "configured"
+    assert [gate["command"] for gate in load_profile(tmp_path).gates.values()] == [["npm", "run", "check"]]
+
+
+def test_explicit_test_command_does_not_rewrite_an_existing_generated_npm_profile(tmp_path: Path) -> None:
+    from stagemesh.profile_default import default_profile, ensure_profile
+
+    package = tmp_path / "package.json"
+    package.write_text(json.dumps({"scripts": {"test": "vitest run"}}), encoding="utf-8")
+    profile_path(tmp_path).parent.mkdir()
+    profile_path(tmp_path).write_text(json.dumps(default_profile(tmp_path), indent=2) + "\n", encoding="utf-8")
+    original = profile_path(tmp_path).read_bytes()
+    package.write_text(
+        json.dumps({"scripts": {"test": "vitest run", "check": "npm run lint && npm test"}}),
+        encoding="utf-8",
+    )
+
+    status, _detail = ensure_profile(tmp_path, ("custom-test",))
+
+    assert status == "kept"
+    assert profile_path(tmp_path).read_bytes() == original
+    assert [gate["command"] for gate in load_profile(tmp_path).gates.values()] == [["npm", "test"]]
+
+
 def test_python_project_without_tests_gets_first_task_bootstrap_gate(tmp_path: Path, capsys) -> None:
     (tmp_path / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
 

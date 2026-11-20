@@ -8,16 +8,21 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_run_ready import _project
 
 import stagemesh.cli as cli_module
 from stagemesh.auto_plan import AutoPlanError, create_contract, plannable
 from stagemesh.config import load_config
-from stagemesh.contracts import ContractError, GateCommand, canonical_contract_json, parse_contract, run_gate
-from stagemesh.profile import ProfileError, load_profile, parse_profile, resolve_type
+from stagemesh.contracts import (
+    ContractError,
+    GateCommand,
+    canonical_contract_json,
+    parse_contract,
+    run_gate,
+)
 from stagemesh.persistence import Store
+from stagemesh.profile import ProfileError, load_profile, parse_profile, resolve_type
 from stagemesh.task_selection import select_next_task
-
-from test_run_ready import _project
 
 PY = sys.executable
 
@@ -181,6 +186,89 @@ def test_each_task_type_gets_its_own_gates_scope_and_level(tmp_path: Path) -> No
         payload, selection = profile_payload(store, project, task)
         assert selection["task_type"] == type_id
         assert [g["name"] for g in payload["required_tests"]] == gates and payload["validation_classification"] == level
+    store.close()
+
+
+def test_profile_contract_preserves_a_narrower_explicit_issue_allowlist(tmp_path: Path) -> None:
+    description = """
+## Allowed files
+
+- `apps/web/src/App.tsx`
+- `apps/web/src/pages/sources-page.tsx`
+
+Implement only the approved Sources flow.
+""".strip()
+    project = _project(tmp_path, ["T-1"], contracts=[])
+    _write(project, _profile())
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    task = store.upsert_task("Sources flow", source="local-backlog", source_id="T-1")
+    store.cache_source("local-backlog", "T-1", {"objective": description}, "OPEN")
+
+    from stagemesh.auto_plan import profile_payload
+
+    payload, _selection = profile_payload(store, project, task)
+
+    assert payload["allowed_files"] == ["apps/web/src/App.tsx", "apps/web/src/pages/sources-page.tsx"]
+    assert "source task provides a narrower explicit file scope" in payload["validation_escalation_reasons"][-1]
+    store.close()
+
+
+@pytest.mark.parametrize("unsafe", ["../outside.py", "C:\\outside.py", "/outside.py", "**", "./**"])
+def test_profile_contract_rejects_unsafe_issue_allowlist_entries(tmp_path: Path, unsafe: str) -> None:
+    project = _project(tmp_path, ["T-1"], contracts=[])
+    _write(project, _profile())
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    task = store.upsert_task("unsafe scope", source="local-backlog", source_id="T-1")
+    store.cache_source("local-backlog", "T-1", {"objective": f"## Allowed files\n\n- `{unsafe}`"}, "OPEN")
+
+    from stagemesh.auto_plan import profile_payload
+
+    with pytest.raises(AutoPlanError, match="stay inside") as exc:
+        profile_payload(store, project, task)
+
+    assert exc.value.reason == "invalid_task_scope"
+    store.close()
+
+
+def test_profile_contract_rejects_a_source_glob_not_provably_inside_profile_glob(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"], contracts=[])
+    profile = _profile()
+    profile["task_types"]["frontend"]["allowed_files"] = ["apps/web/*"]
+    _write(project, profile)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    task = store.upsert_task("Sources UI", source="local-backlog", source_id="T-1")
+    store.cache_source(
+        "local-backlog",
+        "T-1",
+        {"labels": ["area:frontend"], "objective": "## Allowed files\n\n- `apps/web/src/**`"},
+        "OPEN",
+    )
+
+    from stagemesh.auto_plan import profile_payload
+
+    with pytest.raises(AutoPlanError, match="outside the selected profile") as exc:
+        profile_payload(store, project, task)
+
+    assert exc.value.reason == "task_scope_outside_profile"
+    store.close()
+
+
+def test_profile_contract_does_not_treat_a_backticked_command_as_a_file_scope(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"], contracts=[])
+    _write(project, _profile())
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    task = store.upsert_task("run validation", source="local-backlog", source_id="T-1")
+    store.cache_source("local-backlog", "T-1", {"objective": "## Allowed files\n\n- Run `npm test`"}, "OPEN")
+
+    from stagemesh.auto_plan import profile_payload
+
+    payload, _selection = profile_payload(store, project, task)
+
+    assert payload["allowed_files"] == ["**"]
     store.close()
 
 

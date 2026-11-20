@@ -434,6 +434,8 @@ class Coordinator:
                     "executor": self.executor.name,
                 },
             )
+            previous_candidate = self.store.latest_candidate(task_id)
+            previous_candidate_sha = None if previous_candidate is None else str(previous_candidate["sha"])
             try:
                 result = self.executor.run(self.store, task_id, claim_id, self.project)
             except OperatorStopRequested as exc:
@@ -504,6 +506,28 @@ class Coordinator:
                 )
                 return 0
             if result.status is ExecutionStatus.SUCCEEDED and result.candidate_sha and result.durable_handoff:
+                if previous_candidate_sha == result.candidate_sha:
+                    self._release_unsuccessful_implementation(
+                        task_id,
+                        claim_id,
+                        status=str(result.status),
+                        reason=NO_IMPLEMENTATION_CHANGE,
+                        candidate_sha=result.candidate_sha,
+                        durable_handoff=result.durable_handoff,
+                        provider_attempts=result.provider_attempts,
+                        provider_output=result.provider_output,
+                    )
+                    remediation = self.store.latest_task_remediation(task_id)
+                    if remediation is not None and str(remediation["candidate_sha"]) == result.candidate_sha:
+                        try:
+                            failed_stage = Stage(str(remediation["stage"]))
+                        except ValueError:
+                            failed_stage = None
+                        if failed_stage in {Stage.VALIDATE, Stage.REVIEW, Stage.INTEGRATE}:
+                            return self._remediate_or_block(task_id, result.candidate_sha, failed_stage)
+                    if self._provider_stalled(task_id):
+                        return 1
+                    return 0
                 from .selection_scope import record_candidate
                 record_candidate(self.store, task_id, result.candidate_sha)
                 if self.guard is not None:
@@ -803,21 +827,6 @@ class Coordinator:
         self.store.release_claim(claim_id)
         if self.guard is not None:
             self.guard.execution_finished(task_id)  # the owner's leftovers are not an external mutation
-        if self._should_recheck_existing_candidate_after_noop(task_id, reason):
-            candidate = self.store.latest_candidate(task_id)
-            sha = str(candidate["sha"]) if candidate is not None else None
-            self.store.advance_task(task_id, Stage.REVIEW)
-            record_audit(
-                self.store,
-                "task.recheck_existing_candidate",
-                {
-                    "task_id": task_id,
-                    "candidate_sha": sha,
-                    "from_stage": "IMPLEMENT",
-                    "to_stage": "REVIEW",
-                    "reason": reason,
-                },
-            )
         record_audit(
             self.store,
             "task.implementation_cancelled" if status == "STOPPED" else "task.implementation_unsuccessful",
@@ -838,32 +847,6 @@ class Coordinator:
                 ),
                 **pool_exhaustion_evidence(reason, provider_attempts),
             },
-        )
-
-    def _should_recheck_existing_candidate_after_noop(self, task_id: str, reason: str) -> bool:
-        """A no-op remediation after REVIEW failure means re-check the candidate, not force an artificial diff."""
-        if NO_IMPLEMENTATION_CHANGE not in reason:
-            return False
-        candidate = self.store.latest_candidate(task_id)
-        if candidate is None or not candidate["durable_handoff"]:
-            return False
-        sha = str(candidate["sha"])
-        try:
-            bound = contract_for_candidate(self.store, task_id, sha, self.project)
-        except Exception:  # noqa: BLE001 - ordinary failure handling will diagnose invalid contract/candidate state.
-            return False
-        return self.store.has_bound_evidence(
-            task_id,
-            sha,
-            EvidenceKind.VALIDATION,
-            bound.digest,
-            EvidenceStatus.PASSED,
-        ) and self.store.has_bound_evidence(
-            task_id,
-            sha,
-            EvidenceKind.REVIEW,
-            bound.digest,
-            EvidenceStatus.FAILED,
         )
 
     def _diagnose(self, task_id: str, sha: str) -> Diagnosis | None:

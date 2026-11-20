@@ -808,6 +808,17 @@ def test_the_same_infrastructure_failure_on_two_tasks_stops_the_window(tmp_path:
     assert not report.ok and "shared infrastructure failure on tasks 1, 2" in report.stop_reason and rig.runs == ["1", "2"]
 
 
+def test_one_infrastructure_failure_cannot_report_a_successful_window(tmp_path: Path) -> None:
+    fail = RunResult("RUNNER_CRASH", "no implementation provider is available", 3)
+
+    report, _s, rig, _ = go(tmp_path, ["1"], {"1": fail}, concurrency=1)
+
+    assert rig.runs == ["1"]
+    assert report.counts() == {"infrastructure_failure": 1}
+    assert report.ok is False and report.exit_code == rw.EXIT_STOPPED
+    assert rw.format_window_report(report).splitlines()[0].startswith(f"run window {report.window_id}: STOPPED")
+
+
 def test_local_main_moving_in_pr_mode_stops_the_window(tmp_path: Path) -> None:
     tips = iter(["a" * 40, "b" * 40, "b" * 40, "b" * 40])  # before the window, then after task 1
 

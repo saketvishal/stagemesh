@@ -246,6 +246,7 @@ def test_different_infrastructure_failures_do_not_stop_the_wave(tmp_path: Path) 
     report = run_wave(store, ["T-1", "T-2", "T-3"], rig.hooks(), concurrency=1)
 
     assert report.stopped_early is False and rig.runs == ["T-1", "T-2", "T-3"]
+    assert report.ok is False
     assert infrastructure_signature(RunResult("DONE")) is None and infrastructure_signature(RunResult("BLOCKED", "review failed")) is None
 
 
