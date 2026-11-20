@@ -224,6 +224,23 @@ class WindowReport:
                 + "); the provider made no usable change - inspect with `stagemesh doctor`, then rerun")
 
     @property
+    def admission_refusal_reason(self) -> str | None:
+        """A window that delivered nothing and only hit admission refusals did not succeed."""
+        attempted = [task for task in self.tasks if task.outcome not in ("skipped", "not_started")]
+        if not attempted or self.merged_prs or any(task.outcome == "done" for task in attempted):
+            return None
+        if not all(
+            task.outcome == "open" and str(task.stop_reason or "").startswith("REFUSED:")
+            for task in attempted
+        ):
+            return None
+        return (
+            f"no task delivered: {len(attempted)} attempted task(s) were refused before delivery ("
+            + ", ".join(task.task_id for task in attempted)
+            + "); follow the task-specific next action below"
+        )
+
+    @property
     def ok(self) -> bool:
         return not self.refused and not self.interrupted and self.stop_reason is None and all(wave.ok for wave in self.waves) and self.report_error is None
 
@@ -799,7 +816,18 @@ def preflight(
 # --- the window -----------------------------------------------------------------------------------------------------------------
 
 
-def next_command(report: WindowReport) -> str:
+def _task_source_still_actionable(store: Store | None, task_id: str) -> bool:
+    """Do not prescribe work for a GitHub issue that closed during the window."""
+    if store is None:
+        return True
+    task = store.get_task(task_id)
+    if task is None or task["source"] != "github" or task["source_id"] is None:
+        return True
+    state = store.source_state("github", str(task["source_id"]))
+    return str(state.get("state", "")).upper() != "CLOSED"
+
+
+def next_command(report: WindowReport, store: Store | None = None) -> str:
     if report.options.auto_merge_ff and report.stop_reason:
         return "stagemesh doctor  # fast-forward delivery stopped; published work is retained"
     """The one thing an operator should do next, from what the window found."""
@@ -819,12 +847,15 @@ def next_command(report: WindowReport) -> str:
     prs = [t for t in report.tasks if getattr(t, "ready_for_merge", False)]
     if prs or report.open_wave_prs:
         return "review and merge the open wave PRs oldest first (normal merge commit), pull main, then run the window again"
-    decisions = [t for t in report.tasks if t.outcome == "blocked_needs_decision"]
+    actionable = [
+        task for task in report.tasks if _task_source_still_actionable(store, task.task_id)
+    ]
+    decisions = [t for t in actionable if t.outcome == "blocked_needs_decision"]
     if decisions:
         return "stagemesh doctor  # tasks " + ", ".join(t.task_id for t in decisions) + " need a design decision"
     planning_decisions = [
         t.task_id
-        for t in report.tasks
+        for t in actionable
         if t.stop_reason == "REFUSED:planning_gate"
         and "independent planning challenge requires a human decision" in t.reason
     ]
@@ -837,7 +868,7 @@ def next_command(report: WindowReport) -> str:
         return guidance + "; current-protocol decisions require a revised frozen plan and are not re-rolled"
     planning_revisions = [
         t.task_id
-        for t in report.tasks
+        for t in actionable
         if t.stop_reason == "REFUSED:planning_gate"
         and "independent planning challenge requires the spec to be revised" in t.reason
     ]
@@ -853,7 +884,7 @@ def next_command(report: WindowReport) -> str:
             + paths
             + " and revise the governing task/spec before rerunning"
         )
-    approvals = [t.task_id for t in report.tasks if t.stop_reason == "REFUSED:approval_missing"]
+    approvals = [t.task_id for t in actionable if t.stop_reason == "REFUSED:approval_missing"]
     if len(approvals) == 1:
         return (
             f"operator approval required for task {approvals[0]}; review the frozen plan, then run: "
@@ -863,7 +894,7 @@ def next_command(report: WindowReport) -> str:
         return "review and approve each frozen plan: " + ", ".join(
             f"stagemesh approve-planning --task {task_id}" for task_id in approvals
         )
-    if any(t.resumable for t in report.tasks):
+    if any(t.resumable for t in actionable):
         return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
     actions = {
         reason.split("; next: ", 1)[1]
@@ -1590,7 +1621,14 @@ def _finish(
             report.ci_wait_seconds += wave.ci_wait_seconds
             report.batch_results.extend(wave.batch_results)
     if report.stop_reason is None:
-        report.stop_reason = report.no_progress_reason
+        admission_refusal = report.admission_refusal_reason
+        if admission_refusal and not any(
+            _task_source_still_actionable(store, task.task_id)
+            for task in report.tasks
+            if str(task.stop_reason or "").startswith("REFUSED:")
+        ):
+            admission_refusal = None
+        report.stop_reason = report.no_progress_reason or admission_refusal
     try:
         report.readiness = build_readiness(store, project, config, list_prs=list_prs, strict_live=report.options.strict_live)
     except Exception as exc:  # noqa: BLE001 - the report must still be written
@@ -1604,7 +1642,7 @@ def _finish(
         task.task_id: _window_capability_summary(store, project, task.task_id)
         for task in report.tasks
     }
-    report.next_command = next_command(report)
+    report.next_command = next_command(report, store)
     from .selection_scope import preview
     report.scope = preview(store, project, replace(config.task_selection, required_label=report.options.required_label))
     path = report.options.report_path
