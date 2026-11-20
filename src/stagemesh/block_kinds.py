@@ -122,6 +122,13 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
             except ValueError:
                 return None
             reason = str(payload.get("reason", ""))
+            if kind is BlockKind.EXTERNAL_DEPENDENCY and payload.get("failure_code") == "validation_evidence_unconfigured":
+                return BlockInfo(
+                    BlockKind.RECOVERABLE_OPERATIONAL,
+                    f"{reason} [reclassified: review and validation evidence must be reconciled by the current runtime]",
+                    "reclassified",
+                    payload.get("runtime"),
+                )
             if kind is BlockKind.HUMAN_DECISION and "(judgment_required)" in reason and payload.get("candidate_sha"):
                 # a decision inferred from finding wording is re-derived under today's markers: wording that no longer counts is a defect to repair
                 from .remediation_recovery import judgment_reason

@@ -1,4 +1,4 @@
-"""Adverse review findings keep their identity, provenance and resolution history, and a later PASS cannot erase them.
+"""Adverse review findings keep their identity, provenance and resolution history.
 
 A finding is identified by `finding_identity(candidate, message, path)` and lives in the `findings` table. This module adds, as
 audit events (so nothing in the schema changes and the history is append-only):
@@ -8,8 +8,9 @@ audit events (so nothing in the schema changes and the history is append-only):
 * `review.finding_disposition` an explicit, evidenced decision about it: who decided, on what evidence, and why.
 
 A candidate is review-satisfied only when an independent PASS exists *and* no blocking review finding on that candidate is still
-open. The only ways a finding stops blocking are a recorded disposition (which requires an actor and an evidence reference) or a new
-candidate, which has its own findings and needs its own review. A second reviewer answering PASS is not a disposition.
+open. The only ways a finding stops blocking are a recorded disposition (which requires an actor and an evidence reference), an
+explicit withdrawal in the same reviewer's later complete verdict, or a new candidate, which has its own findings and needs its own
+review. A different reviewer answering PASS is not a disposition.
 
 Who may decide is part of the record, not a free-text claim. A disposition is refused when its actor is (or is named like) an
 implementer of the task, or when it is requested from inside a provider process (`STAGEMESH_PROVIDER_PROCESS`): an implementer's
@@ -123,37 +124,62 @@ def recheck_review_authorized(store: Store, task_id: str, candidate_sha: str) ->
 
 
 def reconcile_withdrawals(store: Store, task_id: str, candidate_sha: str, contract_hash: str) -> list[str]:
-    """A reviewer may withdraw its own finding by passing the same candidate later; no other reviewer's PASS counts.
+    """A reviewer may withdraw its own finding in a later complete verdict; no other reviewer's verdict counts.
 
-    The withdrawal is recorded as an explicit disposition that cites the PASSED review evidence, so the history shows who changed
-    their verdict and on what evidence. Returns the finding ids resolved this way.
+    A PASS withdraws every earlier finding from that reviewer. A complete FAIL_WITH_FINDINGS withdraws only that reviewer's earlier
+    findings it no longer reports and preserves every finding it repeats. The withdrawal cites the newer review evidence, so the
+    history shows who changed their verdict and on what evidence. Returns the finding ids resolved this way.
     """
     pending = unresolved_adverse_review_findings(store, task_id, candidate_sha)
     if not pending:
         return []
-    passes = store.conn.execute(
-        "SELECT id, payload, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='REVIEW' AND status='PASSED' ORDER BY created_at, rowid",
+    reviews = store.conn.execute(
+        "SELECT id, status, payload, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='REVIEW' "
+        "AND status IN ('PASSED', 'FAILED') ORDER BY created_at, rowid",
         (task_id, candidate_sha),
     ).fetchall()
+    recorded = [item for item in _events(store, FINDING_RECORDED, task_id) if item.get("candidate_sha") == candidate_sha]
+    reported_by_evidence: dict[str, set[str]] = {}
+    for item in recorded:
+        evidence_id = item.get("review_evidence_id")
+        finding_id = item.get("finding_id")
+        if isinstance(evidence_id, str) and isinstance(finding_id, str):
+            reported_by_evidence.setdefault(evidence_id, set()).add(finding_id)
     resolved: list[str] = []
     implementers = task_implementers(store, task_id)
     for finding in pending:
-        raised_at = next((e["_at"] for e in _events(store, FINDING_RECORDED, task_id) if e.get("finding_id") == finding["finding_id"]), 0.0)
+        raised_at = next((e["_at"] for e in recorded if e.get("finding_id") == finding["finding_id"]), 0.0)
         reviewer = str(finding.get("reviewer") or "").casefold()
-        for row in passes:
+        for row in reviews:
             payload = _loads(row["payload"])
+            same_reviewer = (
+                reviewer
+                and reviewer not in implementers
+                and str(payload.get("review_provider") or "").casefold() == reviewer
+                and payload.get("independent_reviewer") is True
+            )
+            current_ids = reported_by_evidence.get(str(row["id"]))
+            complete_revision = (
+                str(row["status"]) == "FAILED"
+                and payload.get("review_verdict") == "FAIL_WITH_FINDINGS"
+                and current_ids is not None
+                and payload.get("finding_count") == len(current_ids)
+                and finding["finding_id"] not in current_ids
+            )
             if (
                 float(row["created_at"]) >= raised_at
                 and payload.get("contract_hash") == contract_hash
-                and str(payload.get("review_provider") or "").casefold() == reviewer
-                and reviewer
-                and reviewer not in implementers  # an implementer's own "withdrawal" is self-attestation
-                and payload.get("independent_reviewer") is True
+                and same_reviewer
+                and (str(row["status"]) == "PASSED" or complete_revision)
             ):
                 record_disposition(
                     store, task_id, finding["finding_id"], disposition=WITHDRAWN, actor=str(finding.get("reviewer")),
                     evidence_ref=f"review-evidence:{row['id']}",
-                    rationale="the reviewer that raised this finding passed the same candidate on re-check",
+                    rationale=(
+                        "the reviewer that raised this finding passed the same candidate on re-check"
+                        if str(row["status"]) == "PASSED"
+                        else "the same reviewer completed a newer review of the same candidate and no longer reported this finding"
+                    ),
                 )
                 resolved.append(finding["finding_id"])
                 break
@@ -269,7 +295,7 @@ def record_disposition(
         "evidence_refs": refs,
         "evidence_resolved": resolved,
         "independent_evidence_verified": independent,
-        "support": "independent_evidence" if independent else "owner_attestation",
+        "support": "reviewer_withdrawal" if disposition == WITHDRAWN else "independent_evidence" if independent else "owner_attestation",
         "rationale": rationale.strip()[:1000],
         "original_message": str(row["message"])[:500],
         "severity": str(row["severity"]),

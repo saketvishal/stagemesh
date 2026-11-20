@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -425,7 +426,7 @@ def _quiet_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_window_budget_stops_admission_at_a_wave_boundary(tmp_path: Path, _quiet_runtime) -> None:
-    store, project = make_store(tmp_path, ["1", "2"])
+    store, project = make_store(tmp_path, ["1"])
     for i in range(4):  # provider calls already spent in this window by earlier waves
         record_provider_call(store, task_id="1", purpose="implementation", provider="codex", outcome="failed", reason=f"r{i}", duration_seconds=1.0)
     rig = WaveRig(project, {})
@@ -438,27 +439,36 @@ def test_the_window_budget_stops_admission_at_a_wave_boundary(tmp_path: Path, _q
                            provider_check=OK_PROVIDERS, clock=Clock())
     # The calls above happened before this window started, so they are not this window's spend: the window runs normally.
     assert report.ok and rig.runs
+    store.close()
 
+    current = tmp_path / "current"
+    current.mkdir()
+    store, project = make_store(current, ["1", "2", "3"])
     rig2 = WaveRig(project, {})
     hooks2 = rig2.hooks()
     hooks2.repo_state = lambda: IN_SYNC
+    config = load_config(project)
     config2 = type(config)(**{**config.__dict__, "budgets": type(config.budgets)(max_provider_calls_per_window=1)})
+    admitted = threading.Barrier(2)
+    work = threading.Lock()
 
     def spend(r, task_id):  # this window's own first wave spends past the limit (from the worker's own connection, like a child process)
-        worker = r.worker_store()
-        try:
-            record_provider_call(worker, task_id=task_id, purpose="implementation", provider="codex", outcome="succeeded", duration_seconds=1.0)
-        finally:
-            worker.close()
-        return r.finish_done(task_id)
+        admitted.wait(timeout=10)  # both verification slots are in flight before either can consume the budget
+        with work:  # keep the fixture's SQLite writes serialized; concurrent admission is what this test exercises
+            worker = r.worker_store()
+            try:
+                record_provider_call(worker, task_id=task_id, purpose="implementation", provider="codex", outcome="succeeded", duration_seconds=1.0)
+            finally:
+                worker.close()
+            return r.finish_done(task_id)
 
-    rig2.behaviour = {"2": spend, "1": spend}
-    store.conn.execute("UPDATE tasks SET stage='PLAN', status='OPEN'")
-    store.conn.commit()
+    rig2.behaviour = {"3": spend, "2": spend, "1": spend}
     report2 = rw.run_window(store, project, config2, rw.WindowOptions(report_path=tmp_path / "out2.json", concurrency=1, max_tasks=5), hooks2,
                             base_ref="refs/heads/main", runtime=FRESH, list_prs=lambda p: [], provider_check=OK_PROVIDERS, clock=Clock())
     assert report2.stop_reason and "provider-call budget reached for this window" in report2.stop_reason
-    assert sorted(rig2.runs) == ["1", "2"] and report2.counts() == {"done": 2}  # the wave in flight finished; nothing new was admitted
+    # Both already-admitted tasks finish their work and are preserved before publication; task 3 never starts after the boundary.
+    assert sorted(rig2.runs) == ["1", "2"] and report2.counts() == {"open": 2, "not_started": 1}
+    store.close()
 
 
 def test_budget_configuration_is_validated_and_defaults_are_bounded(tmp_path: Path) -> None:
