@@ -283,11 +283,18 @@ def test_interrupt_after_launch_kills_the_owned_tree_and_releases_the_slot(tmp_p
         "time.sleep(30)\n"
     )
     original = subprocess.Popen.communicate
+    observed_pid: list[int] = []
 
     def interrupt(self, input=None, timeout=None):
         deadline = time.time() + 5
-        while not pid_file.exists() and time.time() < deadline:
+        while time.time() < deadline:
+            try:
+                observed_pid.append(int(pid_file.read_text(encoding="utf-8")))
+                break
+            except (FileNotFoundError, ValueError):
+                pass
             time.sleep(0.02)
+        assert observed_pid, "child PID was not completely written before the interrupt deadline"
         raise KeyboardInterrupt("operator")
 
     monkeypatch.setattr(subprocess.Popen, "communicate", interrupt)
@@ -296,8 +303,7 @@ def test_interrupt_after_launch_kills_the_owned_tree_and_releases_the_slot(tmp_p
             run_gate(tmp_path, GateCommand("interrupt", [sys.executable, "-c", code, str(pid_file)], timeout_seconds=30))
     finally:
         monkeypatch.setattr(subprocess.Popen, "communicate", original)
-    assert pid_file.exists()
-    child = int(pid_file.read_text(encoding="utf-8"))
+    child = observed_pid[0]
     deadline = time.time() + 5
     while time.time() < deadline and _alive(child):
         time.sleep(0.05)
