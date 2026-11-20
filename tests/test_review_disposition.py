@@ -24,6 +24,10 @@ from stagemesh.review_disposition import (
 from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 
 FAIL = '{"decision":"FAIL_WITH_FINDINGS","findings":[{"severity":"error","message":"docs/a.md omits the required Engineering Impact record","path":"docs/a.md"}]}'
+REVISED_FAIL = (
+    '{"decision":"FAIL_WITH_FINDINGS","findings":[{"severity":"error",'
+    '"message":"responsive browser evidence is still missing","path":"docs/a.md","remediation":"external_evidence"}]}'
+)
 
 
 def _independent_pass(rig: Rig, sha: str, reviewer: str) -> str:
@@ -249,6 +253,34 @@ def test_the_reviewer_that_raised_a_finding_may_withdraw_it_on_the_one_authorize
     withdrawn = finding_history(rig.store, TASK, finding_id)[-1]
     assert withdrawn["event"] == FINDING_DISPOSITION and withdrawn["disposition"] == "withdrawn_by_reviewer"
     assert withdrawn["actor"] == "claude" and withdrawn["evidence_ref"].startswith("review-evidence:")  # explicit, attributable, evidenced
+
+
+def test_same_reviewers_complete_revised_failure_withdraws_only_omitted_findings(tmp_path: Path) -> None:
+    rig, sha = _rig_with_adverse_review(tmp_path)
+    original = unresolved_adverse_review_findings(rig.store, TASK, sha)[0]["finding_id"]
+    _authorize_recheck(rig, sha)
+    same = FakeReviewAdapter("claude", REVISED_FAIL)
+    rig.coordinator.reviewer = Reviewer(adapter=same, require_independent=True)
+
+    rig.tick(1)
+
+    pending = unresolved_adverse_review_findings(rig.store, TASK, sha)
+    assert same.calls == 1 and [item["message"] for item in pending] == ["responsive browser evidence is still missing"]
+    withdrawn = finding_history(rig.store, TASK, original)[-1]
+    assert withdrawn["disposition"] == "withdrawn_by_reviewer"
+    assert withdrawn["support"] == "reviewer_withdrawal" and withdrawn["evidence_ref"].startswith("review-evidence:")
+
+
+def test_different_reviewers_revised_failure_cannot_withdraw_the_original_finding(tmp_path: Path) -> None:
+    rig, sha = _rig_with_adverse_review(tmp_path)
+    _authorize_recheck(rig, sha)
+    other = FakeReviewAdapter("grok", REVISED_FAIL)
+    rig.coordinator.reviewer = Reviewer(adapter=other, require_independent=True)
+
+    rig.tick(1)
+
+    assert other.calls == 1
+    assert {item["reviewer"] for item in unresolved_adverse_review_findings(rig.store, TASK, sha)} == {"claude", "grok"}
 
 
 def test_a_different_reviewers_pass_on_the_recheck_does_not_resolve_the_finding(tmp_path: Path) -> None:

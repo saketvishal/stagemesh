@@ -1253,13 +1253,13 @@ class Coordinator:
             record_block(
                 self.store,
                 task_id,
-                BlockKind.EXTERNAL_DEPENDENCY,
-                "review requires validation evidence that is not present in the trusted contract or current project profile; "
+                BlockKind.RECOVERABLE_OPERATIONAL,
+                "the latest review still disputes validation evidence that the trusted current policy records as passed; "
                 "implementation is not the missing work: " + "; ".join(messages[:3]),
                 stage=str(Stage.REVIEW),
                 candidate_sha=sha,
                 runtime=runtime_fingerprint(self.project),
-                detail={"failure_code": "validation_evidence_unconfigured", "requirements": messages[:20]},
+                detail={"failure_code": "review_validation_evidence_disagreement", "requirements": messages[:20]},
             )
             return 1
         if EXTERNAL_EVIDENCE in summary:

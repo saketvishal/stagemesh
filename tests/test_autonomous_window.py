@@ -84,6 +84,22 @@ def test_only_recoverable_operational_blocks_are_reconsidered_and_only_after_a_r
         assert reenter_blocked_task(store, task_id, "new") is None and store.get_task(task_id)["status"] == TaskStatus.BLOCKED
 
 
+def test_legacy_validation_evidence_disagreement_is_recoverable_after_runtime_upgrade(tmp_path: Path) -> None:
+    store, _ = make_store(tmp_path, ["138"])
+    record_block(
+        store,
+        "138",
+        BlockKind.EXTERNAL_DEPENDENCY,
+        "review requires validation evidence that is not present",
+        runtime="0.6.36",
+        detail={"failure_code": "validation_evidence_unconfigured"},
+    )
+
+    info = classify_block(store, "138")
+    assert info is not None and info.kind is BlockKind.RECOVERABLE_OPERATIONAL and info.source == "reclassified"
+    assert reentry_refusal(store, "138", "0.6.37") is None
+
+
 def test_reentry_returns_the_task_to_open_keeps_its_history_and_is_bounded(tmp_path: Path) -> None:
     store, _ = make_store(tmp_path, ["R"])
     store.add_candidate("R", "d" * 40, "codex", True)
