@@ -6,9 +6,11 @@ and spending its steps on the same failing loop. "Progress" is therefore defined
 
 * the task reached a later lifecycle stage than the run began at, or finished;
 * the run ended on a new candidate whose failure is different from the one it began with (the earlier cause was resolved), or on a
-  new candidate with no failure at all.
+  new candidate with no failure at all;
+* an independent failed check produced a new, persisted remediation handoff. That is forward progress even though the lifecycle
+  deliberately returns from REVIEW or VALIDATE to IMPLEMENT on the same candidate.
 
-More evidence rows, more remediation attempts or a new but equivalent failure are activity, not progress. Each step-capped run is
+More evidence rows, repeated remediation attempts or a new but equivalent failure are activity, not progress. Each step-capped run is
 recorded (`task.step_cap`); the streak of consecutive unproductive capped runs is read back from the ledger, so it survives windows
 and restarts, and an operator action that gives the task a fresh start (unblock, contract rebind, rebaseline) ends it.
 """
@@ -44,9 +46,16 @@ class ProgressState:
     rank: int
     candidate: str | None
     failure: str | None  # signature of the latest failed check on the latest candidate, None when it has none
+    remediation: str | None  # active persisted handoff; a new one is progress exactly once
 
     def to_dict(self) -> dict[str, Any]:
-        return {"stage": self.stage, "status": self.status, "candidate": self.candidate, "failure": self.failure}
+        return {
+            "stage": self.stage,
+            "status": self.status,
+            "candidate": self.candidate,
+            "failure": self.failure,
+            "remediation": self.remediation,
+        }
 
 
 def _loads(raw: object) -> dict[str, Any]:
@@ -87,8 +96,17 @@ def progress_state(store: Store, task_id: str) -> ProgressState:
         stage = Stage(task["stage"]) if task is not None else Stage.PLAN
     except ValueError:  # an unknown stage label is "no rank", never a crash in the run summary
         stage = Stage.PLAN
+    remediation = store.conn.execute(
+        "SELECT id FROM task_remediations WHERE task_id=? AND cleared=0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
     return ProgressState(
-        stage.value, "MISSING" if task is None else str(task["status"]), _RANK.get(stage, 0), candidate, _failure_signature(store, task_id, candidate),
+        stage.value,
+        "MISSING" if task is None else str(task["status"]),
+        _RANK.get(stage, 0),
+        candidate,
+        _failure_signature(store, task_id, candidate),
+        None if remediation is None else str(remediation["id"]),
     )
 
 
@@ -98,6 +116,8 @@ def made_progress(before: ProgressState, after: ProgressState) -> tuple[bool, st
         return True, "the task completed"
     if after.rank > before.rank:
         return True, f"advanced from {before.stage} to {after.stage}"
+    if after.remediation is not None and after.remediation != before.remediation:
+        return True, "accepted new failed-check findings for implementation remediation"
     if after.candidate != before.candidate:
         if after.failure is None:
             return True, "a new candidate with no failed check"

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from test_bounded_execution import TASK, _setup
+
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.run_ready import RunSummary, drive_task
 from stagemesh.step_progress import (
@@ -14,8 +16,6 @@ from stagemesh.step_progress import (
     stalled,
     unproductive_step_caps,
 )
-
-from test_bounded_execution import TASK, _setup
 
 SHA = ("a" * 39)
 
@@ -97,7 +97,7 @@ def test_repeated_unproductive_caps_end_as_one_typed_blocker_across_windows(tmp_
 
 
 def test_activity_without_a_resolved_cause_is_not_progress(tmp_path: Path) -> None:
-    project, store = _setup(tmp_path)
+    _project, store = _setup(tmp_path)
     store.advance_task(TASK, Stage.REVIEW)
     store.add_candidate(TASK, SHA + "0", "p", durable_handoff=True)
     before = progress_state(store, TASK)
@@ -113,6 +113,50 @@ def test_activity_without_a_resolved_cause_is_not_progress(tmp_path: Path) -> No
     store.add_candidate(TASK, SHA + "2", "p", durable_handoff=True)
     store.add_evidence(TASK, SHA + "2", EvidenceKind.REVIEW, EvidenceStatus.FAILED, {"findings": [{"code": "other", "message": "a different problem"}]})
     assert made_progress(mid, progress_state(store, TASK))[0] is True
+
+
+def test_first_substantive_review_findings_reset_an_existing_step_cap_streak(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    store.advance_task(TASK, Stage.REVIEW)
+    candidate = SHA + "0"
+    store.add_candidate(TASK, candidate, "p", durable_handoff=True)
+    store.add_evidence(
+        TASK,
+        candidate,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.CAPACITY,
+        {"review_verdict": "REVIEW_INCOMPLETE", "review_infrastructure_failure": "read-only inspection was blocked"},
+    )
+    first, _ = _run(store, project, ["idle"], steps=1)
+    assert first.stop_reason == "MAX_STEPS" and unproductive_step_caps(store, TASK) == 1
+
+    class Findings(Scripted):
+        def tick(self) -> int:
+            self.store.add_evidence(
+                TASK,
+                candidate,
+                EvidenceKind.REVIEW,
+                EvidenceStatus.FAILED,
+                {
+                    "review_verdict": "FAIL_WITH_FINDINGS",
+                    "review_response": '{"decision":"FAIL_WITH_FINDINGS","findings":[{"severity":"error","message":"run the missing gate"}]}',
+                    "findings": [],
+                },
+            )
+            self.store.add_task_remediation(TASK, Stage.REVIEW, candidate)
+            self.store.advance_task(TASK, Stage.IMPLEMENT)
+            return 1
+
+    coordinator = Findings(store, [])
+    summary = RunSummary(True, "UNSET", task_id=TASK)
+    drive_task(store, project, coordinator, TASK, summary, max_steps=1, global_health=False)
+
+    assert summary.stop_reason == "MAX_STEPS"
+    assert summary.detail["step_cap"]["progressed"] is True
+    assert summary.detail["step_cap"]["reason"] == "accepted new failed-check findings for implementation remediation"
+    assert store.get_task(TASK)["stage"] == Stage.IMPLEMENT
+    assert store.get_task(TASK)["status"] == TaskStatus.OPEN
+    assert unproductive_step_caps(store, TASK) == 0
 
 
 def test_an_operator_fresh_start_ends_the_streak(tmp_path: Path) -> None:
