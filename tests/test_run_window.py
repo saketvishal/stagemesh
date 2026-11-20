@@ -92,9 +92,37 @@ def test_missing_accountable_approval_reports_the_exact_operator_action(tmp_path
         {"1": RunResult("REFUSED:approval_missing", "no approval artifact exists for this task", 1)},
     )
     try:
+        assert report.ok is False
+        assert report.exit_code == rw.EXIT_STOPPED
+        assert report.stop_reason is not None and "refused before delivery" in report.stop_reason
         assert "operator approval required" in report.next_command
         assert "stagemesh approve-planning --task 1" in report.next_command
         assert "run-window" not in report.next_command
+    finally:
+        store.close()
+
+
+def test_closed_source_does_not_leave_a_stale_planning_approval_action(tmp_path: Path) -> None:
+    report, store, _rig, _options = go(
+        tmp_path,
+        ["1"],
+        {"1": RunResult("REFUSED:approval_missing", "no approval artifact exists for this task", 1)},
+    )
+    try:
+        store.conn.execute(
+            "UPDATE tasks SET source='github', source_id='1' WHERE id='1'"
+        )
+        store.cache_source(
+            "github",
+            "1",
+            {"state": "CLOSED", "eligible": False, "eligibility_reason": "source issue is closed"},
+            "CLOSED",
+        )
+
+        guidance = rw.next_command(report, store)
+
+        assert guidance == "nothing to do: no eligible work left"
+        assert "approve-planning" not in guidance
     finally:
         store.close()
 

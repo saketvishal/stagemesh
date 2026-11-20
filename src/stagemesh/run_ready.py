@@ -372,6 +372,22 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
     if persisted_baseline is None:
         baseline = store.set_task_baseline(task_id, baseline)
+    if accountable:
+        # A fully accountable approval freezes the exact plan, challenge,
+        # contract, baseline, authority, and successful planning identities.
+        # A later adapter-command change must not invalidate that historical
+        # evidence: no planner or challenger is being launched at pickup.
+        approved = check_accountable_approval(
+            store,
+            project,
+            task_id,
+            BOUNDARY_PICKUP,
+            contract_hash=contract_hash,
+            baseline_sha=baseline,
+            record_refusal=False,
+        )
+        if approved is not None and approved.allowed:
+            return
     try:
         ensure_executed_planning(
             store,

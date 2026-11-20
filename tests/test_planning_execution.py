@@ -1118,6 +1118,83 @@ def test_provider_command_drift_invalidates_prior_execution_receipt(tmp_path: Pa
     store.close()
 
 
+def test_accountably_approved_plan_survives_later_provider_command_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script(tmp_path)
+    config = _config(script)
+    config["planning_gate"]["approval_authority"] = {
+        "version": 1,
+        "authority_id": "project-owner:test",
+        "approver_id": "owner:test",
+    }
+    project = _project(tmp_path, ["T-1"], config=config)
+    code, result = _run(project)
+    assert code != 0 and result["detail"]["next_action"] == "obtain_planning_approval", result
+    assert cli_module.main(
+        ["--project", str(project), "approve-planning", "--task", "T-1", "--json"]
+    ) == 0
+    capsys.readouterr()
+
+    config["providers"]["planner"] = shlex.join(
+        [sys.executable, str(script), "planner", "changed-command-identity"]
+    )
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(config), encoding="utf-8"
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    before = store.conn.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE event_type IN (?, ?)",
+        (PLANNER_RECEIPT, CHALLENGER_RECEIPT),
+    ).fetchone()[0]
+    store.close()
+
+    code, result = _run(project)
+
+    assert code == 0 and result["stop_reason"] == "DONE", result
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    after = store.conn.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE event_type IN (?, ?)",
+        (PLANNER_RECEIPT, CHALLENGER_RECEIPT),
+    ).fetchone()[0]
+    assert after == before == 2
+    store.close()
+
+
+def test_stale_accountable_approval_does_not_bypass_provider_command_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script(tmp_path)
+    config = _config(script)
+    config["planning_gate"]["approval_authority"] = {
+        "version": 1,
+        "authority_id": "project-owner:test",
+        "approver_id": "owner:test",
+    }
+    project = _project(tmp_path, ["T-1"], config=config)
+    _run(project)
+    assert cli_module.main(
+        ["--project", str(project), "approve-planning", "--task", "T-1", "--json"]
+    ) == 0
+    capsys.readouterr()
+
+    spec_path, _approval_path = planning_artifact_paths(project, "T-1")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["behavior"].append("unapproved artifact mutation")
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    config["providers"]["planner"] = shlex.join(
+        [sys.executable, str(script), "planner", "changed-command-identity"]
+    )
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(config), encoding="utf-8"
+    )
+
+    code, result = _run(project)
+
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
+    assert result["detail"]["next_action"] == "planner_execution_unverified"
+
+
 def test_config_rejects_untrusted_or_same_provider_role_combinations(tmp_path: Path):
     runtime = tmp_path / ".stagemesh"
     runtime.mkdir()
