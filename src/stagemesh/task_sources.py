@@ -7,9 +7,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
 
 from .audit import record_audit
 from .concurrency import IntegrationLock
@@ -586,10 +586,6 @@ def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing
             previous_retirement_reason = previous_source_state.get("retirement_reason")
             if not previous_retirement_reason and hasattr(store, "operator_retirement_reason"):
                 previous_retirement_reason = store.operator_retirement_reason(task.source, task.source_id)
-            if not previous_retirement_reason:
-                row = store.get_task(task_id)
-                if row is not None and row["status"] == TaskStatus.BLOCKED:
-                    previous_retirement_reason = "source became eligible"
             if is_github and isinstance(previous_retirement_reason, str):
                 store.restore_source_task(
                     task.source,

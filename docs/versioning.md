@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.32 gives Codex unattended
-review turns bounded automatic approval so read-only Git inspection cannot be
-silently rejected by an interactive execution policy.
-See the [0.6.32 release notes](releases/0.6.32.md),
+files as reinstallable package points. Version 0.6.33 carries substantive failed
+review findings into implementation without misclassifying that transition as a
+stalled loop, and keeps ordinary GitHub refreshes from reopening unrelated blocks.
+See the [0.6.33 release notes](releases/0.6.33.md),
+[0.6.32 release notes](releases/0.6.32.md),
 [0.6.31 release notes](releases/0.6.31.md),
 [0.6.30 release notes](releases/0.6.30.md),
 [0.6.29 release notes](releases/0.6.29.md),
@@ -39,14 +40,14 @@ See the [0.6.32 release notes](releases/0.6.32.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.32` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.33` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.32
+python -m pip install --no-cache-dir stagemesh==0.6.33
 ```
 
-The preceding `0.6.31` release remains available for rollback. The older
+The preceding `0.6.32` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -55,6 +56,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.33`: durable review-to-remediation progress and source-safe block preservation.
 - `0.6.32`: bounded automatic Codex approval for unattended read-only review inspection.
 - `0.6.31`: zero-configuration isolated dependencies and preserved-candidate recovery for missing validation tools.
 - `0.6.30`: bounded two-round planning convergence and persisted one-revision upgrade recovery.

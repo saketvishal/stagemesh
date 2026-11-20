@@ -725,6 +725,26 @@ def test_relabelled_github_issue_restores_source_retired_task(tmp_path):
         store.close()
 
 
+def test_eligible_github_refresh_does_not_reopen_an_unrelated_operational_block(tmp_path):
+    store = _store(tmp_path)
+    try:
+        ready = DiscoveredTask("github", "1", "ready", labels=("stagemesh:ready",))
+        task_id = sync_source(store, [ready])[0]
+        store.block_task(task_id)
+
+        ids = sync_source(store, [ready])
+
+        assert ids == [task_id]
+        assert store.get_task(task_id)["status"] == TaskStatus.BLOCKED
+        assert not [
+            row
+            for row in store.audit_events()
+            if row["event_type"] == "task.source_restored"
+        ]
+    finally:
+        store.close()
+
+
 def test_ready_label_drift_is_recorded_and_reconciled(tmp_path):
     store = _store(tmp_path)
     try:
