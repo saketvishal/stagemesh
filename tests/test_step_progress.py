@@ -13,6 +13,7 @@ from stagemesh.step_progress import (
     STEP_CAP_STALL_LIMIT,
     made_progress,
     progress_state,
+    record_step_cap,
     stalled,
     unproductive_step_caps,
 )
@@ -157,6 +158,56 @@ def test_first_substantive_review_findings_reset_an_existing_step_cap_streak(tmp
     assert store.get_task(TASK)["stage"] == Stage.IMPLEMENT
     assert store.get_task(TASK)["status"] == TaskStatus.OPEN
     assert unproductive_step_caps(store, TASK) == 0
+
+
+def test_duplicate_remediation_row_for_the_same_stage_and_candidate_is_not_progress(tmp_path: Path) -> None:
+    _project, store = _setup(tmp_path)
+    candidate = SHA + "0"
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    store.add_candidate(TASK, candidate, "p", durable_handoff=True)
+    store.add_task_remediation(TASK, Stage.REVIEW, candidate)
+    before = progress_state(store, TASK)
+
+    store.add_task_remediation(TASK, Stage.REVIEW, candidate)
+
+    assert made_progress(before, progress_state(store, TASK)) == (
+        False,
+        "still at IMPLEMENT on the same candidate with the same failure",
+    )
+
+
+def test_alternating_remediation_stages_cannot_recount_an_old_lineage_as_progress(tmp_path: Path) -> None:
+    _project, store = _setup(tmp_path)
+    candidate = SHA + "0"
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    store.add_candidate(TASK, candidate, "p", durable_handoff=True)
+    store.add_task_remediation(TASK, Stage.REVIEW, candidate)
+    store.add_task_remediation(TASK, Stage.VALIDATE, candidate)
+    before = progress_state(store, TASK)
+    store.add_task_remediation(TASK, Stage.REVIEW, candidate)
+    after = progress_state(store, TASK)
+
+    note = record_step_cap(store, TASK, before, after, 1)
+
+    assert note["progressed"] is False
+    assert note["reason"] == "the same remediation lineage was already attempted for this candidate"
+
+
+def test_cleared_and_readded_remediation_lineage_is_not_progress(tmp_path: Path) -> None:
+    _project, store = _setup(tmp_path)
+    candidate = SHA + "0"
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    store.add_candidate(TASK, candidate, "p", durable_handoff=True)
+    store.add_task_remediation(TASK, Stage.REVIEW, candidate)
+    store.clear_task_remediations(TASK)
+    before = progress_state(store, TASK)
+    store.add_task_remediation(TASK, Stage.REVIEW, candidate)
+    after = progress_state(store, TASK)
+
+    note = record_step_cap(store, TASK, before, after, 1)
+
+    assert note["progressed"] is False
+    assert note["reason"] == "the same remediation lineage was already attempted for this candidate"
 
 
 def test_an_operator_fresh_start_ends_the_streak(tmp_path: Path) -> None:

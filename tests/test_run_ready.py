@@ -29,7 +29,7 @@ from stagemesh.workspace_guard import (
     WorkspaceMutation,
     owned_workspace,
 )
-from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE, record_task_baseline
+from stagemesh.workspaces import record_task_baseline
 
 FAKE_CONTRACT = {
     "objective": "fake task",
@@ -855,72 +855,6 @@ def test_failed_review_runtime_path_reimplements_and_reaches_done(tmp_path: Path
     assert reviewer.calls == 2
     assert summary.final["latest_review"] == "PASSED"
     assert store.task_remediation_count("T-1", Stage.REVIEW) == 1
-
-
-def test_noop_after_failed_review_rechecks_existing_candidate(tmp_path: Path) -> None:
-    project = _project(tmp_path, ["T-1"])
-    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
-    store.migrate()
-    cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
-
-    from test_completion_integrity import FakeReviewAdapter
-
-    class FailOnceReviewer:
-        def __init__(self):
-            self.adapter = FakeReviewAdapter("controlled-reviewer")
-
-        def review(self, store: Store, task_id: str, candidate_sha: str, project: Path):
-            # Withdrawal requires a fresh invoked PASS from the same independent
-            # reviewer, not a deterministic fallback with no review invocation.
-            self.adapter.response = json.dumps(
-                {"decision": "FAIL_WITH_FINDINGS", "findings": [{"severity": "error", "message": "first review failed"}]}
-                if self.adapter.calls == 0 else {"decision": "PASS"}
-            )
-            return Reviewer(adapter=self.adapter, require_independent=True).review(store, task_id, candidate_sha, project)
-
-    class NoChangeExecutor(Executor):
-        name = "fake"
-
-        def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
-
-    reviewer = FailOnceReviewer()
-    first = run_ready(
-        store,
-        project,
-        lambda target: cli_module.Coordinator(store, project, reviewer=reviewer, target=target),
-        task_id="T-1",
-        max_steps=4,
-    )
-    assert first.stop_reason == "MAX_STEPS" and first.final["stage"] == "IMPLEMENT", first.to_dict()
-
-    second = run_ready(
-        store,
-        project,
-        lambda target: cli_module.Coordinator(store, project, executor=NoChangeExecutor(), reviewer=reviewer, target=target),
-        task_id="T-1",
-        max_steps=6,
-    )
-
-    assert second.stop_reason == "DONE", second.to_dict()
-    assert second.final["latest_review"] == "PASSED"
-    assert any(event["event_type"] == "task.recheck_existing_candidate" for event in store.audit_events())
-
-    assert reviewer.adapter.calls == 2
-    assert second.final["latest_candidate"] == first.final["latest_candidate"]
-    reviews = store.conn.execute(
-        "SELECT id, candidate_sha, status, payload FROM evidence WHERE kind='REVIEW' ORDER BY created_at, rowid"
-    ).fetchall()
-    assert [row["status"] for row in reviews] == ["FAILED", "PASSED"]
-    assert {row["candidate_sha"] for row in reviews} == {first.final["latest_candidate"]}
-    assert all(json.loads(row["payload"])["independent_reviewer"] for row in reviews)
-    assert all(json.loads(row["payload"])["review_execution_invoked"] for row in reviews)
-    assert store.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 1
-    withdrawals = [json.loads(row["payload"]) for row in store.audit_events()
-                   if row["event_type"] == "review.finding_disposition"]
-    assert len(withdrawals) == 1 and withdrawals[0]["disposition"] == "withdrawn_by_reviewer"
-    assert withdrawals[0]["actor"] == "controlled-reviewer"
-    assert withdrawals[0]["evidence_ref"] == f"review-evidence:{reviews[-1]['id']}"
 
 
 def test_unrelated_unknown_execution_still_refuses_run(tmp_path: Path) -> None:

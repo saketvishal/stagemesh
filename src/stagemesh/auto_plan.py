@@ -21,6 +21,7 @@ from .capabilities import capability_policy_snapshot
 from .contracts import (
     CONTRACT_VERSION,
     ContractError,
+    _matches,
     canonical_contract_json,
     contract_admission_problem,
     parse_contract,
@@ -139,7 +140,14 @@ def detect_gates(project: Path) -> list[dict[str, Any]]:
         except (OSError, ValueError, AttributeError):
             scripts = {}
         test = scripts.get("test") if isinstance(scripts, dict) else None
-        if isinstance(test, str) and test.strip() and "no test specified" not in test:
+        check = scripts.get("check") if isinstance(scripts, dict) else None
+        if isinstance(check, str) and check.strip():
+            # A repository-owned `check` script is normally its aggregate acceptance command.
+            # Prefer it to the narrower `test` script so init does not claim partial readiness.
+            gates.append(
+                {"name": "project-acceptance-npm", "command": _shell("npm run check"), "timeout_seconds": 1800}
+            )
+        elif isinstance(test, str) and test.strip() and "no test specified" not in test:
             gates.append({"name": "project-acceptance-npm", "command": _shell("npm test"), "timeout_seconds": 1800})
     has_pytest_config = any((project / name).is_file() for name in ("pytest.ini", "tox.ini", "setup.cfg"))
     pyproject = project / "pyproject.toml"
@@ -239,6 +247,42 @@ def _looks_like_file_scope(token: str) -> bool:
     return "/" in token or "\\" in token or "*" in token or bool(re.search(r"\.[A-Za-z0-9][A-Za-z0-9_-]*(?:$|\*)", token))
 
 
+def _safe_task_scope_token(token: str) -> str:
+    normalized = token.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if (
+        normalized == "**"
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or ".." in normalized.split("/")
+    ):
+        raise AutoPlanError(
+            "invalid_task_scope",
+            f"task allowed path must be narrower than the repository and stay inside it: {token}",
+            "replace the task Allowed files entry with a project-relative file or bounded glob",
+        )
+    return normalized
+
+
+def _scope_within_profile(source: str, profile_scope: tuple[str, ...]) -> bool:
+    """Conservative subset check: exact files may match globs; source globs need a provably containing profile prefix."""
+    if "**" in profile_scope:
+        return True
+    if not any(char in source for char in "*?["):
+        return _matches(source, profile_scope)
+    source_prefix = source.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0].rstrip("/")
+    for profile_pattern in profile_scope:
+        normalized = profile_pattern.replace("\\", "/")
+        if source == normalized:
+            return True
+        if normalized.endswith("/**"):
+            profile_prefix = normalized[:-3].rstrip("/")
+            if source_prefix == profile_prefix or source_prefix.startswith(profile_prefix + "/"):
+                return True
+    return False
+
+
 def _task_suggested_allowed_files(objective: str) -> list[str]:
     """Extract explicit file/glob bullets from a task-provided scope section.
 
@@ -262,9 +306,13 @@ def _task_suggested_allowed_files(objective: str) -> list[str]:
             continue
         for match in _PATH_TOKEN_RE.findall(stripped):
             token = _clean_scope_token(match)
-            if _looks_like_file_scope(token) and token not in seen:
-                allowed.append(token)
-                seen.add(token)
+            if token == "**":
+                _safe_task_scope_token(token)  # raises: a source issue may narrow a profile, never widen it to the repository
+            if _looks_like_file_scope(token):
+                token = _safe_task_scope_token(token)
+                if token not in seen:
+                    allowed.append(token)
+                    seen.add(token)
     return allowed
 
 
@@ -428,7 +476,23 @@ def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str
         title, body = task_text(store, task_id)
         task = store.get_task(task_id)
         decision = resolve_type(profile, task_labels(store, task), title, body)
-        payload = build_profile_contract(profile, decision, task_objective(store, task_id), task_id, GENERATED_BY)
+        objective = task_objective(store, task_id)
+        payload = build_profile_contract(profile, decision, objective, task_id, GENERATED_BY)
+        source_scope = _task_suggested_allowed_files(objective)
+        if source_scope:
+            profile_scope = tuple(str(path) for path in payload["allowed_files"])
+            narrowed = [path for path in source_scope if _scope_within_profile(path, profile_scope)]
+            if len(narrowed) != len(source_scope):
+                outside = sorted(set(source_scope) - set(narrowed))
+                raise AutoPlanError(
+                    "task_scope_outside_profile",
+                    "the task's explicit allowed files are outside the selected profile task type: " + ", ".join(outside),
+                    "correct the issue scope or select the matching project task type",
+                )
+            payload["allowed_files"] = narrowed
+            payload["validation_escalation_reasons"].append(
+                "source task provides a narrower explicit file scope than the project profile"
+            )
     except ProfileError as exc:
         raise AutoPlanError(
             "invalid_profile", f"project profile is unusable: {exc}", "fix .stagemesh/profile.json (see `stagemesh profile`)"

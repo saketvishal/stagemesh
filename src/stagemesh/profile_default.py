@@ -119,8 +119,24 @@ def default_profile(project: Path, test_command: Sequence[str] | None = None) ->
     }
 
 
+def _is_upgradeable_generated_npm_test_profile(project: Path, path: Path) -> bool:
+    """Recognize only the exact old init-generated profile before replacing its narrow npm test gate with npm run check."""
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    replacement = default_profile(project)
+    gates = replacement.get("gates", {})
+    gate = gates.get("project_acceptance_npm") if isinstance(gates, dict) else None
+    if not isinstance(gate, dict) or gate.get("command") != ["npm", "run", "check"]:
+        return False
+    legacy = json.loads(json.dumps(replacement))
+    legacy["gates"]["project_acceptance_npm"]["command"] = ["npm", "test"]
+    return current == legacy
+
+
 def ensure_profile(project: Path, test_command: Sequence[str] | None = None) -> tuple[str, str]:
-    """Create a profile or upgrade only StageMesh's exact placeholder when a real gate becomes available."""
+    """Create a profile or upgrade only exact StageMesh-generated defaults when a stronger conventional gate becomes available."""
     path = profile_path(project)
     if path.exists():
         if not path.is_file():
@@ -129,7 +145,8 @@ def ensure_profile(project: Path, test_command: Sequence[str] | None = None) -> 
             existing = load_profile(project)
         except ProfileError as exc:
             return "invalid", f"{PROFILE_FILE} exists but is not usable and was left unchanged: {exc}"
-        if existing is not None and is_placeholder(existing):
+        generated_npm_upgrade = test_command is None and _is_upgradeable_generated_npm_test_profile(project, path)
+        if existing is not None and (is_placeholder(existing) or generated_npm_upgrade):
             tmp = path.with_name(f".profile.json.{os.getpid()}.tmp")
             try:
                 original = path.read_bytes()

@@ -6,8 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
+from test_completion_integrity import TASK, FakeReviewAdapter, Rig
 
-from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
+from stagemesh.coordinator import Coordinator
+from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
+from stagemesh.execution import ExecutionResult, Executor
+from stagemesh.persistence import Store
 from stagemesh.review import Reviewer
 from stagemesh.review_disposition import (
     FINDING_DISPOSITION,
@@ -17,8 +21,7 @@ from stagemesh.review_disposition import (
     record_disposition,
     unresolved_adverse_review_findings,
 )
-
-from test_completion_integrity import TASK, FakeReviewAdapter, Rig
+from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 
 FAIL = '{"decision":"FAIL_WITH_FINDINGS","findings":[{"severity":"error","message":"docs/a.md omits the required Engineering Impact record","path":"docs/a.md"}]}'
 
@@ -54,6 +57,92 @@ def test_findings_keep_identity_provenance_and_history(tmp_path: Path) -> None:
     assert pending["contract_hash"] and pending["baseline_sha"] and pending["review_evidence_id"]
     history = finding_history(rig.store, TASK, pending["finding_id"])
     assert [item["event"] for item in history] == [FINDING_RECORDED]
+
+
+def test_noop_remediation_does_not_recheck_or_duplicate_findings_on_the_unchanged_candidate(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("completion", source_id=TASK)
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    sha = "a" * 40
+    store.add_candidate(TASK, sha, "codex", durable_handoff=True)
+    store.add_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.FAILED, {"findings": []})
+    store.upsert_finding("finding-1", TASK, sha, "error", "missing exact-head acceptance evidence")
+    store.add_task_remediation(TASK, Stage.REVIEW, sha)
+    findings_before = tuple(row["id"] for row in store.open_findings_for_candidate(TASK, sha))
+
+    class NoChangeExecutor(Executor):
+        name = "claude"
+
+        def run(self, store, task_id, claim_id, project):
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
+
+    Coordinator(store, project, executor=NoChangeExecutor()).tick()
+
+    assert store.get_task(TASK)["stage"] == Stage.IMPLEMENT
+    assert store.conn.execute("SELECT COUNT(*) FROM evidence WHERE kind='REVIEW'").fetchone()[0] == 1
+    assert tuple(row["id"] for row in store.open_findings_for_candidate(TASK, sha)) == findings_before
+    events = store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='task.recheck_existing_candidate'").fetchall()
+    assert events == []
+    store.close()
+
+
+def test_successful_adapter_cannot_report_the_existing_candidate_as_new_work(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("completion", source_id=TASK)
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    sha = "a" * 40
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+
+    class ExistingCandidateExecutor(Executor):
+        name = "claude"
+
+        def run(self, store, task_id, claim_id, project):
+            return ExecutionResult(ExecutionStatus.SUCCEEDED, candidate_sha=sha, durable_handoff=True)
+
+    assert Coordinator(store, project, executor=ExistingCandidateExecutor()).tick() == 0
+
+    assert store.get_task(TASK)["stage"] == Stage.IMPLEMENT
+    assert store.conn.execute("SELECT COUNT(*) FROM candidates WHERE task_id=?", (TASK,)).fetchone()[0] == 1
+    assert store.conn.execute("SELECT COUNT(*) FROM audit_events WHERE event_type='candidate.produced'").fetchone()[0] == 0
+    event = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type='task.implementation_unsuccessful' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert json.loads(event["payload"])["reason"] == NO_IMPLEMENTATION_CHANGE
+    store.close()
+
+
+def test_existing_candidate_handoff_consumes_the_active_remediation_without_rechecking(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("completion", source_id=TASK)
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    sha = "a" * 40
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.add_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.FAILED, {"findings": []})
+    store.upsert_finding("finding-1", TASK, sha, "error", "missing exact-head acceptance evidence")
+    store.add_task_remediation(TASK, Stage.REVIEW, sha)
+
+    class ExistingCandidateExecutor(Executor):
+        name = "claude"
+
+        def run(self, store, task_id, claim_id, project):
+            return ExecutionResult(ExecutionStatus.SUCCEEDED, candidate_sha=sha, durable_handoff=True)
+
+    assert Coordinator(store, project, executor=ExistingCandidateExecutor()).tick() == 1
+
+    assert store.get_task(TASK)["stage"] == Stage.IMPLEMENT
+    assert store.task_remediation_count(TASK, Stage.REVIEW) == 2
+    assert store.conn.execute("SELECT COUNT(*) FROM evidence WHERE kind='REVIEW'").fetchone()[0] == 1
+    assert store.conn.execute("SELECT COUNT(*) FROM candidates WHERE task_id=?", (TASK,)).fetchone()[0] == 1
+    store.close()
 
 
 def test_a_later_pass_from_another_reviewer_does_not_erase_the_adverse_finding(tmp_path: Path) -> None:

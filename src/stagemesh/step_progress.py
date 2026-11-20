@@ -46,7 +46,7 @@ class ProgressState:
     rank: int
     candidate: str | None
     failure: str | None  # signature of the latest failed check on the latest candidate, None when it has none
-    remediation: str | None  # active persisted handoff; a new one is progress exactly once
+    remediation: str | None  # active stage/candidate handoff lineage; a new lineage is progress exactly once
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,7 +97,7 @@ def progress_state(store: Store, task_id: str) -> ProgressState:
     except ValueError:  # an unknown stage label is "no rank", never a crash in the run summary
         stage = Stage.PLAN
     remediation = store.conn.execute(
-        "SELECT id FROM task_remediations WHERE task_id=? AND cleared=0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        "SELECT stage, candidate_sha FROM task_remediations WHERE task_id=? AND cleared=0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (task_id,),
     ).fetchone()
     return ProgressState(
@@ -106,7 +106,7 @@ def progress_state(store: Store, task_id: str) -> ProgressState:
         _RANK.get(stage, 0),
         candidate,
         _failure_signature(store, task_id, candidate),
-        None if remediation is None else str(remediation["id"]),
+        None if remediation is None else f"{remediation['stage']}:{remediation['candidate_sha']}",
     )
 
 
@@ -129,6 +129,15 @@ def made_progress(before: ProgressState, after: ProgressState) -> tuple[bool, st
 
 def record_step_cap(store: Store, task_id: str, before: ProgressState, after: ProgressState, steps: int) -> dict[str, Any]:
     progressed, reason = made_progress(before, after)
+    if progressed and after.remediation is not None and after.remediation != before.remediation:
+        remediation_stage, _, candidate_sha = after.remediation.partition(":")
+        rows = store.conn.execute(
+            "SELECT COUNT(*) FROM task_remediations WHERE task_id=? AND stage=? AND candidate_sha=?",
+            (task_id, remediation_stage, candidate_sha),
+        ).fetchone()
+        if rows is not None and int(rows[0]) > 1:
+            progressed = False
+            reason = "the same remediation lineage was already attempted for this candidate"
     note = {
         "task_id": task_id, "progressed": progressed, "reason": reason, "steps": steps,
         "before": before.to_dict(), "after": after.to_dict(),

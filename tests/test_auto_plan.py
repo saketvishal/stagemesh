@@ -333,3 +333,15 @@ def test_detect_gates_reads_conventional_project_files(tmp_path: Path) -> None:
     assert [g["name"] for g in auto_plan_module.detect_gates(tmp_path)] == ["project-acceptance-npm", "project-acceptance-go"]
     (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": 'echo "no test specified" && exit 1'}}), encoding="utf-8")
     assert [g["name"] for g in auto_plan_module.detect_gates(tmp_path)] == ["project-acceptance-go"]
+
+
+def test_detect_gates_prefers_the_projects_aggregate_npm_check(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest run", "check": "npm run lint && npm test && npm run build"}}),
+        encoding="utf-8",
+    )
+
+    gate, = auto_plan_module.detect_gates(tmp_path)
+
+    assert gate["name"] == "project-acceptance-npm"
+    assert gate["command"][-1] == "npm run check"

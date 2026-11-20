@@ -172,7 +172,12 @@ class WaveReport:
 
     @property
     def ok(self) -> bool:
-        return not self.stopped_early and self.orphan_events_after <= self.orphan_events_before and not self.integration_violation
+        return (
+            not self.stopped_early
+            and self.orphan_events_after <= self.orphan_events_before
+            and not self.integration_violation
+            and not any(task.outcome == "infrastructure_failure" for task in self.tasks)
+        )
 
     @property
     def wave_state(self) -> str:
@@ -936,6 +941,8 @@ def format_report(report: WaveReport) -> str:
         verdict = "LOCAL MAIN MOVED IN PR MODE"
     elif report.stopped_early:
         verdict = "STOPPED"
+    elif any(task.outcome == "infrastructure_failure" for task in report.tasks):
+        verdict = "INFRASTRUCTURE FAILURE"
     else:
         verdict = "ORPHAN EVENTS INCREASED"
     lines = [
