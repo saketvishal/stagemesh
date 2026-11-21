@@ -300,7 +300,8 @@ def test_selection_picks_only_runnable_tasks_and_never_blocked_parked_or_claimed
     picked, skipped = rw.select_tasks(store, attempted=set(), limit=10)
 
     assert picked == ["2", "10"]  # numeric order: oldest first
-    assert "T-blocked" not in skipped and "T-done" not in skipped  # blocked work is never news in automatic mode
+    assert "blocked with no recorded cause" in skipped["T-blocked"]
+    assert "T-done" not in skipped
     assert "outside the configured task-source policy" in skipped["T-parked"]
     assert "next: inspect its labels" in skipped["T-parked"]
     assert "T-claimed" in skipped
@@ -762,6 +763,8 @@ def test_an_empty_backlog_is_a_clean_window_with_nothing_to_do(tmp_path: Path) -
     report, _store, rig, _ = go(tmp_path, [])
 
     assert report.ok and rig.runs == [] and report.selected == []
+    assert report.readiness["window"]["state"] == "finished"
+    assert not any("started, never finished" in item for item in report.readiness["attention"])
     assert report.next_command == "nothing to do: no eligible work left"
     assert "ended: no eligible work left" in rw.format_window_report(report)
 

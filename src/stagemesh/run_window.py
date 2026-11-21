@@ -476,7 +476,7 @@ def select_tasks(
                     skipped[task_id] = reason
             elif info is not None:
                 skipped[task_id] = f"{info.kind.value}: {info.reason[:300]}" + (f" [{refusal}]" if info.kind.value.endswith("OPERATIONAL") else "")
-            elif only is not None:
+            else:
                 skipped[task_id] = "blocked with no recorded cause: not picked automatically (retry it deliberately)"
             continue
         if task["status"] != TaskStatus.OPEN:
@@ -896,6 +896,17 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
         )
     if any(t.resumable for t in actionable):
         return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
+    unexplained_blocks = [
+        task_id
+        for task_id, left_alone in report.not_selected.items()
+        if left_alone.startswith("blocked with no recorded cause")
+    ]
+    if unexplained_blocks:
+        return (
+            "stagemesh doctor  # selected-scope task(s) "
+            + ", ".join(sorted(unexplained_blocks, key=_task_sort_key))
+            + " are blocked without a recoverable recorded cause"
+        )
     actions = {
         reason.split("; next: ", 1)[1]
         for reason in report.not_selected.values()
@@ -1629,6 +1640,20 @@ def _finish(
         ):
             admission_refusal = None
         report.stop_reason = report.no_progress_reason or admission_refusal
+    path = report.options.report_path
+    if journal:
+        record_finished(
+            store,
+            report.window_id,
+            {
+                "ok": report.ok,
+                "stop_reason": report.stop_reason,
+                "time_limit_reached": report.time_limit_reached,
+                "counts": report.counts(),
+                "prs": [task.pr_url for task in report.tasks if getattr(task, "pr_url", None)],
+                "report": None if path is None else str(path),
+            },
+        )
     try:
         report.readiness = build_readiness(store, project, config, list_prs=list_prs, strict_live=report.options.strict_live)
     except Exception as exc:  # noqa: BLE001 - the report must still be written
@@ -1645,26 +1670,25 @@ def _finish(
     report.next_command = next_command(report, store)
     from .selection_scope import preview
     report.scope = preview(store, project, replace(config.task_selection, required_label=report.options.required_label))
-    path = report.options.report_path
     if path is not None:
         try:
             path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str), encoding="utf-8")
         except OSError as exc:
             report.report_error = f"cannot write the report to {path}: {exc}"
             report.stop_reason = report.stop_reason or report.report_error
-    if journal:
-        record_finished(
-            store,
-            report.window_id,
-            {
-                "ok": report.ok,
-                "stop_reason": report.stop_reason,
-                "time_limit_reached": report.time_limit_reached,
-                "counts": report.counts(),
-                "prs": [task.pr_url for task in report.tasks if getattr(task, "pr_url", None)],
-                "report": None if path is None else str(path),
-            },
-        )
+            if journal:  # append the corrected final state; last_window uses the newest finish event
+                record_finished(
+                    store,
+                    report.window_id,
+                    {
+                        "ok": False,
+                        "stop_reason": report.stop_reason,
+                        "time_limit_reached": report.time_limit_reached,
+                        "counts": report.counts(),
+                        "prs": [task.pr_url for task in report.tasks if getattr(task, "pr_url", None)],
+                        "report": str(path),
+                    },
+                )
     return report
 
 

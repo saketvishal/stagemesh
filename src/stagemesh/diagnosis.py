@@ -608,10 +608,11 @@ def _last_reset(store: Store, task_id: str) -> float:
     """When an operator last gave the task a fresh budget (retry-task); failures before that are history, not a repeat."""
     for row in store.conn.execute(
         "SELECT payload, created_at FROM audit_events WHERE event_type IN ('task.unblocked', 'task.contract_rebound', 'task.rebaselined') "
-        "ORDER BY created_at DESC, rowid DESC LIMIT 50"
+        "AND json_valid(payload) AND CAST(json_extract(payload, '$.task_id') AS TEXT)=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id,),
     ):
-        if _loads(row["payload"]).get("task_id") == task_id:
-            return float(row["created_at"])
+        return float(row["created_at"])
     return 0.0
 
 
