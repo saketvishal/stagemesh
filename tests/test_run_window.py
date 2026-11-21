@@ -17,7 +17,7 @@ from stagemesh.contract_binding import bind_task_contract
 from stagemesh.diagnosis import TOOL_FAILURE_EVENT
 from stagemesh.domain import ExecutionKind, Stage
 from stagemesh.runtime_freshness import RuntimeFreshness
-from stagemesh.survivor_wave import ORPHAN_EVENT, RepoState, RunResult
+from stagemesh.survivor_wave import ORPHAN_EVENT, RepoState, RunResult, TaskRecord, WaveReport
 from stagemesh.window_journal import last_window, record_started
 
 FRESH = RuntimeFreshness(running_from="src", running_from_source=True, installed_cli="x", source_cli="y")
@@ -192,6 +192,44 @@ def test_remaining_planning_findings_do_not_suggest_an_identical_resume(
         assert "stagemesh run-window" not in report.next_command
     finally:
         store.close()
+
+
+def test_external_evidence_block_is_the_next_action_not_an_unrelated_closed_issue() -> None:
+    report = rw.WindowReport(
+        "evidence-block",
+        rw.WindowOptions(),
+        started_at=100.0,
+        finished_at=110.0,
+        not_selected={
+            "137": (
+                "GitHub issue is closed; next: reopen it only if the work is still required, "
+                "then rerun stagemesh init"
+            )
+        },
+        waves=[
+            WaveReport(
+                tasks=[
+                    TaskRecord(
+                        "138",
+                        outcome="blocked",
+                        reason=(
+                            "BLOCKED_EXTERNAL_DEPENDENCY: browser review and internal acceptance "
+                            "are required for the existing candidate"
+                        ),
+                    )
+                ]
+            )
+        ],
+    )
+    report.next_command = rw.next_command(report)
+
+    assert report.tasks[0].outcome == "blocked"
+    assert report.next_command.startswith("stagemesh diagnose --task 138")
+    assert "implementation will not be rerun" in report.next_command
+    assert "reopen" not in report.next_command
+    output = rw.format_window_report(report)
+    assert "ended: attempted work is blocked; see the task reason and next action" in output
+    assert "ended: no eligible work left" not in output
 
 
 def test_multiple_planning_decisions_never_print_a_fake_combined_command(tmp_path: Path) -> None:
