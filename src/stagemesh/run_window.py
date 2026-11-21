@@ -896,12 +896,21 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
         )
     if any(t.resumable for t in actionable):
         return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
-    external_evidence_blocks = [
+    attempted_external_evidence_blocks = [
         task.task_id
         for task in actionable
         if task.outcome == "blocked"
         and task.reason.startswith("BLOCKED_EXTERNAL_DEPENDENCY:")
     ]
+    persisted_external_evidence_blocks = [
+        task_id
+        for task_id, left_alone in report.not_selected.items()
+        if left_alone.startswith("BLOCKED_EXTERNAL_DEPENDENCY:")
+    ]
+    external_evidence_blocks = sorted(
+        dict.fromkeys(attempted_external_evidence_blocks + persisted_external_evidence_blocks),
+        key=_task_sort_key,
+    )
     if len(external_evidence_blocks) == 1:
         task_id = external_evidence_blocks[0]
         return (
@@ -1760,6 +1769,8 @@ def format_window_report(report: WindowReport) -> str:
         lines.append(f"  ended: task limit ({report.options.max_tasks}) reached")
     elif any(task.outcome in ("blocked", "blocked_needs_decision") for task in report.tasks):
         lines.append("  ended: attempted work is blocked; see the task reason and next action")
+    elif any(reason.startswith("BLOCKED_EXTERNAL_DEPENDENCY:") for reason in report.not_selected.values()):
+        lines.append("  ended: selected work is blocked on external evidence; see the task reason and next action")
     else:
         lines.append("  ended: no eligible work left")
     lines.append("preflight:")

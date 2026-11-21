@@ -231,6 +231,30 @@ def test_external_evidence_block_is_the_next_action_not_an_unrelated_closed_issu
     assert "ended: attempted work is blocked; see the task reason and next action" in output
     assert "ended: no eligible work left" not in output
 
+    persisted = rw.WindowReport(
+        "persisted-evidence-block",
+        rw.WindowOptions(),
+        started_at=200.0,
+        finished_at=210.0,
+        not_selected={
+            "137": (
+                "GitHub issue is closed; next: reopen it only if the work is still required, "
+                "then rerun stagemesh init"
+            ),
+            "138": (
+                "BLOCKED_EXTERNAL_DEPENDENCY: external evidence is required for the existing candidate; "
+                "implementation is not the missing work"
+            ),
+        },
+    )
+    persisted.next_command = rw.next_command(persisted)
+
+    assert persisted.next_command.startswith("stagemesh diagnose --task 138")
+    assert "reopen" not in persisted.next_command
+    persisted_output = rw.format_window_report(persisted)
+    assert "ended: selected work is blocked on external evidence" in persisted_output
+    assert "ended: no eligible work left" not in persisted_output
+
 
 def test_multiple_planning_decisions_never_print_a_fake_combined_command(tmp_path: Path) -> None:
     report, store, _rig, _options = go(
