@@ -25,8 +25,11 @@ from stagemesh.browser_evidence import (
     parse_capture_request,
     parse_server_command,
 )
+from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.persistence import Store
+from stagemesh.providers import _remediation_prompt
+from stagemesh.remediation import remediation_context
 
 SHA = "a" * 40
 
@@ -154,6 +157,58 @@ def test_failed_browser_decision_routes_exact_candidate_back_to_implementation(
         failed is not None
         and json.loads(failed["payload"])["browser_evidence"]["capture_id"] == "browser-test"
     )
+
+
+def test_failed_browser_decision_supplies_exact_finding_to_next_provider_prompt(
+    tmp_path: Path,
+) -> None:
+    project, store = _blocked_capture(tmp_path)
+    reason = "The 360px Sources view clips the right edge while desktop remains intact."
+
+    decide_browser_evidence(store, project, TASK, "FAIL", reason)
+
+    remediation = store.latest_task_remediation(TASK)
+    assert remediation is not None
+    assert (remediation["stage"], remediation["candidate_sha"]) == (Stage.REVIEW, SHA)
+    assert remediation["retry_event_id"] is not None
+
+    context = remediation_context(store, TASK, project)
+    assert context is not None
+    prompt = _remediation_prompt(context)
+    assert reason in prompt
+    assert f"Previous candidate {SHA} failed REVIEW." in prompt
+    assert "fix exactly these" in prompt
+
+
+def test_legacy_failed_browser_decision_recovers_provider_context_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    project, store = _blocked_capture(tmp_path)
+    reason = "The legacy 360px Sources capture clips the right edge."
+    decide_browser_evidence(store, project, TASK, "FAIL", reason)
+
+    remediation = store.latest_task_remediation(TASK)
+    assert remediation is not None
+    retry_event_id = str(remediation["retry_event_id"])
+    with store.conn:
+        store.conn.execute("DELETE FROM task_remediations WHERE task_id=?", (TASK,))
+        store.conn.execute(
+            "DELETE FROM retry_attempts WHERE retry_event_id=?", (retry_event_id,)
+        )
+        store.conn.execute("DELETE FROM audit_events WHERE id=?", (retry_event_id,))
+    assert store.latest_task_remediation(TASK) is None
+
+    routed = Coordinator(store, project)._reroute_evidence_remediation(TASK)
+
+    assert routed is False  # code-change remediation proceeds to implementation
+    recovered = store.latest_task_remediation(TASK)
+    assert recovered is not None and recovered["retry_event_id"] is not None
+    context = remediation_context(store, TASK, project)
+    assert context is not None
+    assert reason in _remediation_prompt(context)
+
+    assert Coordinator(store, project)._reroute_evidence_remediation(TASK) is False
+    assert store.task_remediation_count(TASK, Stage.REVIEW) == 1
 
 
 def test_passed_browser_decision_is_candidate_bound_and_still_requires_retry(

@@ -189,7 +189,7 @@ def _wait_ready(url: str, process: subprocess.Popen[str], timeout_seconds: float
         if process.poll() is not None:
             raise BrowserEvidenceError("local evidence server exited before it became ready")
         try:
-            with urlopen(url, timeout=2) as response:  # noqa: S310 - validated loopback-only URL
+            with urlopen(url, timeout=2) as response:
                 if response.status < 500:
                     return
         except (OSError, URLError):
@@ -514,6 +514,9 @@ def decide_browser_evidence(
                 ],
             },
         )
+        remediation = ensure_browser_evidence_remediation(store, task_id, candidate_sha)
+        if remediation is None:  # pragma: no cover - persistence invariant
+            raise BrowserEvidenceError("browser evidence remediation was not persisted")
         store.advance_task(task_id, Stage.IMPLEMENT)
         record_audit(
             store,
@@ -523,11 +526,65 @@ def decide_browser_evidence(
                 "candidate_sha": candidate_sha,
                 "finding_id": finding_id,
                 "capture_id": capture["capture_id"],
+                "remediation_id": str(remediation["id"]),
+                "retry_event_id": remediation["retry_event_id"],
             },
         )
         payload["next_stage"] = str(Stage.IMPLEMENT)
         payload["status"] = str(TaskStatus.OPEN)
     return payload
+
+
+def ensure_browser_evidence_remediation(
+    store: Store, task_id: str, candidate_sha: str
+):
+    """Persist or recover the exact REVIEW remediation context for a failed browser decision."""
+    latest = store.latest_task_remediation(task_id)
+    if (
+        latest is not None
+        and str(latest["stage"]) == str(Stage.REVIEW)
+        and str(latest["candidate_sha"]) == candidate_sha
+    ):
+        return latest
+    decision = latest_browser_decision(store, task_id, candidate_sha)
+    if decision is None or decision.get("decision") != "FAIL":
+        return None
+    findings = [
+        row
+        for row in store.open_findings_for_candidate(task_id, candidate_sha)
+        if str(row["message"]).startswith("Headless responsive review failed for candidate ")
+    ]
+    if not findings:
+        return None
+    remediation_id = store.add_task_remediation(task_id, str(Stage.REVIEW), candidate_sha)
+    remediation = store.task_remediation(remediation_id)
+    if remediation is None:  # pragma: no cover - persistence invariant
+        return None
+    retry_event_id = record_audit(
+        store,
+        "task.remediation_queued",
+        {
+            "task_id": task_id,
+            "candidate_sha": candidate_sha,
+            "stage": str(Stage.REVIEW),
+            "finding_count": len(findings),
+            "remediation_id": remediation_id,
+            "budget_epoch": int(remediation["budget_epoch"]),
+            "source": "accountable_browser_evidence",
+        },
+    )
+    store.bind_task_remediation_retry(remediation_id, retry_event_id)
+    for finding in findings:
+        store.add_remediation_attempt(
+            str(finding["id"]),
+            "QUEUED",
+            {
+                "candidate_sha": candidate_sha,
+                "failed_stage": str(Stage.REVIEW),
+                "next_stage": str(Stage.IMPLEMENT),
+            },
+        )
+    return store.task_remediation(remediation_id)
 
 
 def browser_evidence_context(
