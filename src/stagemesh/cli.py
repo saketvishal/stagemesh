@@ -1504,8 +1504,54 @@ def command_diagnose(args: argparse.Namespace) -> int:
         return 2
     diagnosis = diagnose(store, args.task, project, args.threshold or config.diagnosis.repeat_threshold)
     if diagnosis is None:
+        from .block_kinds import BlockKind, classify_block
+
+        block = classify_block(store, args.task)
         store.close()
-        print(json.dumps({"task_id": args.task, "diagnosis": None}) if args.json else f"task {args.task}: no failed checks or stalled attempts to diagnose")
+        if block is None:
+            print(json.dumps({"task_id": args.task, "diagnosis": None}) if args.json else f"task {args.task}: no failed checks, stalled attempts, or recorded block to diagnose")
+            return 0
+        recommendations = {
+            BlockKind.EXTERNAL_DEPENDENCY: (
+                "Supply the recorded external evidence for the existing candidate, attach it to the governing task or review record, "
+                f"then run `stagemesh retry-task --task {args.task}`. StageMesh will preserve the candidate and resume at the earliest incomplete stage; "
+                "a REVIEW-stage candidate will not rerun implementation."
+            ),
+            BlockKind.HUMAN_DECISION: "Record the requested owner decision in the governing task or specification, then retry the task.",
+            BlockKind.POLICY_SAFETY: "Resolve and audit the recorded safety condition before explicitly retrying the task.",
+            BlockKind.RECOVERABLE_OPERATIONAL: "Fix the recorded operational cause; the next run window can reconsider it within the bounded recovery budget.",
+        }
+        payload = {
+            "task_id": args.task,
+            "diagnosis": {
+                "category": block.kind.value.lower(),
+                "block_kind": block.kind.value,
+                "summary": block.reason,
+                "recommendation": recommendations[block.kind],
+                "source": block.source,
+                "stage": block.stage,
+                "candidate_sha": block.candidate_sha,
+                "failure_code": block.failure_code,
+                "requirements": list(block.requirements),
+            },
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"task {args.task}")
+            print(f"  current block: {block.kind.value}")
+            if block.stage:
+                print(f"  stage: {block.stage}")
+            if block.candidate_sha:
+                print(f"  candidate: {block.candidate_sha}")
+            if block.failure_code:
+                print(f"  failure code: {block.failure_code}")
+            print(f"  why: {block.reason}")
+            if block.requirements:
+                print("  required before retry:")
+                for requirement in block.requirements:
+                    print(f"    - {requirement}")
+            print(f"  next: {recommendations[block.kind]}")
         return 0
     provider = args.provider or config.diagnosis.provider
     if provider:  # an explicit operator request: run the separate read-only provider pass now
