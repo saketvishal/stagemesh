@@ -21,6 +21,7 @@ import stagemesh.cli as cli_module
 import stagemesh.run_window as rw
 from stagemesh.audit import record_audit
 from stagemesh.block_kinds import (
+    BLOCK_EVENT,
     MAX_REENTRIES,
     BlockKind,
     classify_block,
@@ -98,6 +99,64 @@ def test_legacy_validation_evidence_disagreement_is_recoverable_after_runtime_up
     info = classify_block(store, "138")
     assert info is not None and info.kind is BlockKind.RECOVERABLE_OPERATIONAL and info.source == "reclassified"
     assert reentry_refusal(store, "138", "0.6.37") is None
+
+
+def test_task_local_block_history_survives_a_noisy_project_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rw, "runtime_fingerprint", lambda project: "0.6.38")
+
+    def hooks_edit(hooks, rig, store):  # type: ignore[no-untyped-def]
+        record_block(
+            store,
+            "138",
+            BlockKind.EXTERNAL_DEPENDENCY,
+            "review requires validation evidence that is not present",
+            runtime="0.6.36",
+            detail={"failure_code": "validation_evidence_unconfigured"},
+        )
+        for number in range(350):
+            record_audit(
+                store,
+                BLOCK_EVENT,
+                {
+                    "task_id": f"unrelated-{number}",
+                    "kind": BlockKind.HUMAN_DECISION.value,
+                    "reason": "unrelated decision",
+                },
+            )
+
+    report, _store, rig, _ = go(tmp_path, ["138"], hooks_edit=hooks_edit)
+
+    assert rig.runs == ["138"]
+    assert report.reentered[0]["task_id"] == "138" and report.reentered[0]["block_source"] == "reclassified"
+
+
+def test_unknown_block_is_visible_and_never_hidden_by_other_next_actions(tmp_path: Path) -> None:
+    def hooks_edit(hooks, rig, store):  # type: ignore[no-untyped-def]
+        store.block_task("138")
+
+    report, _store, rig, _ = go(tmp_path, ["138"], hooks_edit=hooks_edit)
+
+    assert rig.runs == []
+    assert report.not_selected["138"].startswith("blocked with no recorded cause")
+    assert report.next_command.startswith("stagemesh doctor  # selected-scope task(s) 138")
+
+
+def test_task_reset_and_reentry_queries_are_not_truncated_by_other_tasks(tmp_path: Path) -> None:
+    store, _ = make_store(tmp_path, ["R"])
+    record_block(store, "R", BlockKind.RECOVERABLE_OPERATIONAL, "old failure", runtime="old")
+    assert store.unblock_task("R")
+    store.block_task("R")  # no post-reset cause exists, so the old cause must stay historical
+    for number in range(250):
+        record_audit(store, "task.unblocked", {"task_id": f"unrelated-{number}"})
+        record_audit(store, "task.block_reentered", {"task_id": f"unrelated-{number}", "runtime": "noise"})
+
+    assert classify_block(store, "R") is None
+
+    record_block(store, "R", BlockKind.RECOVERABLE_OPERATIONAL, "new failure", runtime=None)
+    record_audit(store, "task.block_reentered", {"task_id": "R", "runtime": "current"})
+    for number in range(250, 500):
+        record_audit(store, "task.block_reentered", {"task_id": f"unrelated-{number}", "runtime": "noise"})
+    assert "unchanged" in reentry_refusal(store, "R", "current")
 
 
 def test_reentry_returns_the_task_to_open_keeps_its_history_and_is_bounded(tmp_path: Path) -> None:

@@ -110,8 +110,10 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
     reset = _last_reset(store, task_id)
     rows = store.conn.execute(
         "SELECT event_type, payload FROM audit_events WHERE event_type IN (?, 'task.remediation_exhausted', 'task.diagnosis_stop', 'task.blocked', 'task.source_retired') "
-        "AND created_at>=? ORDER BY created_at DESC, rowid DESC LIMIT 300",
-        (BLOCK_EVENT, reset),
+        "AND created_at>=? AND json_valid(payload) "
+        "AND CAST(json_extract(payload, '$.task_id') AS TEXT)=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 300",
+        (BLOCK_EVENT, reset, task_id),
     )
     mine = [(str(row["event_type"]), _loads(row["payload"])) for row in rows]
     mine = [(event, payload) for event, payload in mine if payload.get("task_id") == task_id]
@@ -206,10 +208,13 @@ def reentries_used(store: Store, task_id: str) -> int:
 
 
 def _last_reentry_runtime(store: Store, task_id: str) -> str | None:
-    for row in store.conn.execute("SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 200", (REENTER_EVENT,)):
+    for row in store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type=? AND json_valid(payload) "
+        "AND CAST(json_extract(payload, '$.task_id') AS TEXT)=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (REENTER_EVENT, task_id),
+    ):
         payload = _loads(row["payload"])
-        if payload.get("task_id") == task_id:
-            return payload.get("runtime")
+        return payload.get("runtime")
     return None
 
 

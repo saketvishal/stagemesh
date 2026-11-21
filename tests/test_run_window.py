@@ -762,6 +762,8 @@ def test_an_empty_backlog_is_a_clean_window_with_nothing_to_do(tmp_path: Path) -
     report, _store, rig, _ = go(tmp_path, [])
 
     assert report.ok and rig.runs == [] and report.selected == []
+    assert report.readiness["window"]["state"] == "finished"
+    assert not any("started, never finished" in item for item in report.readiness["attention"])
     assert report.next_command == "nothing to do: no eligible work left"
     assert "ended: no eligible work left" in rw.format_window_report(report)
 
