@@ -31,6 +31,16 @@ from .autonomy.review_adapter import supervise_reviewer
 from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .blocked_recovery import can_auto_retry
+from .browser_evidence import (
+    BrowserEvidenceError,
+    browser_evidence_accepted,
+    browser_evidence_context,
+    browser_evidence_required,
+    capture_browser_evidence,
+    decide_browser_evidence,
+    parse_capture_request,
+    parse_server_command,
+)
 from .capabilities import (
     ATTACHMENT_REQUIRED,
     OBSERVED_LOAD_REQUIRED,
@@ -1507,16 +1517,41 @@ def command_diagnose(args: argparse.Namespace) -> int:
         from .block_kinds import BlockKind, classify_block
 
         block = classify_block(store, args.task)
+        browser_capture = None
+        browser_decision = None
+        browser_integrity_valid = None
+        if block is not None and block.candidate_sha:
+            browser = browser_evidence_context(store, project, args.task, block.candidate_sha)
+            if browser is not None:
+                browser_capture = browser
+                browser_decision = browser.get("decision")
+                browser_integrity_valid = browser.get("integrity_valid")
         store.close()
         if block is None:
             print(json.dumps({"task_id": args.task, "diagnosis": None}) if args.json else f"task {args.task}: no failed checks, stalled attempts, or recorded block to diagnose")
             return 0
+        needs_browser = browser_evidence_required(block.reason, block.requirements)
+        external_recommendation = (
+            "The REVIEW-stage candidate will not rerun implementation. Run `stagemesh evidence capture-browser --help` "
+            "to create no-window exact-candidate screenshots. StageMesh will not install a browser or project dependency."
+            if browser_capture is None or browser_integrity_valid is False
+            else (
+                f"Inspect capture {browser_capture.get('capture_id')}, then run `stagemesh evidence decide-browser --task {args.task} "
+                "--decision PASS|FAIL --reason '<what the approver observed>'`."
+                if browser_decision is None
+                else (
+                    f"Accountable browser evidence passed; run `stagemesh retry-task --task {args.task}`."
+                    if browser_decision.get("decision") == "PASS"
+                    else "Browser evidence failed and should already be routed to IMPLEMENT; run `stagemesh run-window` to remediate it."
+                )
+            )
+        ) if needs_browser else (
+            "Supply the recorded external evidence for the existing candidate, attach it to the governing task or review record, "
+            f"then run `stagemesh retry-task --task {args.task}`. StageMesh will preserve the candidate and resume at the earliest "
+            "incomplete stage; a REVIEW-stage candidate will not rerun implementation."
+        )
         recommendations = {
-            BlockKind.EXTERNAL_DEPENDENCY: (
-                "Supply the recorded external evidence for the existing candidate, attach it to the governing task or review record, "
-                f"then run `stagemesh retry-task --task {args.task}`. StageMesh will preserve the candidate and resume at the earliest incomplete stage; "
-                "a REVIEW-stage candidate will not rerun implementation."
-            ),
+            BlockKind.EXTERNAL_DEPENDENCY: external_recommendation,
             BlockKind.HUMAN_DECISION: "Record the requested owner decision in the governing task or specification, then retry the task.",
             BlockKind.POLICY_SAFETY: "Resolve and audit the recorded safety condition before explicitly retrying the task.",
             BlockKind.RECOVERABLE_OPERATIONAL: "Fix the recorded operational cause; the next run window can reconsider it within the bounded recovery budget.",
@@ -1533,6 +1568,8 @@ def command_diagnose(args: argparse.Namespace) -> int:
                 "candidate_sha": block.candidate_sha,
                 "failure_code": block.failure_code,
                 "requirements": list(block.requirements),
+                "browser_capture": browser_capture,
+                "browser_decision": browser_decision,
             },
         }
         if args.json:
@@ -3400,6 +3437,26 @@ def command_retry_task(args: argparse.Namespace) -> int:
         print(
             f"retry refused: task {args.task} cannot be unblocked because {reason_msg}; "
             "resolve the source condition before retrying",
+            file=sys.stderr,
+        )
+        store.close()
+        return 2
+    from .block_kinds import BlockKind, classify_block
+
+    block = classify_block(store, args.task)
+    candidate = store.latest_candidate(args.task)
+    if (
+        block is not None
+        and block.kind is BlockKind.EXTERNAL_DEPENDENCY
+        and block.failure_code == "external_evidence_required"
+        and browser_evidence_required(block.reason, block.requirements)
+        and candidate is not None
+        and not browser_evidence_accepted(store, project, args.task, str(candidate["sha"]))
+    ):
+        print(
+            f"retry refused: task {args.task} still lacks accountable browser evidence for candidate {candidate['sha']}; "
+            f"run `stagemesh evidence capture-browser --help`, then `stagemesh evidence decide-browser --task {args.task} "
+            "--decision PASS|FAIL --reason '<what the approver observed>'`",
             file=sys.stderr,
         )
         store.close()
@@ -5863,7 +5920,48 @@ def command_evidence(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
     store.migrate()
-    if args.evidence_command == "add":
+    if args.evidence_command == "capture-browser":
+        try:
+            report = capture_browser_evidence(
+                store,
+                project,
+                args.task,
+                server_command=parse_server_command(args.server_command_json),
+                base_url=args.base_url,
+                captures=tuple(parse_capture_request(value) for value in args.capture),
+                browser=args.browser,
+                startup_timeout_seconds=args.startup_timeout_seconds,
+            )
+        except BrowserEvidenceError as exc:
+            store.close()
+            print(f"browser evidence error: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(f"task {args.task}: captured {len(report['artifacts'])} headless browser artifact(s) for {report['candidate_sha']}")
+            print(f"  capture: {report['capture_id']}")
+            print(f"  manifest: {report['manifest']}")
+            print(
+                "  next: inspect the screenshots, then run "
+                f"`stagemesh evidence decide-browser --task {args.task} --decision PASS|FAIL --reason '<what the approver observed>'`"
+            )
+    elif args.evidence_command == "decide-browser":
+        try:
+            report = decide_browser_evidence(store, project, args.task, args.decision, args.reason)
+        except BrowserEvidenceError as exc:
+            store.close()
+            print(f"browser evidence error: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        elif report["decision"] == "FAIL":
+            print(f"task {args.task}: browser evidence FAILED for {report['candidate_sha']}")
+            print("  routed to IMPLEMENT with the exact-candidate visual finding; next: stagemesh run-window")
+        else:
+            print(f"task {args.task}: browser evidence accepted for {report['candidate_sha']} by {report['approver_id']}")
+            print(f"  next: stagemesh retry-task --task {args.task}")
+    elif args.evidence_command == "add":
         evidence_id = record_external_evidence(
             store,
             args.kind,
@@ -7218,6 +7316,29 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_add.add_argument("--notes", default="")
     evidence_add.add_argument("--json", action="store_true")
     evidence_add.set_defaults(func=command_evidence)
+    evidence_capture = evidence_sub.add_parser(
+        "capture-browser", help="Capture exact-candidate screenshots with a hidden headless browser and local server"
+    )
+    evidence_capture.add_argument("--task", required=True)
+    evidence_capture.add_argument(
+        "--server-command-json", required=True, help='Explicit local server argv as JSON, e.g. ["npm","run","dev"]'
+    )
+    evidence_capture.add_argument("--base-url", required=True, help="Unauthenticated loopback origin served by the command")
+    evidence_capture.add_argument(
+        "--capture", action="append", required=True, help="Repeat NAME=WIDTHxHEIGHT:/relative-route (maximum 20)"
+    )
+    evidence_capture.add_argument("--browser", help="Explicit Edge, Chrome, or Chromium executable; otherwise discover an installed browser")
+    evidence_capture.add_argument("--startup-timeout-seconds", type=float, default=30.0)
+    evidence_capture.add_argument("--json", action="store_true")
+    evidence_capture.set_defaults(func=command_evidence)
+    evidence_decide = evidence_sub.add_parser(
+        "decide-browser", help="Record the configured accountable approver's PASS or FAIL for the latest exact-candidate capture"
+    )
+    evidence_decide.add_argument("--task", required=True)
+    evidence_decide.add_argument("--decision", required=True, choices=("PASS", "FAIL"))
+    evidence_decide.add_argument("--reason", required=True)
+    evidence_decide.add_argument("--json", action="store_true")
+    evidence_decide.set_defaults(func=command_evidence)
     evidence_list = evidence_sub.add_parser("list")
     evidence_list.add_argument("--json", action="store_true")
     evidence_list.set_defaults(func=command_evidence)

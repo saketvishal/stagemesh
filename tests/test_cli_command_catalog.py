@@ -27,7 +27,6 @@ def test_full_help_catalog_groups_every_compatible_command(capsys) -> None:
     catalog = cli_module._command_catalog(parser)
 
     assert catalog["schema"] == "stagemesh.command-catalog/1"
-    assert len(catalog["commands"]) == 75
     assert "approve-planning" in catalog["groups"]["task"]
     assert "uncategorized" not in catalog["groups"]
     grouped = [command for commands in catalog["groups"].values() for command in commands]

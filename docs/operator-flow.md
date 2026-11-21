@@ -141,6 +141,33 @@ Nothing is force-pushed, no gate is skipped and no test is weakened. A task bloc
 | `BLOCKED_HUMAN_DECISION` | a design/spec/product/legal choice, e.g. the same file conflicts again after a redo, or a conflict reaches outside the task contract | a person answers the question shown by `stagemesh doctor` and runs `stagemesh retry-task --task <id>` |
 | `BLOCKED_POLICY_SAFETY` | a workspace or ref changed outside StageMesh | never retried automatically |
 
+### Exact-candidate responsive evidence
+
+If `stagemesh diagnose --task <id>` says an existing REVIEW-stage candidate is
+waiting only for browser evidence, do not rerun implementation. Use the command
+shown by `stagemesh evidence capture-browser --help` with an explicit local
+server command, loopback origin, and named viewport/route captures. StageMesh:
+
+- launches only an already installed Edge, Chrome, or Chromium executable with
+  strict headless flags and an isolated disposable profile;
+- keeps all navigation on the declared unauthenticated loopback origin;
+- binds PNG dimensions and SHA-256 hashes to the retained candidate and audit
+  ledger; and
+- terminates the local server and browser process tree without opening a
+  desktop window or granting browser control to a provider.
+
+The configured approval authority then records what it observed:
+
+```text
+stagemesh evidence decide-browser --task <id> --decision PASS|FAIL --reason "..."
+```
+
+Providers cannot capture or decide this evidence. `FAIL` records a review
+finding and returns the same task to IMPLEMENT. `PASS` leaves the task blocked
+until `stagemesh retry-task --task <id>` verifies that the latest capture still
+exists, remains inside the project evidence area, and matches its exact hashes
+and dimensions. A newer capture invalidates an older decision.
+
 `stagemesh doctor`, `task-doctor` and the run-window report show the kind, what was tried and why further automatic action is unsafe. Only `BLOCKED_HUMAN_DECISION` is listed under "tasks needing a design decision".
 
 ## If a run-window was interrupted
