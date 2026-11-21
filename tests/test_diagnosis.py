@@ -5,10 +5,13 @@ import io
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from test_bounded_execution import TASK, _setup
 
 import stagemesh.cli as cli_module
+from stagemesh.block_kinds import BlockKind, classify_block, record_block
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.coordinator import Coordinator, TargetSelection
 from stagemesh.diagnosis import (
@@ -23,15 +26,19 @@ from stagemesh.diagnosis import (
     normalize,
     parse_analysis,
 )
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, TaskStatus
+from stagemesh.domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    ExecutionStatus,
+    TaskStatus,
+)
 from stagemesh.execution import ExecutionResult, Executor
 from stagemesh.git import GitWorkspace
 from stagemesh.providers import _remediation_prompt
 from stagemesh.remediation import finding_identity, remediation_context
 from stagemesh.run_ready import RunSummary, drive_task, format_stop
 from stagemesh.workspaces import prepare_task_workspace, record_task_baseline
-
-from test_bounded_execution import TASK, _setup
 
 PY = sys.executable
 DOCS_CONTRACT = {
@@ -154,6 +161,83 @@ def test_diagnose_and_stop_output_include_gate_excerpt(tmp_path: Path) -> None:
     assert "output excerpt:" in text and "stderr: boom detail" in text
     stop_text = format_stop(summary)
     assert "output excerpt:" in stop_text and "FAILED test_x" in stop_text and "stderr: boom detail" in stop_text
+
+
+def test_command_diagnose_reports_recorded_external_evidence_block(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    sha = "a" * 40
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    record_block(
+        store,
+        TASK,
+        BlockKind.EXTERNAL_DEPENDENCY,
+        "external evidence is required for the existing candidate; implementation is not the missing work",
+        stage="REVIEW",
+        candidate_sha=sha,
+        detail={
+            "failure_code": "external_evidence_required",
+            "requirements": ["360-pixel browser review", "internal acceptance record tied to the candidate"],
+        },
+    )
+    store.close()
+
+    args = SimpleNamespace(project=str(project), task=TASK, threshold=None, provider=None, json=False)
+    assert cli_module.command_diagnose(args) == 0
+
+    output = capsys.readouterr().out
+    assert "BLOCKED_EXTERNAL_DEPENDENCY" in output
+    assert "stage: REVIEW" in output and sha in output
+    assert "360-pixel browser review" in output and "internal acceptance record tied to the candidate" in output
+    assert "REVIEW-stage candidate will not rerun implementation" in output
+    assert "no failed checks" not in output
+
+
+def test_command_diagnose_recorded_block_json_is_machine_readable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    record_block(
+        store,
+        TASK,
+        BlockKind.HUMAN_DECISION,
+        "the owner must choose the supported design",
+        stage="PLAN",
+        detail={"failure_code": "owner_decision_required", "requirements": ["record the selected design"]},
+    )
+    block = classify_block(store, TASK)
+    assert block is not None and block.requirements == ("record the selected design",)
+    store.close()
+
+    args = SimpleNamespace(project=str(project), task=TASK, threshold=None, provider=None, json=True)
+    assert cli_module.command_diagnose(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    diagnosis = payload["diagnosis"]
+    assert diagnosis["block_kind"] == "BLOCKED_HUMAN_DECISION"
+    assert diagnosis["stage"] == "PLAN"
+    assert diagnosis["failure_code"] == "owner_decision_required"
+    assert diagnosis["requirements"] == ["record the selected design"]
+    assert "Record the requested owner decision" in diagnosis["recommendation"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (BlockKind.POLICY_SAFETY, "Resolve and audit the recorded safety condition"),
+        (BlockKind.RECOVERABLE_OPERATIONAL, "next run window can reconsider it"),
+    ],
+)
+def test_command_diagnose_explains_other_durable_block_kinds(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    kind: BlockKind,
+    expected: str,
+) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    record_block(store, TASK, kind, "recorded cause", stage="IMPLEMENT")
+    store.close()
+
+    args = SimpleNamespace(project=str(project), task=TASK, threshold=None, provider=None, json=False)
+    assert cli_module.command_diagnose(args) == 0
+    assert expected in capsys.readouterr().out
 
 
 def test_continue_on_blocked_task_refusal_includes_gate_excerpt(tmp_path: Path) -> None:

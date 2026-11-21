@@ -47,6 +47,10 @@ class BlockInfo:
     reason: str
     source: str  # recorded | legacy:<event type>
     runtime: str | None = None  # runtime fingerprint when it was blocked; None for blocks that predate the fingerprint
+    stage: str | None = None
+    candidate_sha: str | None = None
+    failure_code: str | None = None
+    requirements: tuple[str, ...] = ()
 
 
 def block_kind_for(decision: RecoveryDecision) -> BlockKind:
@@ -124,12 +128,29 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
             except ValueError:
                 return None
             reason = str(payload.get("reason", ""))
+            requirements = payload.get("requirements")
+            recorded = BlockInfo(
+                kind=kind,
+                reason=reason,
+                source="recorded",
+                runtime=payload.get("runtime"),
+                stage=str(payload["stage"]) if payload.get("stage") else None,
+                candidate_sha=str(payload["candidate_sha"]) if payload.get("candidate_sha") else None,
+                failure_code=str(payload["failure_code"]) if payload.get("failure_code") else None,
+                requirements=tuple(str(item) for item in requirements if str(item).strip())
+                if isinstance(requirements, list)
+                else (),
+            )
             if kind is BlockKind.EXTERNAL_DEPENDENCY and payload.get("failure_code") == "validation_evidence_unconfigured":
                 return BlockInfo(
                     BlockKind.RECOVERABLE_OPERATIONAL,
                     f"{reason} [reclassified: review and validation evidence must be reconciled by the current runtime]",
                     "reclassified",
                     payload.get("runtime"),
+                    recorded.stage,
+                    recorded.candidate_sha,
+                    recorded.failure_code,
+                    recorded.requirements,
                 )
             if kind is BlockKind.HUMAN_DECISION and "(judgment_required)" in reason and payload.get("candidate_sha"):
                 # a decision inferred from finding wording is re-derived under today's markers: wording that no longer counts is a defect to repair
@@ -137,8 +158,17 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
 
                 open_findings = store.open_findings_for_candidate(task_id, str(payload["candidate_sha"]))
                 if open_findings and judgment_reason([str(f["message"]) for f in open_findings]) is None:
-                    return BlockInfo(BlockKind.RECOVERABLE_OPERATIONAL, f"{reason} [reclassified: the findings no longer state a decision]", "reclassified", payload.get("runtime"))
-            return BlockInfo(kind, reason, "recorded", payload.get("runtime"))
+                    return BlockInfo(
+                        BlockKind.RECOVERABLE_OPERATIONAL,
+                        f"{reason} [reclassified: the findings no longer state a decision]",
+                        "reclassified",
+                        recorded.runtime,
+                        recorded.stage,
+                        recorded.candidate_sha,
+                        recorded.failure_code,
+                        recorded.requirements,
+                    )
+            return recorded
         if event == "task.remediation_exhausted" and payload.get("reason") == "repeated_failure_diagnosed":
             # the diagnosis that caused this stop was recorded just before it and says what kind of failure repeated
             for earlier_event, earlier in mine[index + 1 :]:
