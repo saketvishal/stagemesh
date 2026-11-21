@@ -896,6 +896,24 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
         )
     if any(t.resumable for t in actionable):
         return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
+    external_evidence_blocks = [
+        task.task_id
+        for task in actionable
+        if task.outcome == "blocked"
+        and task.reason.startswith("BLOCKED_EXTERNAL_DEPENDENCY:")
+    ]
+    if len(external_evidence_blocks) == 1:
+        task_id = external_evidence_blocks[0]
+        return (
+            f"stagemesh diagnose --task {task_id}  # existing candidate is waiting for external evidence; "
+            "implementation will not be rerun"
+        )
+    if external_evidence_blocks:
+        return (
+            "stagemesh doctor  # tasks "
+            + ", ".join(external_evidence_blocks)
+            + " are waiting for external evidence; implementation will not be rerun"
+        )
     unexplained_blocks = [
         task_id
         for task_id, left_alone in report.not_selected.items()
@@ -1740,6 +1758,8 @@ def format_window_report(report: WindowReport) -> str:
         lines.append("  ended: time budget reached (clean stop)")
     elif report.task_limit_reached:
         lines.append(f"  ended: task limit ({report.options.max_tasks}) reached")
+    elif any(task.outcome in ("blocked", "blocked_needs_decision") for task in report.tasks):
+        lines.append("  ended: attempted work is blocked; see the task reason and next action")
     else:
         lines.append("  ended: no eligible work left")
     lines.append("preflight:")
