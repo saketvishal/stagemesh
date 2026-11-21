@@ -476,7 +476,7 @@ def select_tasks(
                     skipped[task_id] = reason
             elif info is not None:
                 skipped[task_id] = f"{info.kind.value}: {info.reason[:300]}" + (f" [{refusal}]" if info.kind.value.endswith("OPERATIONAL") else "")
-            elif info is None:
+            else:
                 skipped[task_id] = "blocked with no recorded cause: not picked automatically (retry it deliberately)"
             continue
         if task["status"] != TaskStatus.OPEN:
