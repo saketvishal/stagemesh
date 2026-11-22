@@ -1154,6 +1154,107 @@ def browser_evidence_context(
     }
 
 
+def browser_review_requirement(
+    store: Store, project: Path, task_id: str, candidate_sha: str
+) -> dict[str, object] | None:
+    """Return the exact verified capture receipt an independent reviewer must bind.
+
+    An explicit operator decision remains authoritative when one exists.  Without
+    one, technical visual acceptance belongs to independent review rather than a
+    second mandatory operator approval.
+    """
+    context = browser_evidence_context(store, project, task_id, candidate_sha)
+    if (
+        context is None
+        or context.get("integrity_valid") is not True
+        or context.get("decision") is not None
+    ):
+        return None
+    artifacts = context.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return None
+    receipts: list[dict[str, object]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            return None
+        required = {
+            "name": artifact.get("name"),
+            "path": artifact.get("path"),
+            "sha256": artifact.get("sha256"),
+            "route": artifact.get("route"),
+            "requested_viewport": artifact.get("requested_viewport"),
+            "css_viewport": artifact.get("css_viewport"),
+        }
+        if not all(isinstance(value, str) and value for value in required.values()):
+            return None
+        receipts.append(required)
+    return {
+        "capture_id": context["capture_id"],
+        "candidate_sha": candidate_sha,
+        "artifacts": receipts,
+    }
+
+
+def materialize_browser_review_bundle(
+    store: Store,
+    project: Path,
+    review_path: Path,
+    task_id: str,
+    candidate_sha: str,
+) -> dict[str, object] | None:
+    """Copy verified PNGs into a disposable reviewer checkout with bounded paths."""
+    requirement = browser_review_requirement(store, project, task_id, candidate_sha)
+    if requirement is None:
+        return None
+    root = (review_path / ".stagemesh-review-evidence" / "browser").resolve()
+    checkout = review_path.resolve()
+    if checkout not in root.parents:
+        raise BrowserEvidenceError("browser review bundle escaped the disposable checkout")
+    root.mkdir(parents=True, exist_ok=False)
+    bundled: list[dict[str, object]] = []
+    for index, artifact in enumerate(cast(list[dict[str, object]], requirement["artifacts"])):
+        name = str(artifact["name"])
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", name) is None:
+            raise BrowserEvidenceError("browser review artifact name is unsafe")
+        source = (project / str(artifact["path"])).resolve()
+        target = root / f"{index + 1:02d}-{name}.png"
+        shutil.copyfile(source, target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        if not hmac.compare_digest(digest, str(artifact["sha256"])):
+            raise BrowserEvidenceError("browser review bundle changed during materialization")
+        bundled.append(
+            {
+                **artifact,
+                "path": target.relative_to(review_path).as_posix(),
+            }
+        )
+    return {
+        "capture_id": requirement["capture_id"],
+        "candidate_sha": candidate_sha,
+        "artifacts": bundled,
+    }
+
+
+def verify_browser_review_bundle(review_path: Path, bundle: dict[str, object]) -> None:
+    """Fail closed if a reviewer mutated its disposable evidence bundle."""
+    root = (review_path / ".stagemesh-review-evidence" / "browser").resolve()
+    artifacts = bundle.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise BrowserEvidenceError("browser review bundle has no artifacts")
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise BrowserEvidenceError("browser review bundle metadata is invalid")
+        path = (review_path / str(artifact.get("path", ""))).resolve()
+        if root not in path.parents or not path.is_file():
+            raise BrowserEvidenceError("browser review artifact is missing or outside its bundle")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not hmac.compare_digest(digest, str(artifact.get("sha256", ""))):
+            raise BrowserEvidenceError("browser review artifact changed during review")
+        width, height = _png_dimensions(path)
+        if f"{width}x{height}" != artifact.get("requested_viewport"):
+            raise BrowserEvidenceError("browser review artifact dimensions changed during review")
+
+
 def browser_evidence_accepted(
     store: Store, project: Path, task_id: str, candidate_sha: str
 ) -> bool:

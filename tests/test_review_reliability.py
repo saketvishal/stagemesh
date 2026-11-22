@@ -1,7 +1,9 @@
 """Review reliability: a reviewer's answer is a strict verdict; anything incomplete is review infrastructure trouble, never a code defect."""
 from __future__ import annotations
 
+import hashlib
 import json
+import struct
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,6 +15,8 @@ from test_review_terminalization import TASK as UNIT_TASK
 from test_review_terminalization import _project_with_candidate, _review_execution
 from test_single_task_stale_rebase import TASK, _advance_until
 
+from stagemesh.audit import record_audit
+from stagemesh.browser_evidence import CAPTURE_EVENT, CAPTURE_PROTOCOL
 from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import (
@@ -70,6 +74,39 @@ def _evidence(store, kind: EvidenceKind, status: EvidenceStatus | None = None) -
     return [{**json.loads(r["payload"]), "_status": r["status"]} for r in store.conn.execute(query + " ORDER BY created_at", args)]
 
 
+def _attach_verified_browser_capture(project: Path, store, task_id: str, candidate: str) -> str:
+    artifact = project / ".stagemesh/evidence" / task_id / candidate / "browser-review" / "mobile.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 360, 800)
+    )
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    record_audit(
+        store,
+        CAPTURE_EVENT,
+        {
+            "task_id": task_id,
+            "candidate_sha": candidate,
+            "capture_id": "browser-review",
+            "headless": True,
+            "capture_protocol": CAPTURE_PROTOCOL,
+            "artifacts": [
+                {
+                    "name": "mobile",
+                    "route": "/",
+                    "requested_viewport": "360x800",
+                    "css_viewport": "360x800",
+                    "viewport": "360x800",
+                    "path": artifact.relative_to(project).as_posix(),
+                    "sha256": digest,
+                    "bytes": artifact.stat().st_size,
+                }
+            ],
+        },
+    )
+    return digest
+
+
 # ---- the protocol boundary ---------------------------------------------------------------------------------------------------------
 
 
@@ -85,6 +122,99 @@ def test_complete_pass_is_accepted_and_bound_to_the_exact_candidate_and_contract
     assert (payload["candidate_sha"], payload["contract_hash"], payload["contract_version"]) == (candidate, bound.digest, bound.version)
     assert payload["independent_reviewer"] is True and payload["review_execution_invoked"] is True
     assert store.has_bound_evidence(UNIT_TASK, candidate, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED)
+
+
+def test_browser_capture_pass_requires_exact_independent_review_receipt(tmp_path: Path) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    digest = _attach_verified_browser_capture(project, store, UNIT_TASK, candidate)
+    response = json.dumps(
+        {
+            "decision": "PASS",
+            "browser_evidence": {
+                "capture_id": "browser-review",
+                "artifact_sha256s": [digest],
+            },
+        }
+    )
+
+    status = Reviewer(
+        adapter=ScriptedReviewAdapter(response), require_independent=True
+    ).review(store, UNIT_TASK, candidate, project)
+
+    assert status == EvidenceStatus.PASSED
+    payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.PASSED)[0]
+    assert payload["browser_evidence_review"] == {
+        "capture_id": "browser-review",
+        "artifact_sha256s": [digest],
+    }
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '{"decision":"PASS"}',
+        '{"decision":"PASS","browser_evidence":{"capture_id":"wrong","artifact_sha256s":[]}}',
+    ],
+)
+def test_browser_capture_plain_or_wrong_pass_is_never_accepted(
+    tmp_path: Path, response: str
+) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    _attach_verified_browser_capture(project, store, UNIT_TASK, candidate)
+
+    status = Reviewer(
+        adapter=ScriptedReviewAdapter(response),
+        require_independent=True,
+        max_incomplete_retries=0,
+    ).review(store, UNIT_TASK, candidate, project)
+
+    assert status == EvidenceStatus.CAPACITY
+    payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY)[0]
+    assert payload["review_infrastructure_failure"] == "browser_evidence_receipt_missing"
+
+
+def test_browser_capture_incomplete_pass_falls_back_to_another_independent_reviewer(
+    tmp_path: Path,
+) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    digest = _attach_verified_browser_capture(project, store, UNIT_TASK, candidate)
+
+    class SwitchingReviewer:
+        def __init__(self) -> None:
+            self.name = "grok"
+            self.calls = 0
+            self.rejections: list[str] = []
+
+        def review_candidate(
+            self, _prompt: str, _project: Path, _candidate_sha: str
+        ) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return '{"decision":"PASS"}'
+            return json.dumps(
+                {
+                    "decision": "PASS",
+                    "browser_evidence": {
+                        "capture_id": "browser-review",
+                        "artifact_sha256s": [digest],
+                    },
+                }
+            )
+
+        def reject_last_response(self, reason: str) -> None:
+            self.rejections.append(reason)
+            self.name = "claude"
+
+    adapter = SwitchingReviewer()
+    status = Reviewer(adapter=adapter, require_independent=True).review(
+        store, UNIT_TASK, candidate, project
+    )
+
+    assert status == EvidenceStatus.PASSED
+    assert adapter.calls == 2
+    assert adapter.rejections == ["browser_evidence_receipt_missing"]
+    payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.PASSED)[0]
+    assert payload["review_provider"] == "claude"
 
 
 def test_valid_review_is_classified_before_its_recorded_provider_text_is_sanitized(

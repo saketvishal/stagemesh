@@ -172,6 +172,21 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
                         recorded.failure_code,
                         recorded.requirements,
                     )
+            if (
+                kind is BlockKind.HUMAN_DECISION
+                and payload.get("failure_code") == "browser_evidence_decision_required"
+                and recorded.candidate_sha
+            ):
+                return BlockInfo(
+                    BlockKind.RECOVERABLE_OPERATIONAL,
+                    f"{reason} [reclassified: verified captures now continue to independent technical review]",
+                    "reclassified",
+                    recorded.runtime,
+                    recorded.stage,
+                    recorded.candidate_sha,
+                    recorded.failure_code,
+                    recorded.requirements,
+                )
             if kind is BlockKind.HUMAN_DECISION and "(judgment_required)" in reason and payload.get("candidate_sha"):
                 # a decision inferred from finding wording is re-derived under today's markers: wording that no longer counts is a defect to repair
                 from .remediation_recovery import judgment_reason

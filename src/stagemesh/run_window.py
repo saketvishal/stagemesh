@@ -33,7 +33,13 @@ from typing import Any
 
 from .audit import record_audit
 from .auto_plan import AutoPlanError, create_contract, outside_label_selector
-from .block_kinds import classify_block, reenter_blocked_task, reentry_refusal, runtime_fingerprint
+from .block_kinds import (
+    BlockKind,
+    classify_block,
+    reenter_blocked_task,
+    reentry_refusal,
+    runtime_fingerprint,
+)
 from .capabilities import CapabilityRegistryError, task_capability_summary
 from .concurrency import contract_conflict
 from .config import StageMeshConfig
@@ -850,22 +856,31 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
     actionable = [
         task for task in report.tasks if _task_source_still_actionable(store, task.task_id)
     ]
-    decisions = [t for t in actionable if t.outcome == "blocked_needs_decision"]
+    legacy_browser_ready = [
+        task.task_id
+        for task in actionable
+        if task.outcome == "blocked_needs_decision"
+        and store is not None
+        and (info := classify_block(store, task.task_id)) is not None
+        and info.kind is BlockKind.RECOVERABLE_OPERATIONAL
+        and info.failure_code == "browser_evidence_decision_required"
+    ]
+    if legacy_browser_ready:
+        return (
+            _resume_command(report.options)
+            + "  # verified browser captures will continue to independent review; no operator decision is required"
+        )
+    decisions = [
+        task
+        for task in actionable
+        if task.outcome == "blocked_needs_decision"
+        and (
+            store is None
+            or (info := classify_block(store, task.task_id)) is None
+            or info.kind is BlockKind.HUMAN_DECISION
+        )
+    ]
     if decisions:
-        browser_decisions = [
-            task.task_id
-            for task in decisions
-            if store is not None
-            and (info := classify_block(store, task.task_id)) is not None
-            and info.failure_code == "browser_evidence_decision_required"
-        ]
-        if len(browser_decisions) == 1:
-            task_id = browser_decisions[0]
-            return (
-                f"inspect the verified captures for task {task_id}, then record the decision: "
-                f"stagemesh evidence decide-browser --task {task_id} --decision PASS|FAIL "
-                "--reason '<what the approver observed>'"
-            )
         return "stagemesh doctor  # tasks " + ", ".join(t.task_id for t in decisions) + " need a design decision"
     planning_decisions = [
         t.task_id

@@ -55,6 +55,11 @@ class ScopedReviewAdapter:
     def review(self, prompt: str) -> str:
         return self.inner.review(prompt)
 
+    def reject_last_response(self, reason: str) -> None:
+        reject = getattr(self.inner, "reject_last_response", None)
+        if callable(reject):
+            reject(reason)
+
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         inner = getattr(self.inner, "review_candidate", None)
         response = inner(prompt, project, candidate_sha) if callable(inner) else self.inner.review(prompt)
