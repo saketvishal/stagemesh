@@ -612,22 +612,17 @@ class Coordinator:
                 )
                 return 1
             if report is not None:
-                record_block(
+                record_audit(
                     self.store,
-                    task_id,
-                    BlockKind.HUMAN_DECISION,
-                    "verified exact-candidate browser captures are ready for the accountable visual PASS or FAIL decision",
-                    stage=str(stage),
-                    candidate_sha=sha,
-                    detail={
-                        "failure_code": "browser_evidence_decision_required",
+                    "task.browser_evidence_ready_for_independent_review",
+                    {
+                        "task_id": task_id,
+                        "candidate_sha": sha,
                         "capture_id": report["capture_id"],
-                        "requirements": [
-                            "inspect the verified responsive captures and record PASS or FAIL"
-                        ],
                     },
                 )
-                return 1
+                # Capture is technical evidence, not a second planning approval.
+                # Continue into independent review in this same bounded tick.
         prepare = getattr(self.integrator, "refresh_before_verification", None)
         if stage in {Stage.VALIDATE, Stage.REVIEW} and callable(prepare):
             bound = contract_for_candidate(self.store, task_id, sha, self.project)

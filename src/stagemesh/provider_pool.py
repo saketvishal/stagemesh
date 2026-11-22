@@ -767,6 +767,12 @@ class FallbackReviewAdapter:
         self.outages: set[str] = set()  # providers that reported infrastructure trouble; not asked again by outer retries
         self.last_response: str | None = None
 
+    def reject_last_response(self, reason: str) -> None:
+        """Make the next bounded retry use another provider after protocol-invalid output."""
+        self.outages.add(self.name)
+        self.attempts.append({"provider": self.name, "reason": reason})
+        self.last_response = None
+
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         previous: str | None = None
         limiter = self.pool.limiter

@@ -42,21 +42,25 @@ from stagemesh.browser_evidence import (
     _safe_task_id,
     browser_evidence_accepted,
     browser_evidence_context,
+    browser_review_requirement,
     capture_browser_evidence,
     decide_browser_evidence,
     invalidated_browser_recapture_recipe,
+    materialize_browser_review_bundle,
     parse_capture_request,
     parse_server_command,
     recapture_invalidated_browser_evidence,
     retire_unverified_browser_failure,
+    verify_browser_review_bundle,
 )
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.execution import kill_process_tree, popen_session_kwargs
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
-from stagemesh.providers import _remediation_prompt
+from stagemesh.providers import RuntimeCommandAdapter, _remediation_prompt
 from stagemesh.remediation import remediation_context
+from stagemesh.review import Reviewer
 from stagemesh.workspaces import task_workspace
 
 SHA = "a" * 40
@@ -79,6 +83,54 @@ def _authority(project: Path) -> None:
     )
 
 
+def _record_verified_capture(
+    project: Path,
+    store: Store,
+    task_id: str,
+    candidate_sha: str,
+    *,
+    capture_id: str = "browser-test",
+) -> str:
+    artifact = (
+        project
+        / ".stagemesh"
+        / "evidence"
+        / task_id
+        / candidate_sha
+        / capture_id
+        / "sources-mobile.png"
+    )
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 360, 800)
+    )
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    record_audit(
+        store,
+        CAPTURE_EVENT,
+        {
+            "task_id": task_id,
+            "candidate_sha": candidate_sha,
+            "capture_id": capture_id,
+            "headless": True,
+            "capture_protocol": CAPTURE_PROTOCOL,
+            "artifacts": [
+                {
+                    "name": "sources-mobile",
+                    "route": "/sources",
+                    "requested_viewport": "360x800",
+                    "css_viewport": "360x800",
+                    "viewport": "360x800",
+                    "path": artifact.relative_to(project).as_posix(),
+                    "sha256": digest,
+                    "bytes": artifact.stat().st_size,
+                }
+            ],
+        },
+    )
+    return digest
+
+
 def _blocked_capture(tmp_path: Path) -> tuple[Path, Store]:
     project, store = _setup(tmp_path)
     _authority(project)
@@ -96,37 +148,7 @@ def _blocked_capture(tmp_path: Path) -> tuple[Path, Store]:
             "requirements": ["360px and desktop browser review"],
         },
     )
-    artifact = (
-        project / ".stagemesh" / "evidence" / TASK / SHA / "browser-test" / "sources-mobile.png"
-    )
-    artifact.parent.mkdir(parents=True)
-    artifact.write_bytes(
-        b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 360, 800)
-    )
-    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    record_audit(
-        store,
-        CAPTURE_EVENT,
-        {
-            "task_id": TASK,
-            "candidate_sha": SHA,
-            "capture_id": "browser-test",
-            "headless": True,
-            "capture_protocol": CAPTURE_PROTOCOL,
-            "artifacts": [
-                {
-                    "name": "sources-mobile",
-                    "route": "/sources",
-                    "requested_viewport": "360x800",
-                    "css_viewport": "360x800",
-                    "viewport": "360x800",
-                    "path": artifact.relative_to(project).as_posix(),
-                    "sha256": digest,
-                    "bytes": artifact.stat().st_size,
-                }
-            ],
-        },
-    )
+    _record_verified_capture(project, store, TASK, SHA)
     return project, store
 
 
@@ -535,14 +557,47 @@ def test_invalidated_capture_with_redacted_command_is_not_replayed(tmp_path: Pat
     assert project.is_dir()
 
 
-def test_review_stage_automatically_recaptures_then_waits_for_accountable_decision(
+def test_review_stage_automatically_recaptures_then_continues_to_independent_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, store = _setup(tmp_path)
-    sha = GitWorkspace(project).head()
+    (project / ".gitignore").write_text(".stagemesh/\n", encoding="utf-8")
+    GitWorkspace(project).commit_all("ignore runtime")
+    (project / "docs" / "a.md").write_text("candidate\n", encoding="utf-8")
+    sha = GitWorkspace(project).commit_all("candidate")
     store.add_candidate(TASK, sha, "claude", durable_handoff=True)
     store.advance_task(TASK, Stage.REVIEW)
     order: list[str] = []
+    digest: list[str] = []
+
+    class ExactBrowserReviewer:
+        name = "codex"
+
+        def review(self, prompt: str) -> str:
+            assert "A separate operator approval is not required" in prompt
+            return json.dumps(
+                {
+                    "decision": "PASS",
+                    "browser_evidence": {
+                        "capture_id": "browser-verified",
+                        "artifact_sha256s": digest,
+                    },
+                }
+            )
+
+    def recapture(*_args: object) -> dict[str, str]:
+        order.append("recapture")
+        digest.append(
+            _record_verified_capture(
+                project,
+                store,
+                TASK,
+                sha,
+                capture_id="browser-verified",
+            )
+        )
+        return {"capture_id": "browser-verified"}
+
     monkeypatch.setattr(
         coordinator_module,
         "invalidated_browser_recapture_recipe",
@@ -556,17 +611,22 @@ def test_review_stage_automatically_recaptures_then_waits_for_accountable_decisi
     monkeypatch.setattr(
         coordinator_module,
         "recapture_invalidated_browser_evidence",
-        lambda *_args: order.append("recapture") or {"capture_id": "browser-verified"},
+        recapture,
     )
 
-    assert Coordinator(store, project).tick() == 1
-    assert order == ["workspace", "recapture"]
-
-    task = store.get_task(TASK)
-    assert (task["stage"], task["status"]) == (Stage.REVIEW, TaskStatus.BLOCKED)
-    block = classify_block(store, TASK)
-    assert block is not None and block.kind is BlockKind.HUMAN_DECISION
-    assert block.failure_code == "browser_evidence_decision_required"
+    coordinator = Coordinator(
+        store,
+        project,
+        reviewer=Reviewer(adapter=ExactBrowserReviewer(), require_independent=True),
+    )
+    assert coordinator.tick() == 1
+    assert order[:2] == ["workspace", "recapture"]
+    assert store.get_task(TASK)["stage"] == Stage.INTEGRATE, [
+        (row["kind"], row["status"], row["payload"])
+        for row in store.conn.execute("SELECT kind, status, payload FROM evidence")
+    ]
+    assert store.has_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED)
+    assert classify_block(store, TASK) is None
 
 
 def test_review_stage_does_not_recapture_when_candidate_integrity_fails(
@@ -690,6 +750,92 @@ def test_passed_browser_decision_is_candidate_bound_and_still_requires_retry(
     assert context["integrity_valid"] is True
 
 
+def test_verified_capture_is_materialized_and_reverified_in_disposable_review_checkout(
+    tmp_path: Path,
+) -> None:
+    project, store = _blocked_capture(tmp_path)
+    review_path = project / "disposable-review"
+    review_path.mkdir()
+
+    requirement = browser_review_requirement(store, project, TASK, SHA)
+    bundle = materialize_browser_review_bundle(
+        store, project, review_path, TASK, SHA
+    )
+
+    assert requirement is not None and bundle is not None
+    assert bundle["capture_id"] == requirement["capture_id"] == "browser-test"
+    bundled = bundle["artifacts"][0]
+    assert bundled["path"] == ".stagemesh-review-evidence/browser/01-sources-mobile.png"
+    verify_browser_review_bundle(review_path, bundle)
+
+    (review_path / bundled["path"]).write_bytes(b"changed")
+    with pytest.raises(BrowserEvidenceError, match="changed during review"):
+        verify_browser_review_bundle(review_path, bundle)
+
+
+def test_runtime_reviewer_receives_exact_verified_png_bundle(
+    tmp_path: Path,
+) -> None:
+    project, store = _setup(tmp_path)
+    (project / "docs" / "a.md").write_text("candidate\n", encoding="utf-8")
+    sha = GitWorkspace(project).commit_all("candidate")
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    digest = _record_verified_capture(project, store, TASK, sha)
+    observed = tmp_path / "review-observed.json"
+    script = tmp_path / "reviewer.py"
+    provider_response = json.dumps(
+        {
+            "decision": "PASS",
+            "browser_evidence": {
+                "capture_id": "browser-test",
+                "artifact_sha256s": [digest],
+            },
+        }
+    )
+    script.write_text(
+        "import hashlib, json, pathlib, sys\n"
+        "prompt = sys.stdin.read()\n"
+        "artifact = pathlib.Path('.stagemesh-review-evidence/browser/01-sources-mobile.png')\n"
+        f"pathlib.Path({str(observed)!r}).write_text(json.dumps({{'exists': artifact.is_file(), "
+        "'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest(), 'prompt': prompt}), encoding='utf-8')\n"
+        f"print({provider_response!r})\n",
+        encoding="utf-8",
+    )
+
+    response = RuntimeCommandAdapter("test", (sys.executable, str(script))).review_candidate(
+        "Review candidate",
+        project,
+        sha,
+        store=store,
+        task_id=TASK,
+    )
+
+    assert json.loads(response)["decision"] == "PASS", response
+    receipt = json.loads(observed.read_text(encoding="utf-8"))
+    assert receipt["exists"] is True and receipt["sha256"] == digest
+    assert ".stagemesh-review-evidence/browser/01-sources-mobile.png" in receipt["prompt"]
+
+
+def test_browser_evidence_command_lists_verified_paths_without_requiring_decision(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, store = _blocked_capture(tmp_path)
+    store.close()
+
+    result = cli_module.command_evidence(
+        argparse.Namespace(
+            project=str(project), evidence_command="browser", task=TASK, json=False
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "integrity: verified" in output
+    assert "sources-mobile.png" in output
+    assert "operator decision: not required; independent review is pending" in output
+
+
 def test_changed_artifact_invalidates_pass_and_review_context(tmp_path: Path) -> None:
     project, store = _blocked_capture(tmp_path)
     decide_browser_evidence(store, project, TASK, "PASS", "Reviewed the exact-candidate captures.")
@@ -732,7 +878,7 @@ def test_new_capture_invalidates_older_pass_everywhere(tmp_path: Path) -> None:
     assert current["decision"] is None
 
 
-def test_retry_refuses_external_evidence_block_until_accountable_pass(
+def test_retry_allows_verified_capture_to_continue_to_independent_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project, store = _blocked_capture(tmp_path)
@@ -740,16 +886,16 @@ def test_retry_refuses_external_evidence_block_until_accountable_pass(
     monkeypatch.setattr(cli_module, "_sync_all_sources", lambda *_args, **_kwargs: None)
     args = argparse.Namespace(project=str(project), task=TASK, json=False)
 
-    assert cli_module.command_retry_task(args) == 2
-    assert "still lacks accountable browser evidence" in capsys.readouterr().err
+    assert cli_module.command_retry_task(args) == 0
+    assert "unblocked" in capsys.readouterr().out
 
     store = cli_module.Store(cli_module.db_path(project))
     decide_browser_evidence(
         store, project, TASK, "PASS", "Reviewed the exact-candidate captures and approved them."
     )
     store.close()
-    assert cli_module.command_retry_task(args) == 0
-    assert "task TASK-1 unblocked" in capsys.readouterr().out
+    assert cli_module.command_retry_task(args) == 2
+    assert "task is not blocked" in capsys.readouterr().err
 
 
 def test_provider_process_cannot_record_human_browser_decision(

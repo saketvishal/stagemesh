@@ -36,6 +36,7 @@ from .browser_evidence import (
     browser_evidence_accepted,
     browser_evidence_context,
     browser_evidence_required,
+    browser_review_requirement,
     capture_browser_evidence,
     decide_browser_evidence,
     parse_capture_request,
@@ -1536,8 +1537,8 @@ def command_diagnose(args: argparse.Namespace) -> int:
             "to create no-window exact-candidate screenshots. StageMesh will not install a browser or project dependency."
             if browser_capture is None or browser_integrity_valid is False
             else (
-                f"Inspect capture {browser_capture.get('capture_id')}, then run `stagemesh evidence decide-browser --task {args.task} "
-                "--decision PASS|FAIL --reason '<what the approver observed>'`."
+                f"Verified capture {browser_capture.get('capture_id')} is ready; rerun the window for independent visual review. "
+                f"Use `stagemesh evidence browser --task {args.task}` to inspect its paths."
                 if browser_decision is None
                 else (
                     f"Accountable browser evidence passed; run `stagemesh retry-task --task {args.task}`."
@@ -3452,11 +3453,11 @@ def command_retry_task(args: argparse.Namespace) -> int:
         and browser_evidence_required(block.reason, block.requirements)
         and candidate is not None
         and not browser_evidence_accepted(store, project, args.task, str(candidate["sha"]))
+        and browser_review_requirement(store, project, args.task, str(candidate["sha"])) is None
     ):
         print(
-            f"retry refused: task {args.task} still lacks accountable browser evidence for candidate {candidate['sha']}; "
-            f"run `stagemesh evidence capture-browser --help`, then `stagemesh evidence decide-browser --task {args.task} "
-            "--decision PASS|FAIL --reason '<what the approver observed>'`",
+            f"retry refused: task {args.task} still lacks verified browser evidence for candidate {candidate['sha']}; "
+            "run `stagemesh evidence capture-browser --help` to capture it, then rerun the window for independent review",
             file=sys.stderr,
         )
         store.close()
@@ -5942,9 +5943,36 @@ def command_evidence(args: argparse.Namespace) -> int:
             print(f"task {args.task}: captured {len(report['artifacts'])} headless browser artifact(s) for {report['candidate_sha']}")
             print(f"  capture: {report['capture_id']}")
             print(f"  manifest: {report['manifest']}")
+            for artifact in report["artifacts"]:
+                print(f"  {artifact['name']}: {artifact['path']} ({artifact['css_viewport']})")
+            print("  next: stagemesh run-window  # independent review inspects and binds these exact captures")
+    elif args.evidence_command == "browser":
+        candidate = store.latest_candidate(args.task)
+        context = (
+            browser_evidence_context(store, project, args.task, str(candidate["sha"]))
+            if candidate is not None
+            else None
+        )
+        if context is None:
+            store.close()
+            print(f"task {args.task}: no candidate-bound browser evidence", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(context, indent=2, sort_keys=True))
+        else:
+            print(f"task {args.task}: browser capture {context['capture_id']}")
+            print(f"  candidate: {context['candidate_sha']}")
+            print(f"  integrity: {'verified' if context['integrity_valid'] else 'FAILED'}")
+            for artifact in context["artifacts"]:
+                print(
+                    f"  {artifact['name']}: {artifact['path']} "
+                    f"({artifact['css_viewport']}, sha256:{str(artifact['sha256'])[:12]})"
+                )
+            decision = context.get("decision")
             print(
-                "  next: inspect the screenshots, then run "
-                f"`stagemesh evidence decide-browser --task {args.task} --decision PASS|FAIL --reason '<what the approver observed>'`"
+                f"  operator decision: {decision['decision']}"
+                if isinstance(decision, dict)
+                else "  operator decision: not required; independent review is pending"
             )
     elif args.evidence_command == "decide-browser":
         try:
@@ -7339,6 +7367,12 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_decide.add_argument("--reason", required=True)
     evidence_decide.add_argument("--json", action="store_true")
     evidence_decide.set_defaults(func=command_evidence)
+    evidence_browser = evidence_sub.add_parser(
+        "browser", help="Show verified exact-candidate browser capture paths and review status"
+    )
+    evidence_browser.add_argument("--task", required=True)
+    evidence_browser.add_argument("--json", action="store_true")
+    evidence_browser.set_defaults(func=command_evidence)
     evidence_list = evidence_sub.add_parser("list")
     evidence_list.add_argument("--json", action="store_true")
     evidence_list.set_defaults(func=command_evidence)

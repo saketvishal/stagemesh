@@ -166,21 +166,21 @@ for recapture. When that invalidated record contains a complete, unredacted
 loopback server command plus bounded routes and viewports, the next run window
 replays that exact recipe automatically. It never guesses a command, replays a
 redacted value, installs a dependency, or sends the unverified failure back to
-implementation. After a successful automatic recapture the task stops as
-`BLOCKED_HUMAN_DECISION` with the exact `decide-browser` command; only the
-visual PASS or FAIL judgment remains manual.
+implementation.
 
-The configured approval authority then records what it observed:
+After a verified capture, StageMesh continues directly to independent review.
+It copies the exact PNGs into a disposable review checkout and provides their
+capture ID, routes, measured viewports and hashes as bounded evidence data. A
+review PASS is accepted only when it includes a receipt naming that capture ID
+and every artifact SHA-256; a plain PASS, a missing image, a changed image, or
+a mismatched receipt is incomplete and cannot advance the task. Use
+`stagemesh evidence browser --task <id>` to see the paths and review status.
 
-```text
-stagemesh evidence decide-browser --task <id> --decision PASS|FAIL --reason "..."
-```
-
-Providers cannot capture or decide this evidence. `FAIL` records a review
-finding and returns the same task to IMPLEMENT. `PASS` leaves the task blocked
-until `stagemesh retry-task --task <id>` verifies that the latest capture still
-exists, remains inside the project evidence area, and matches its exact hashes
-and dimensions. A newer capture invalidates an older decision.
+Providers cannot run the capture command or record an operator decision. The
+optional `stagemesh evidence decide-browser` command remains available for a
+governing specification that explicitly requires an accountable human visual
+decision. It is not an extra approval gate for ordinary technical responsive
+evidence. A newer capture invalidates an older decision or review receipt.
 
 `stagemesh doctor`, `task-doctor` and the run-window report show the kind, what was tried and why further automatic action is unsafe. Only `BLOCKED_HUMAN_DECISION` is listed under "tasks needing a design decision".
 

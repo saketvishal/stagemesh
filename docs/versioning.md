@@ -1,10 +1,12 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.45 automatically replays a
-complete safe capture recipe after retiring legacy responsive evidence, while
-leaving the accountable visual decision manual.
-See the [0.6.45 release notes](releases/0.6.45.md),
+files as reinstallable package points. Version 0.6.46 carries verified
+exact-candidate browser captures through independent review without adding a
+second operator approval gate, while preserving explicit human decisions when
+the governing specification actually requires one.
+See the [0.6.46 release notes](releases/0.6.46.md),
+[0.6.45 release notes](releases/0.6.45.md),
 [0.6.44 release notes](releases/0.6.44.md),
 [0.6.43 release notes](releases/0.6.43.md),
 [0.6.42 release notes](releases/0.6.42.md),
@@ -44,14 +46,14 @@ See the [0.6.45 release notes](releases/0.6.45.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.45` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.46` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.45
+python -m pip install --no-cache-dir stagemesh==0.6.46
 ```
 
-The preceding `0.6.44` release remains available for rollback. The older
+The preceding `0.6.45` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -60,6 +62,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.46`: verified browser captures continue through hash-bound independent review without a redundant operator approval.
 - `0.6.45`: safe automatic replay of invalidated exact-candidate browser capture recipes.
 - `0.6.44`: measured CSS viewport evidence, fail-closed captures, and legacy false-FAIL retirement.
 - `0.6.43`: exact visual-failure findings reach remediation providers, including recovery of 0.6.42 state.

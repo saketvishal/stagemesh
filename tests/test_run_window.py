@@ -257,7 +257,7 @@ def test_external_evidence_block_is_the_next_action_not_an_unrelated_closed_issu
     assert "ended: no eligible work left" not in persisted_output
 
 
-def test_verified_browser_recapture_prints_the_exact_decision_command(tmp_path: Path) -> None:
+def test_legacy_browser_decision_block_resumes_independent_review_without_operator_command(tmp_path: Path) -> None:
     store, _project = make_store(tmp_path, ["138"])
     store.advance_task("138", Stage.REVIEW)
     record_block(
@@ -287,8 +287,9 @@ def test_verified_browser_recapture_prints_the_exact_decision_command(tmp_path: 
 
     command = rw.next_command(report, store)
 
-    assert command.startswith("inspect the verified captures for task 138")
-    assert "stagemesh evidence decide-browser --task 138 --decision PASS|FAIL" in command
+    assert command.startswith("stagemesh run-window")
+    assert "continue to independent review" in command
+    assert "decide-browser" not in command
 
 
 def test_multiple_planning_decisions_never_print_a_fake_combined_command(tmp_path: Path) -> None:
