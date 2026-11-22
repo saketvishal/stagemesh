@@ -712,6 +712,7 @@ class ProviderPool:
     def review_adapter(
         self, store: Store, task_id: str, candidate_sha: str, implementer: str | None,
         *, excluded_providers: tuple[str, ...] = (), excluded_command_digests: tuple[str, ...] = (),
+        preferred_providers: tuple[str, ...] = (),
     ) -> tuple[FallbackReviewAdapter | None, list[Verdict]]:
         verdicts = self.evaluate(store, REVIEW, task_id, implementer)
         if excluded_providers or excluded_command_digests:
@@ -726,6 +727,17 @@ class ProviderPool:
             # Independence is optional here, but a provider never reviews its own candidate: prefer others, else deterministic.
             implementer_adapter = self.adapters.get(implementer)
             eligible = [a for a in eligible if not _same(a, implementer, implementer_adapter)]
+        if preferred_providers:
+            preferred = {name.casefold(): index for index, name in enumerate(preferred_providers)}
+            original = {adapter.name: index for index, adapter in enumerate(eligible)}
+            eligible = sorted(
+                eligible,
+                key=lambda adapter: (
+                    adapter.name.casefold() not in preferred,
+                    preferred.get(adapter.name.casefold(), len(preferred)),
+                    original[adapter.name],
+                ),
+            )
         if not eligible:
             if self.require_independent:
                 self.log(

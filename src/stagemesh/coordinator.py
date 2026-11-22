@@ -12,6 +12,7 @@ from .auto_plan import outside_label_selector
 from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
 from .browser_evidence import (
+    browser_evidence_recheck_requirement,
     ensure_browser_evidence_remediation,
     invalidated_browser_recapture_recipe,
     recapture_invalidated_browser_evidence,
@@ -709,7 +710,10 @@ class Coordinator:
             reconcile_withdrawals(self.store, task_id, sha, bound.digest)
             if not self._review_satisfied(task_id, sha, bound.digest):
                 pending = AdverseSummary(tuple(unresolved_adverse_review_findings(self.store, task_id, sha)))
-                if pending and not recheck_review_authorized(self.store, task_id, sha):
+                browser_recheck = browser_evidence_recheck_requirement(
+                    self.store, self.project, task_id, sha, pending.findings
+                )
+                if pending and not recheck_review_authorized(self.store, task_id, sha) and browser_recheck is None:
                     # An earlier reviewer's adverse finding is still open on this exact candidate. Asking again until someone
                     # passes would only bury it, so no new reviewer runs: the finding is remediated or dispositioned explicitly.
                     record_audit(self.store, UNRESOLVED_EVENT, {
@@ -717,9 +721,39 @@ class Coordinator:
                         "finding_ids": [item["finding_id"] for item in pending.findings],
                     })
                     return self._remediate_or_block(task_id, sha, Stage.REVIEW)
+                preferred_reviewers: tuple[str, ...] = ()
+                if browser_recheck is not None:
+                    preferred_reviewers = tuple(
+                        dict.fromkeys(
+                            str(item.get("reviewer") or "")
+                            for item in pending.findings
+                            if str(item.get("reviewer") or "")
+                        )
+                    )
+                    record_audit(
+                        self.store,
+                        "task.browser_evidence_recheck_authorized",
+                        {
+                            "task_id": task_id,
+                            "candidate_sha": sha,
+                            "capture_id": browser_recheck["capture_id"],
+                            "finding_ids": [item["finding_id"] for item in pending.findings],
+                            "preferred_reviewers": list(preferred_reviewers),
+                        },
+                    )
                 if self._approval_refused(task_id, BOUNDARY_REVIEW, candidate_sha=sha, required_roles=("implementer",)):
                     return 0  # the reviewer is checked again once selected, still before its process starts
-                review_status = self.reviewer.review(self.store, task_id, sha, self.project)
+                review_status = (
+                    self.reviewer.review(
+                        self.store,
+                        task_id,
+                        sha,
+                        self.project,
+                        preferred_providers=preferred_reviewers,
+                    )
+                    if preferred_reviewers
+                    else self.reviewer.review(self.store, task_id, sha, self.project)
+                )
                 if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
                     return 1
                 reconcile_withdrawals(self.store, task_id, sha, bound.digest)

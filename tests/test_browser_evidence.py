@@ -61,6 +61,10 @@ from stagemesh.persistence import Store
 from stagemesh.providers import RuntimeCommandAdapter, _remediation_prompt
 from stagemesh.remediation import remediation_context
 from stagemesh.review import Reviewer
+from stagemesh.review_disposition import (
+    FINDING_DISPOSITION,
+    unresolved_adverse_review_findings,
+)
 from stagemesh.workspaces import task_workspace
 
 SHA = "a" * 40
@@ -627,6 +631,141 @@ def test_review_stage_automatically_recaptures_then_continues_to_independent_rev
     ]
     assert store.has_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED)
     assert classify_block(store, TASK) is None
+
+
+def test_verified_capture_recorded_after_persisted_browser_findings_gets_one_bound_recheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduce the real upgrade state: an old failed review exists before the verified capture."""
+    project, store = _setup(tmp_path)
+    (project / ".gitignore").write_text(".stagemesh/\n", encoding="utf-8")
+    GitWorkspace(project).commit_all("ignore runtime")
+    (project / "docs" / "a.md").write_text("candidate\n", encoding="utf-8")
+    sha = GitWorkspace(project).commit_all("candidate")
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+
+    class MissingBrowserReviewer:
+        name = "codex"
+
+        def review(self, _prompt: str) -> str:
+            return json.dumps(
+                {
+                    "decision": "FAIL_WITH_FINDINGS",
+                    "findings": [
+                        {
+                            "severity": "error",
+                            "message": "360-pixel and desktop browser review is missing",
+                            "remediation": "external_evidence",
+                        },
+                        {
+                            "severity": "error",
+                            "message": "internal acceptance record is missing",
+                            "remediation": "external_evidence",
+                        },
+                    ],
+                }
+            )
+
+    assert Reviewer(
+        adapter=MissingBrowserReviewer(), require_independent=True
+    ).review(store, TASK, sha, project) == EvidenceStatus.FAILED
+    assert len(unresolved_adverse_review_findings(store, TASK, sha)) == 2
+    digest = _record_verified_capture(
+        project, store, TASK, sha, capture_id="browser-after-findings"
+    )
+
+    class ExactBrowserReviewer:
+        name = "codex"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review(self, prompt: str) -> str:
+            self.calls += 1
+            assert "browser-after-findings" in prompt
+            return json.dumps(
+                {
+                    "decision": "PASS",
+                    "browser_evidence": {
+                        "capture_id": "browser-after-findings",
+                        "artifact_sha256s": [digest],
+                    },
+                }
+            )
+
+    adapter = ExactBrowserReviewer()
+    monkeypatch.setattr(Coordinator, "_workspace_intact", lambda *_args, **_kwargs: True)
+    coordinator = Coordinator(
+        store,
+        project,
+        reviewer=Reviewer(adapter=adapter, require_independent=True),
+    )
+
+    assert coordinator.tick() == 1
+    assert adapter.calls == 1
+    assert store.get_task(TASK)["stage"] == Stage.INTEGRATE
+    assert unresolved_adverse_review_findings(store, TASK, sha) == []
+    dispositions = list(store.task_audit_events(FINDING_DISPOSITION, TASK))
+    assert len(dispositions) == 2
+    assert all(
+        json.loads(row["payload"])["disposition"] == "withdrawn_by_reviewer"
+        for row in dispositions
+    )
+
+
+def test_verified_capture_does_not_recheck_unrelated_persisted_code_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _setup(tmp_path)
+    sha = GitWorkspace(project).head()
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+
+    class CodeFindingReviewer:
+        name = "codex"
+
+        def review(self, _prompt: str) -> str:
+            return json.dumps(
+                {
+                    "decision": "FAIL_WITH_FINDINGS",
+                    "findings": [
+                        {
+                            "severity": "error",
+                            "message": "docs/a.md omits required behavior",
+                            "path": "docs/a.md",
+                            "remediation": "code_change",
+                        }
+                    ],
+                }
+            )
+
+    assert Reviewer(
+        adapter=CodeFindingReviewer(), require_independent=True
+    ).review(store, TASK, sha, project) == EvidenceStatus.FAILED
+    _record_verified_capture(project, store, TASK, sha, capture_id="unrelated-capture")
+
+    class MustNotRun:
+        name = "codex"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review(self, _prompt: str) -> str:
+            self.calls += 1
+            return '{"decision":"PASS"}'
+
+    adapter = MustNotRun()
+    monkeypatch.setattr(Coordinator, "_workspace_intact", lambda *_args, **_kwargs: True)
+    coordinator = Coordinator(
+        store,
+        project,
+        reviewer=Reviewer(adapter=adapter, require_independent=True),
+    )
+
+    assert coordinator.tick() == 1
+    assert adapter.calls == 0
+    assert unresolved_adverse_review_findings(store, TASK, sha)
 
 
 def test_review_stage_does_not_recapture_when_candidate_integrity_fails(

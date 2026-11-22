@@ -217,6 +217,71 @@ def test_browser_capture_incomplete_pass_falls_back_to_another_independent_revie
     assert payload["review_provider"] == "claude"
 
 
+def test_browser_capture_failure_is_bound_to_the_exact_review_receipt(
+    tmp_path: Path,
+) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    digest = _attach_verified_browser_capture(project, store, UNIT_TASK, candidate)
+    response = json.dumps(
+        {
+            "decision": "FAIL_WITH_FINDINGS",
+            "browser_evidence": {
+                "capture_id": "browser-review",
+                "artifact_sha256s": [digest],
+            },
+            "findings": [
+                {
+                    "severity": "error",
+                    "message": "the mobile capture shows horizontal overflow",
+                    "remediation": "code_change",
+                }
+            ],
+        }
+    )
+
+    status = Reviewer(
+        adapter=ScriptedReviewAdapter(response), require_independent=True
+    ).review(store, UNIT_TASK, candidate, project)
+
+    assert status == EvidenceStatus.FAILED
+    payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.FAILED)[0]
+    assert payload["browser_evidence_review"] == {
+        "capture_id": "browser-review",
+        "artifact_sha256s": [digest],
+    }
+
+
+def test_browser_capture_failure_without_receipt_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    _attach_verified_browser_capture(project, store, UNIT_TASK, candidate)
+
+    status = Reviewer(
+        adapter=ScriptedReviewAdapter(
+            json.dumps(
+                {
+                    "decision": "FAIL_WITH_FINDINGS",
+                    "findings": [
+                        {
+                            "severity": "error",
+                            "message": "the mobile capture may overflow",
+                            "remediation": "code_change",
+                        }
+                    ],
+                }
+            )
+        ),
+        require_independent=True,
+        max_incomplete_retries=0,
+    ).review(store, UNIT_TASK, candidate, project)
+
+    assert status == EvidenceStatus.CAPACITY
+    assert store.open_findings_for_candidate(UNIT_TASK, candidate) == []
+    payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY)[0]
+    assert payload["review_infrastructure_failure"] == "browser_evidence_receipt_missing"
+
+
 def test_valid_review_is_classified_before_its_recorded_provider_text_is_sanitized(
     tmp_path: Path,
 ) -> None:
