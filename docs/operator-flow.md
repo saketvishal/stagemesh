@@ -151,10 +151,18 @@ server command, loopback origin, and named viewport/route captures. StageMesh:
 - launches only an already installed Edge, Chrome, or Chromium executable with
   strict headless flags and an isolated disposable profile;
 - keeps all navigation on the declared unauthenticated loopback origin;
-- binds PNG dimensions and SHA-256 hashes to the retained candidate and audit
-  ledger; and
+- applies the requested viewport through the browser debugger, measures the
+  actual CSS viewport before capture, and refuses mismatches instead of
+  accepting a cropped bitmap;
+- binds requested and measured CSS viewports, PNG dimensions, and SHA-256
+  hashes to the retained candidate and audit ledger; and
 - terminates the local server and browser process tree without opening a
   desktop window or granting browser control to a provider.
+
+Captures made before CSS-viewport measurement are not trusted. If a legacy
+capture produced a FAIL, StageMesh resolves only that visual finding, clears
+its exact remediation attempt, preserves the candidate, and returns to REVIEW
+for recapture. It never sends that unverified failure back to implementation.
 
 The configured approval authority then records what it observed:
 

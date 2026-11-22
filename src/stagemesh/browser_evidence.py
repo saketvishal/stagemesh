@@ -8,22 +8,26 @@ configured accountable approver must separately record PASS or FAIL.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import socket
+import sqlite3
 import struct
 import subprocess
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.error import URLError
+from typing import Self, cast
 from urllib.parse import urljoin, urlparse
-from urllib.request import urlopen
 
 from .audit import record_audit
 from .config import load_config
@@ -31,13 +35,15 @@ from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .execution import kill_process_tree, popen_session_kwargs
 from .git import GitWorkspace
 from .persistence import Store
-from .redaction import redact_command_secrets, sanitize_provider_output
+from .redaction import redact_command_secrets
 from .remediation import finding_identity
 from .spec_planning import PROVIDER_PROCESS_ENV
 from .workspaces import task_workspace
 
 CAPTURE_EVENT = "task.browser_evidence_captured"
 DECISION_EVENT = "task.browser_evidence_decided"
+INVALIDATED_EVENT = "task.browser_evidence_invalidated"
+CAPTURE_PROTOCOL = "cdp-device-metrics-v1"
 _BROWSER_REQUIREMENT_MARKERS = (
     "browser",
     "responsive",
@@ -50,10 +56,10 @@ _CAPTURE_RE = re.compile(
     r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,79})=(?P<width>[1-9][0-9]{1,3})x(?P<height>[1-9][0-9]{1,3}):(?P<route>/[^\r\n]*)$"
 )
 _COMMON_BROWSERS = (
-    Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-    Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
     Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+    Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+    Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
 )
 
 
@@ -126,7 +132,7 @@ def _browser_path(explicit: str | None) -> Path:
         if candidate.is_file():
             return candidate
         raise BrowserEvidenceError(f"headless browser executable does not exist: {candidate}")
-    for command in ("msedge", "microsoft-edge", "chrome", "google-chrome", "chromium"):
+    for command in ("chrome", "google-chrome", "chromium", "msedge", "microsoft-edge"):
         found = shutil.which(command)
         if found:
             return Path(found).resolve()
@@ -154,6 +160,9 @@ def _safe_task_id(task_id: str) -> str:
 
 
 def _verify_capture_artifacts(project: Path, capture: dict[str, object]) -> None:
+    proof_error = _capture_viewport_proof_error(capture)
+    if proof_error is not None:
+        raise BrowserEvidenceError(proof_error)
     runtime = (project / ".stagemesh" / "evidence").resolve()
     artifacts = capture.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
@@ -164,12 +173,20 @@ def _verify_capture_artifacts(project: Path, capture: dict[str, object]) -> None
         relative = artifact.get("path")
         digest = artifact.get("sha256")
         viewport = artifact.get("viewport")
+        requested_viewport = artifact.get("requested_viewport")
+        css_viewport = artifact.get("css_viewport")
         if (
             not isinstance(relative, str)
             or not isinstance(digest, str)
             or not isinstance(viewport, str)
+            or not isinstance(requested_viewport, str)
+            or not isinstance(css_viewport, str)
         ):
             raise BrowserEvidenceError("browser evidence artifact metadata is incomplete")
+        if requested_viewport != css_viewport:
+            raise BrowserEvidenceError(
+                f"browser evidence CSS viewport was {css_viewport}, not {requested_viewport}"
+            )
         path = (project / relative).resolve()
         if runtime not in path.parents or not path.is_file():
             raise BrowserEvidenceError(
@@ -181,19 +198,48 @@ def _verify_capture_artifacts(project: Path, capture: dict[str, object]) -> None
         width, height = _png_dimensions(path)
         if viewport != f"{width}x{height}":
             raise BrowserEvidenceError(f"browser evidence artifact dimensions changed: {path.name}")
+        if viewport != requested_viewport:
+            raise BrowserEvidenceError(
+                f"browser evidence bitmap was {viewport}, not {requested_viewport}"
+            )
+
+
+def _capture_viewport_proof_error(capture: dict[str, object]) -> str | None:
+    if capture.get("capture_protocol") != CAPTURE_PROTOCOL:
+        return "browser capture predates verified CSS viewport evidence; recapture is required"
+    artifacts = capture.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return "browser evidence capture has no recorded artifacts"
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            return "browser evidence artifact record is invalid"
+        requested = artifact.get("requested_viewport")
+        actual = artifact.get("css_viewport")
+        if not isinstance(requested, str) or not isinstance(actual, str):
+            return "browser capture lacks measured CSS viewport evidence; recapture is required"
+        if requested != actual:
+            return f"browser capture measured CSS viewport {actual}, not requested {requested}"
+    return None
 
 
 def _wait_ready(url: str, process: subprocess.Popen[str], timeout_seconds: float) -> None:
+    parsed = urlparse(url)
+    host, port = parsed.hostname or "127.0.0.1", parsed.port or 80
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise BrowserEvidenceError("local evidence server exited before it became ready")
+        connection = http.client.HTTPConnection(host, port, timeout=2)
         try:
-            with urlopen(url, timeout=2) as response:
-                if response.status < 500:
-                    return
-        except (OSError, URLError):
+            connection.request("GET", "/")
+            response = connection.getresponse()
+            response.read(64 * 1024)
+            if response.status < 500:
+                return
+        except OSError:
             pass
+        finally:
+            connection.close()
         time.sleep(0.25)
     raise BrowserEvidenceError("local evidence server did not become ready before the timeout")
 
@@ -201,9 +247,7 @@ def _wait_ready(url: str, process: subprocess.Popen[str], timeout_seconds: float
 def _headless_command(
     executable: Path,
     profile: Path,
-    target: Path,
-    capture: CaptureRequest,
-    target_url: str,
+    debug_port: int,
 ) -> list[str]:
     return [
         str(executable),
@@ -217,59 +261,328 @@ def _headless_command(
         "--metrics-recording-only",
         "--mute-audio",
         f"--user-data-dir={profile}",
-        f"--window-size={capture.width},{capture.height}",
-        f"--screenshot={target}",
-        "--virtual-time-budget=2500",
-        target_url,
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={debug_port}",
+        "about:blank",
     ]
 
 
-def _run_headless(command: list[str], workspace: Path) -> tuple[int, str, str]:
-    process = subprocess.Popen(
-        command,
-        cwd=workspace,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        **popen_session_kwargs(),
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=60)
-    except subprocess.TimeoutExpired as exc:
-        kill_process_tree(process)
+def _available_debug_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+class _DebuggerClient:
+    """Minimal loopback-only Chrome DevTools Protocol WebSocket client."""
+
+    def __init__(self, websocket_url: str, timeout_seconds: float = 15.0):
+        parsed = urlparse(websocket_url)
+        if (
+            parsed.scheme != "ws"
+            or parsed.hostname not in {"127.0.0.1", "localhost"}
+            or parsed.port is None
+            or parsed.username
+            or parsed.password
+        ):
+            raise BrowserEvidenceError("browser debugger endpoint is not a loopback WebSocket")
+        self._socket = socket.create_connection(("127.0.0.1", parsed.port), timeout_seconds)
+        self._socket.settimeout(timeout_seconds)
+        self._buffer = b""
+        self._events: list[dict[str, object]] = []
+        self._next_id = 0
+        key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+        path = parsed.path or "/"
+        if parsed.query:
+            path += f"?{parsed.query}"
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{parsed.port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode("ascii")
+        self._socket.sendall(request)
+        response = self._receive_headers()
+        status = response.split(b"\r\n", 1)[0]
+        if b" 101 " not in status:
+            self.close()
+            raise BrowserEvidenceError("browser debugger rejected its loopback WebSocket")
+        expected = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        )
+        headers = {
+            name.strip().lower(): value.strip()
+            for line in response.split(b"\r\n")[1:]
+            if b":" in line
+            for name, value in (line.split(b":", 1),)
+        }
+        if not hmac.compare_digest(headers.get(b"sec-websocket-accept", b""), expected):
+            self.close()
+            raise BrowserEvidenceError("browser debugger WebSocket handshake was invalid")
+
+    def _receive_headers(self) -> bytes:
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = self._socket.recv(4096)
+            if not chunk:
+                raise BrowserEvidenceError("browser debugger closed during WebSocket handshake")
+            response += chunk
+            if len(response) > 65536:
+                raise BrowserEvidenceError("browser debugger returned oversized headers")
+        headers, self._buffer = response.split(b"\r\n\r\n", 1)
+        return headers
+
+    def _recv_exact(self, size: int) -> bytes:
+        while len(self._buffer) < size:
+            chunk = self._socket.recv(max(4096, size - len(self._buffer)))
+            if not chunk:
+                raise BrowserEvidenceError("browser debugger closed unexpectedly")
+            self._buffer += chunk
+        result, self._buffer = self._buffer[:size], self._buffer[size:]
+        return result
+
+    def _send_frame(self, opcode: int, payload: bytes) -> None:
+        mask = secrets.token_bytes(4)
+        size = len(payload)
+        header = bytearray((0x80 | opcode, 0x80 | min(126, size)))
+        if size >= 65536:
+            header[1] = 0x80 | 127
+            header.extend(struct.pack(">Q", size))
+        elif size >= 126:
+            header.extend(struct.pack(">H", size))
+        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        self._socket.sendall(bytes(header) + mask + masked)
+
+    def _receive_message(self) -> dict[str, object]:
+        assembled = bytearray()
+        started = False
+        while True:
+            first, second = self._recv_exact(2)
+            final, opcode = bool(first & 0x80), first & 0x0F
+            if second & 0x80:
+                raise BrowserEvidenceError("browser debugger sent a masked server frame")
+            size = second & 0x7F
+            if size == 126:
+                size = struct.unpack(">H", self._recv_exact(2))[0]
+            elif size == 127:
+                size = struct.unpack(">Q", self._recv_exact(8))[0]
+            if size > 32 * 1024 * 1024:
+                raise BrowserEvidenceError("browser debugger response exceeded 32 MiB")
+            payload = self._recv_exact(size)
+            if opcode == 0x8:
+                raise BrowserEvidenceError("browser debugger closed unexpectedly")
+            if opcode == 0x9:
+                self._send_frame(0xA, payload)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode == 0x1:
+                assembled = bytearray(payload)
+                started = True
+            elif opcode == 0x0 and started:
+                assembled.extend(payload)
+            else:
+                raise BrowserEvidenceError("browser debugger sent an unsupported WebSocket frame")
+            if final:
+                break
         try:
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        raise BrowserEvidenceError(
-            "headless browser capture timed out and its process tree was terminated"
-        ) from exc
-    return process.returncode, stdout, stderr
+            message = json.loads(assembled.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BrowserEvidenceError("browser debugger returned invalid JSON") from exc
+        if not isinstance(message, dict):
+            raise BrowserEvidenceError("browser debugger returned a non-object message")
+        return {str(key): value for key, value in message.items()}
+
+    def call(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        self._next_id += 1
+        request_id = self._next_id
+        payload: dict[str, object] = {"id": request_id, "method": method}
+        if params is not None:
+            payload["params"] = params
+        self._send_frame(0x1, json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        while True:
+            try:
+                message = self._receive_message()
+            except TimeoutError as exc:
+                raise BrowserEvidenceError(f"browser debugger timed out during {method}") from exc
+            if message.get("id") == request_id:
+                if "error" in message:
+                    raise BrowserEvidenceError(f"browser debugger rejected {method}")
+                result = message.get("result", {})
+                return result if isinstance(result, dict) else {}
+            if isinstance(message.get("method"), str):
+                self._events.append(message)
+
+    def wait_event(self, method: str, timeout_seconds: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            for index, event in enumerate(self._events):
+                if event.get("method") == method:
+                    self._events.pop(index)
+                    return
+            self._socket.settimeout(max(0.1, deadline - time.monotonic()))
+            try:
+                message = self._receive_message()
+            except TimeoutError:
+                break
+            if message.get("method") == method:
+                return
+            if isinstance(message.get("method"), str):
+                self._events.append(message)
+        raise BrowserEvidenceError(f"browser debugger did not emit {method} before timeout")
+
+    def close(self) -> None:
+        if getattr(self, "_socket", None) is not None:
+            try:
+                self._send_frame(0x8, b"")
+            except OSError:
+                pass
+            self._socket.close()
+            self._socket = None  # type: ignore[assignment]
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+def _debugger_target(port: int, timeout_seconds: float = 15.0) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            targets = _debugger_json(port, "/json/list")
+        except BrowserEvidenceError:
+            time.sleep(0.1)
+            continue
+        if isinstance(targets, list):
+            for target in targets:
+                if isinstance(target, dict) and target.get("type") == "page":
+                    endpoint = target.get("webSocketDebuggerUrl")
+                    if isinstance(endpoint, str):
+                        parsed = urlparse(endpoint)
+                        if (
+                            parsed.scheme == "ws"
+                            and parsed.hostname in {"127.0.0.1", "localhost"}
+                            and parsed.port == port
+                            and not parsed.username
+                            and not parsed.password
+                        ):
+                            return endpoint
+        time.sleep(0.1)
+    raise BrowserEvidenceError("headless browser debugger did not become ready before timeout")
+
+
+def _debugger_json(port: int, path: str) -> object:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        if response.status != 200:
+            raise BrowserEvidenceError("headless browser debugger returned a non-success status")
+        body = response.read(2 * 1024 * 1024 + 1)
+        if len(body) > 2 * 1024 * 1024:
+            raise BrowserEvidenceError("headless browser debugger response exceeded 2 MiB")
+        return json.loads(body)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BrowserEvidenceError("headless browser debugger returned invalid JSON") from exc
+    finally:
+        connection.close()
+
+
+def _browser_debugger_endpoint(port: int) -> str:
+    version = _debugger_json(port, "/json/version")
+    endpoint = version.get("webSocketDebuggerUrl") if isinstance(version, dict) else None
+    if not isinstance(endpoint, str):
+        raise BrowserEvidenceError("headless browser root debugger endpoint is missing")
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "ws" or parsed.hostname not in {"127.0.0.1", "localhost"} or parsed.port != port:
+        raise BrowserEvidenceError("headless browser root debugger is not loopback-bound")
+    return endpoint
+
+
+def _close_debug_browser(port: int) -> None:
+    try:
+        endpoint = _browser_debugger_endpoint(port)
+        with _DebuggerClient(endpoint) as client:
+            try:
+                client.call("Browser.close")
+            except BrowserEvidenceError:
+                pass  # A successful close may drop the socket before returning a response.
+    except (BrowserEvidenceError, OSError):
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            _debugger_json(port, "/json/version")
+        except BrowserEvidenceError:
+            return
+        time.sleep(0.1)
 
 
 def _capture_one(
-    executable: Path,
-    profile: Path,
+    client: _DebuggerClient,
     root: Path,
-    workspace: Path,
     origin: str,
     capture: CaptureRequest,
 ) -> dict[str, object]:
     target = root / f"{capture.name}.png"
     target_url = urljoin(origin, capture.route.lstrip("/"))
-    returncode, browser_stdout, browser_stderr = _run_headless(
-        _headless_command(executable, profile, target, capture, target_url), workspace
+    requested = f"{capture.width}x{capture.height}"
+    client.call("Page.enable")
+    client.call(
+        "Emulation.setDeviceMetricsOverride",
+        {
+            "width": capture.width,
+            "height": capture.height,
+            "deviceScaleFactor": 1,
+            "mobile": False,
+            "screenWidth": capture.width,
+            "screenHeight": capture.height,
+            "positionX": 0,
+            "positionY": 0,
+        },
     )
-    if returncode == 0 and not target.is_file():
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not target.is_file():
-            time.sleep(0.1)
-    if returncode != 0 or not target.is_file():
-        detail = sanitize_provider_output(browser_stderr or browser_stdout, 500)
+    navigation = client.call("Page.navigate", {"url": target_url})
+    if navigation.get("errorText"):
         raise BrowserEvidenceError(
-            f"headless capture {capture.name} failed: {detail or 'no PNG was produced'}"
+            f"headless capture {capture.name} navigation failed: {navigation['errorText']}"
         )
+    client.wait_event("Page.loadEventFired")
+    measured = client.call(
+        "Runtime.evaluate",
+        {
+            "expression": "({width:window.innerWidth,height:window.innerHeight,deviceScaleFactor:window.devicePixelRatio})",
+            "returnByValue": True,
+        },
+    )
+    remote = measured.get("result")
+    value = remote.get("value") if isinstance(remote, dict) else None
+    if not isinstance(value, dict):
+        raise BrowserEvidenceError(f"capture {capture.name} could not measure its CSS viewport")
+    css_width, css_height = value.get("width"), value.get("height")
+    if not isinstance(css_width, int) or not isinstance(css_height, int):
+        raise BrowserEvidenceError(f"capture {capture.name} returned an invalid CSS viewport")
+    css_viewport = f"{css_width}x{css_height}"
+    if css_viewport != requested:
+        raise BrowserEvidenceError(
+            f"capture {capture.name} measured CSS viewport {css_viewport}, not requested {requested}"
+        )
+    screenshot = client.call(
+        "Page.captureScreenshot",
+        {"format": "png", "fromSurface": True, "captureBeyondViewport": False},
+    )
+    encoded = screenshot.get("data")
+    if not isinstance(encoded, str):
+        raise BrowserEvidenceError(f"headless capture {capture.name} produced no PNG data")
+    try:
+        target.write_bytes(base64.b64decode(encoded, validate=True))
+    except (OSError, ValueError) as exc:
+        raise BrowserEvidenceError(f"headless capture {capture.name} produced invalid PNG data") from exc
     width, height = _png_dimensions(target)
     if (width, height) != (capture.width, capture.height):
         raise BrowserEvidenceError(
@@ -278,6 +591,9 @@ def _capture_one(
     return {
         "name": capture.name,
         "route": capture.route,
+        "requested_viewport": requested,
+        "css_viewport": css_viewport,
+        "device_scale_factor": value.get("deviceScaleFactor"),
         "viewport": f"{width}x{height}",
         "path": target,
         "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
@@ -310,10 +626,14 @@ def _capture_session(
 ) -> list[dict[str, object]]:
     profile = root / "browser-profile"
     server: subprocess.Popen[str] | None = None
+    browser: subprocess.Popen[str] | None = None
+    debug_port: int | None = None
     try:
         with (
             (root / "server.stdout.log").open("w", encoding="utf-8") as stdout,
             (root / "server.stderr.log").open("w", encoding="utf-8") as stderr,
+            (root / "browser.stdout.log").open("w", encoding="utf-8") as browser_stdout,
+            (root / "browser.stderr.log").open("w", encoding="utf-8") as browser_stderr,
         ):
             try:
                 server = subprocess.Popen(
@@ -331,11 +651,30 @@ def _capture_session(
                     f"could not start the explicit local evidence server: {type(exc).__name__}"
                 ) from exc
             _wait_ready(origin, server, startup_timeout_seconds)
-            return [
-                _capture_one(executable, profile, root, workspace, origin, capture)
-                for capture in captures
-            ]
+            profile.mkdir(parents=True, exist_ok=True)
+            debug_port = _available_debug_port()
+            try:
+                browser = subprocess.Popen(
+                    _headless_command(executable, profile, debug_port),
+                    cwd=workspace,
+                    stdin=subprocess.DEVNULL,
+                    stdout=browser_stdout,
+                    stderr=browser_stderr,
+                    text=True,
+                    **popen_session_kwargs(),
+                )
+            except OSError as exc:
+                raise BrowserEvidenceError(
+                    f"could not start the installed headless browser: {type(exc).__name__}"
+                ) from exc
+            endpoint = _debugger_target(debug_port)
+            with _DebuggerClient(endpoint) as client:
+                return [_capture_one(client, root, origin, capture) for capture in captures]
     finally:
+        if debug_port is not None:
+            _close_debug_browser(debug_port)
+        if browser is not None and browser.poll() is None:
+            kill_process_tree(browser)
         if server is not None and server.poll() is None:
             kill_process_tree(server)
         _remove_profile(profile, root)
@@ -403,6 +742,7 @@ def capture_browser_evidence(
         "stage": str(task["stage"]),
         "browser": executable.name,
         "headless": True,
+        "capture_protocol": CAPTURE_PROTOCOL,
         "base_origin": origin,
         "server_command": redact_command_secrets(shlex.join(server_command)),
         "artifacts": artifacts,
@@ -450,6 +790,77 @@ def latest_browser_decision(
         ),
         None,
     )
+
+
+def retire_unverified_browser_failure(
+    store: Store, task_id: str, candidate_sha: str
+) -> bool:
+    """Retire a FAIL derived from legacy captures that never proved the CSS viewport."""
+    capture = latest_browser_capture(store, task_id, candidate_sha)
+    decision = latest_browser_decision(store, task_id, candidate_sha)
+    if (
+        capture is None
+        or decision is None
+        or decision.get("decision") != "FAIL"
+        or decision.get("capture_id") != capture.get("capture_id")
+        or _capture_viewport_proof_error(capture) is None
+    ):
+        return False
+    if any(
+        event.get("candidate_sha") == candidate_sha
+        and event.get("capture_id") == capture.get("capture_id")
+        for event in _event_payloads(store, INVALIDATED_EVENT, task_id)
+    ):
+        return False
+    finding_ids: list[str] = []
+    for finding in store.open_findings_for_candidate(task_id, candidate_sha):
+        if str(finding["message"]).startswith(
+            "Headless responsive review failed for candidate "
+        ):
+            finding_ids.append(str(finding["id"]))
+            store.close_finding(str(finding["id"]))
+    latest_remediation = store.latest_task_remediation(task_id)
+    cleared = bool(
+        latest_remediation is not None
+        and str(latest_remediation["stage"]) == str(Stage.REVIEW)
+        and str(latest_remediation["candidate_sha"]) == candidate_sha
+        and store.clear_task_remediation(str(latest_remediation["id"]))
+    )
+    store.advance_task(task_id, Stage.REVIEW)
+    from .block_kinds import BlockKind, record_block
+
+    reason = (
+        "the prior browser FAIL is invalid because its capture did not verify the actual CSS "
+        "viewport; preserve the candidate and recapture before any implementation retry"
+    )
+    record_block(
+        store,
+        task_id,
+        BlockKind.EXTERNAL_DEPENDENCY,
+        reason,
+        stage=str(Stage.REVIEW),
+        candidate_sha=candidate_sha,
+        detail={
+            "failure_code": "browser_viewport_proof_required",
+            "requirements": [
+                "verified browser capture whose measured CSS viewport matches the requested viewport"
+            ],
+        },
+    )
+    record_audit(
+        store,
+        INVALIDATED_EVENT,
+        {
+            "task_id": task_id,
+            "candidate_sha": candidate_sha,
+            "capture_id": capture.get("capture_id"),
+            "reason": _capture_viewport_proof_error(capture),
+            "resolved_finding_ids": finding_ids,
+            "cleared_remediation": cleared,
+            "next_stage": str(Stage.REVIEW),
+        },
+    )
+    return True
 
 
 def decide_browser_evidence(
@@ -537,7 +948,7 @@ def decide_browser_evidence(
 
 def ensure_browser_evidence_remediation(
     store: Store, task_id: str, candidate_sha: str
-):
+) -> sqlite3.Row | None:
     """Persist or recover the exact REVIEW remediation context for a failed browser decision."""
     latest = store.latest_task_remediation(task_id)
     if (
@@ -545,7 +956,10 @@ def ensure_browser_evidence_remediation(
         and str(latest["stage"]) == str(Stage.REVIEW)
         and str(latest["candidate_sha"]) == candidate_sha
     ):
-        return latest
+        return cast(sqlite3.Row, latest)
+    capture = latest_browser_capture(store, task_id, candidate_sha)
+    if capture is None or _capture_viewport_proof_error(capture) is not None:
+        return None
     decision = latest_browser_decision(store, task_id, candidate_sha)
     if decision is None or decision.get("decision") != "FAIL":
         return None
@@ -584,7 +998,7 @@ def ensure_browser_evidence_remediation(
                 "next_stage": str(Stage.IMPLEMENT),
             },
         )
-    return store.task_remediation(remediation_id)
+    return cast(sqlite3.Row | None, store.task_remediation(remediation_id))
 
 
 def browser_evidence_context(

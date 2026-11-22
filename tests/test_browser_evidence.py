@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import functools
 import hashlib
+import http.server
 import json
+import os
+import shutil
 import struct
+import subprocess
+import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,19 +22,31 @@ from stagemesh.audit import record_audit
 from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.browser_evidence import (
     CAPTURE_EVENT,
+    CAPTURE_PROTOCOL,
+    DECISION_EVENT,
+    INVALIDATED_EVENT,
     BrowserEvidenceError,
     CaptureRequest,
+    _available_debug_port,
+    _browser_path,
+    _capture_one,
+    _close_debug_browser,
+    _debugger_target,
+    _DebuggerClient,
     _headless_command,
     _loopback_base_url,
+    _remove_profile,
     _safe_task_id,
     browser_evidence_accepted,
     browser_evidence_context,
     decide_browser_evidence,
     parse_capture_request,
     parse_server_command,
+    retire_unverified_browser_failure,
 )
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
+from stagemesh.execution import kill_process_tree, popen_session_kwargs
 from stagemesh.persistence import Store
 from stagemesh.providers import _remediation_prompt
 from stagemesh.remediation import remediation_context
@@ -84,10 +104,13 @@ def _blocked_capture(tmp_path: Path) -> tuple[Path, Store]:
             "candidate_sha": SHA,
             "capture_id": "browser-test",
             "headless": True,
+            "capture_protocol": CAPTURE_PROTOCOL,
             "artifacts": [
                 {
                     "name": "sources-mobile",
                     "route": "/sources",
+                    "requested_viewport": "360x800",
+                    "css_viewport": "360x800",
                     "viewport": "360x800",
                     "path": artifact.relative_to(project).as_posix(),
                     "sha256": digest,
@@ -120,15 +143,144 @@ def test_browser_command_is_always_headless_and_uses_an_isolated_profile(tmp_pat
     command = _headless_command(
         Path("browser.exe"),
         tmp_path / "profile",
-        tmp_path / "capture.png",
-        CaptureRequest("mobile", 360, 800, "/sources"),
-        "http://127.0.0.1:4179/sources",
+        39777,
     )
 
     assert "--headless=new" in command
     assert "--disable-background-networking" in command and "--disable-extensions" in command
     assert f"--user-data-dir={tmp_path / 'profile'}" in command
-    assert command[-1] == "http://127.0.0.1:4179/sources"
+    assert "--remote-debugging-address=127.0.0.1" in command
+    assert "--remote-debugging-port=39777" in command
+    assert not any(part.startswith("--screenshot=") for part in command)
+    assert command[-1] == "about:blank"
+
+
+class _FakeDebugger:
+    def __init__(self, *, width: int = 360, height: int = 800):
+        self.width, self.height = width, height
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
+
+    def call(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        self.calls.append((method, params))
+        if method == "Runtime.evaluate":
+            return {
+                "result": {
+                    "value": {
+                        "width": self.width,
+                        "height": self.height,
+                        "deviceScaleFactor": 1,
+                    }
+                }
+            }
+        if method == "Page.captureScreenshot":
+            png = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(
+                ">II", 360, 800
+            )
+            return {"data": base64.b64encode(png).decode("ascii")}
+        return {}
+
+    def wait_event(self, method: str, timeout_seconds: float = 15.0) -> None:
+        assert method == "Page.loadEventFired"
+
+
+def test_capture_overrides_and_measures_css_viewport_before_screenshot(tmp_path: Path) -> None:
+    client = _FakeDebugger()
+
+    artifact = _capture_one(
+        client,  # type: ignore[arg-type]
+        tmp_path,
+        "http://127.0.0.1:4179/",
+        CaptureRequest("mobile", 360, 800, "/sources"),
+    )
+
+    methods = [method for method, _params in client.calls]
+    assert methods == [
+        "Page.enable",
+        "Emulation.setDeviceMetricsOverride",
+        "Page.navigate",
+        "Runtime.evaluate",
+        "Page.captureScreenshot",
+    ]
+    metrics = client.calls[1][1]
+    assert metrics is not None and metrics["width"] == 360 and metrics["height"] == 800
+    assert artifact["requested_viewport"] == artifact["css_viewport"] == "360x800"
+    assert artifact["viewport"] == "360x800"
+
+
+def test_capture_fails_closed_when_browser_uses_a_wider_css_viewport(tmp_path: Path) -> None:
+    client = _FakeDebugger(width=492)
+
+    with pytest.raises(BrowserEvidenceError, match="492x800, not requested 360x800"):
+        _capture_one(
+            client,  # type: ignore[arg-type]
+            tmp_path,
+            "http://127.0.0.1:4179/",
+            CaptureRequest("mobile", 360, 800, "/sources"),
+        )
+
+    assert "Page.captureScreenshot" not in [method for method, _params in client.calls]
+
+
+def test_live_browser_capture_uses_exact_css_viewport() -> None:
+    if os.environ.get("STAGEMESH_LIVE_BROWSER_TEST") != "1":
+        pytest.skip("set STAGEMESH_LIVE_BROWSER_TEST=1 for installed-browser acceptance")
+
+    live_root = Path(tempfile.mkdtemp(prefix="stagemesh-browser-live-", dir=Path.cwd()))
+
+    class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    (live_root / "index.html").write_text(
+        "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<script>document.body.textContent=innerWidth+'x'+innerHeight</script>",
+        encoding="utf-8",
+    )
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        functools.partial(_QuietHandler, directory=str(live_root)),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    profile, root = live_root / "profile", live_root / "captures"
+    profile.mkdir()
+    root.mkdir()
+    debug_port = _available_debug_port()
+    browser = subprocess.Popen(
+        _headless_command(
+            _browser_path(os.environ.get("STAGEMESH_TEST_BROWSER")), profile, debug_port
+        ),
+        cwd=live_root,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **popen_session_kwargs(),
+    )
+    try:
+        try:
+            endpoint = _debugger_target(debug_port)
+        except BrowserEvidenceError as exc:
+            _stdout, stderr = browser.communicate(timeout=5)
+            pytest.fail(f"{exc}: {stderr}")
+        with _DebuggerClient(endpoint) as client:
+            artifact = _capture_one(
+                client,
+                root,
+                f"http://127.0.0.1:{server.server_port}/",
+                CaptureRequest("probe", 360, 800, "/index.html"),
+            )
+        assert artifact["requested_viewport"] == artifact["css_viewport"] == "360x800"
+        assert artifact["viewport"] == "360x800"
+    finally:
+        _close_debug_browser(debug_port)
+        if browser.poll() is None:
+            kill_process_tree(browser)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        _remove_profile(profile, live_root)
+        shutil.rmtree(live_root, ignore_errors=True)
 
 
 def test_failed_browser_decision_routes_exact_candidate_back_to_implementation(
@@ -209,6 +361,51 @@ def test_legacy_failed_browser_decision_recovers_provider_context_before_dispatc
 
     assert Coordinator(store, project)._reroute_evidence_remediation(TASK) is False
     assert store.task_remediation_count(TASK, Stage.REVIEW) == 1
+
+
+def test_legacy_unmeasured_browser_fail_is_retired_instead_of_reimplemented(
+    tmp_path: Path,
+) -> None:
+    project, store = _blocked_capture(tmp_path)
+    capture = json.loads(list(store.task_audit_events(CAPTURE_EVENT, TASK))[-1]["payload"])
+    capture.pop("capture_protocol")
+    for artifact in capture["artifacts"]:
+        artifact.pop("requested_viewport")
+        artifact.pop("css_viewport")
+    with store.conn:
+        store.conn.execute("DELETE FROM audit_events WHERE event_type=?", (CAPTURE_EVENT,))
+    record_audit(store, CAPTURE_EVENT, capture)
+    reason = "The old cropped screenshot appeared to clip the right edge."
+    message = f"Headless responsive review failed for candidate {SHA[:12]}: {reason}"
+    finding_id = hashlib.sha256(f"{SHA}\n{message}".encode()).hexdigest()
+    record_audit(
+        store,
+        DECISION_EVENT,
+        {
+            "task_id": TASK,
+            "candidate_sha": SHA,
+            "capture_id": "browser-test",
+            "decision": "FAIL",
+            "reason": reason,
+        },
+    )
+    store.upsert_finding(finding_id, TASK, SHA, "error", message)
+    store.add_task_remediation(TASK, str(Stage.REVIEW), SHA)
+    store.advance_task(TASK, Stage.IMPLEMENT)
+
+    assert retire_unverified_browser_failure(store, TASK, SHA) is True
+
+    task = store.get_task(TASK)
+    assert (task["stage"], task["status"]) == (Stage.REVIEW, TaskStatus.BLOCKED)
+    assert store.get_finding(finding_id)["status"] == "RESOLVED"
+    assert store.latest_task_remediation(TASK) is None
+    events = list(store.task_audit_events(INVALIDATED_EVENT, TASK))
+    assert len(events) == 1
+    assert "predates verified CSS viewport" in json.loads(events[0]["payload"])["reason"]
+
+    # Re-running recovery is idempotent and cannot reopen implementation.
+    assert retire_unverified_browser_failure(store, TASK, SHA) is False
+    assert Coordinator(store, project)._reroute_evidence_remediation(TASK) is False
 
 
 def test_passed_browser_decision_is_candidate_bound_and_still_requires_retry(

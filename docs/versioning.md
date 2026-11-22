@@ -1,10 +1,11 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.43 makes failed accountable
-browser evidence a durable REVIEW remediation and recovers the missing provider
-context for projects that recorded a visual FAIL with 0.6.42.
-See the [0.6.43 release notes](releases/0.6.43.md),
+files as reinstallable package points. Version 0.6.44 verifies the browser's
+actual CSS viewport before accepting responsive evidence and retires legacy
+visual failures that were based only on cropped bitmap dimensions.
+See the [0.6.44 release notes](releases/0.6.44.md),
+[0.6.43 release notes](releases/0.6.43.md),
 [0.6.42 release notes](releases/0.6.42.md),
 [0.6.33 release notes](releases/0.6.33.md),
 [0.6.32 release notes](releases/0.6.32.md),
@@ -42,14 +43,14 @@ See the [0.6.43 release notes](releases/0.6.43.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.43` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.44` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.43
+python -m pip install --no-cache-dir stagemesh==0.6.44
 ```
 
-The preceding `0.6.42` release remains available for rollback. The older
+The preceding `0.6.43` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -58,6 +59,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.44`: measured CSS viewport evidence, fail-closed captures, and legacy false-FAIL retirement.
 - `0.6.43`: exact visual-failure findings reach remediation providers, including recovery of 0.6.42 state.
 - `0.6.42`: accountable exact-candidate headless browser evidence and visual-failure remediation.
 - `0.6.33`: durable review-to-remediation progress and source-safe block preservation.

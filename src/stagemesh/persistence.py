@@ -1720,6 +1720,15 @@ class Store:
         self.conn.commit()
         return int(cursor.rowcount)
 
+    def clear_task_remediation(self, remediation_id: str) -> bool:
+        remediation_id = _validate_text(remediation_id, "remediation id")
+        cursor = self.conn.execute(
+            "UPDATE task_remediations SET cleared=1 WHERE id=? AND cleared=0",
+            (remediation_id,),
+        )
+        self.conn.commit()
+        return cursor.rowcount == 1
+
     def latest_task_remediation(self, task_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM task_remediations WHERE task_id=? AND cleared=0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
