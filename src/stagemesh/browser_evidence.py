@@ -1195,6 +1195,81 @@ def browser_review_requirement(
     }
 
 
+def browser_evidence_recheck_requirement(
+    store: Store,
+    project: Path,
+    task_id: str,
+    candidate_sha: str,
+    findings: tuple[dict[str, object], ...] | list[dict[str, object]],
+) -> dict[str, object] | None:
+    """Authorize one review when verified browser evidence post-dates browser-only findings.
+
+    This is deliberately narrower than a generic review retry.  At least one open
+    finding must require browser evidence, every open finding must be satisfiable
+    by that browser review (including the acceptance record the review creates),
+    and the exact verified capture must be newer than every finding.  A terminal
+    review receipt for the capture consumes the authorization, while provider
+    outages and malformed answers do not.
+    """
+    from .review_remediation import EXTERNAL_EVIDENCE, classify_review_finding
+
+    requirement = browser_review_requirement(store, project, task_id, candidate_sha)
+    if requirement is None or not findings:
+        return None
+    messages = [str(item.get("message") or "") for item in findings]
+    browser_flags = [browser_evidence_required(message, [message]) for message in messages]
+    satisfiable = [
+        classify_review_finding(message) == EXTERNAL_EVIDENCE
+        and (browser_flag or "internal acceptance" in message.casefold())
+        for message, browser_flag in zip(messages, browser_flags, strict=True)
+    ]
+    if not any(browser_flags) or not all(satisfiable):
+        return None
+
+    capture_id = requirement.get("capture_id")
+    capture_at: float | None = None
+    for row in store.task_audit_events(CAPTURE_EVENT, task_id):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("candidate_sha") == candidate_sha
+            and payload.get("capture_id") == capture_id
+        ):
+            capture_at = float(row["created_at"])
+    finding_times = [float(item.get("_at") or 0.0) for item in findings]
+    if capture_at is None or capture_at <= max(finding_times, default=0.0):
+        return None
+
+    expected = sorted(
+        str(artifact["sha256"])
+        for artifact in requirement["artifacts"]
+        if isinstance(artifact, dict) and isinstance(artifact.get("sha256"), str)
+    )
+    reviews = store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='REVIEW' "
+        "AND status IN ('PASSED', 'FAILED') AND created_at>=? ORDER BY created_at, rowid",
+        (task_id, candidate_sha, capture_at),
+    ).fetchall()
+    for row in reviews:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        receipt = payload.get("browser_evidence_review") if isinstance(payload, dict) else None
+        supplied = receipt.get("artifact_sha256s") if isinstance(receipt, dict) else None
+        if (
+            isinstance(receipt, dict)
+            and receipt.get("capture_id") == capture_id
+            and isinstance(supplied, list)
+            and sorted(str(item) for item in supplied) == expected
+        ):
+            return None
+    return requirement
+
+
 def materialize_browser_review_bundle(
     store: Store,
     project: Path,

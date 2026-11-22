@@ -371,6 +371,28 @@ def test_review_falls_back_to_the_next_independent_provider(tmp_path: Path) -> N
     assert "final review provider: grok" in text
 
 
+def test_review_recheck_prefers_the_provider_that_raised_the_open_finding(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(
+        tmp_path,
+        {"codex": "ok", "claude": "ok", "grok": "ok"},
+        pools={IMPLEMENT: ("claude",), REVIEW: ("grok", "codex")},
+    )
+
+    adapter, verdicts = rig.pool.review_adapter(
+        rig.store,
+        TASK,
+        "a" * 40,
+        "claude",
+        preferred_providers=("codex",),
+    )
+
+    assert adapter is not None
+    assert [item.name for item in adapter.adapters] == ["codex", "grok"]
+    assert all(verdict.eligible for verdict in verdicts)
+
+
 def test_grok_can_implement_and_is_skipped_from_reviewing_its_own_candidate(tmp_path: Path) -> None:
     rig = Rig(
         tmp_path,
