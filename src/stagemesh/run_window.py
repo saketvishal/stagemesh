@@ -852,6 +852,20 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
     ]
     decisions = [t for t in actionable if t.outcome == "blocked_needs_decision"]
     if decisions:
+        browser_decisions = [
+            task.task_id
+            for task in decisions
+            if store is not None
+            and (info := classify_block(store, task.task_id)) is not None
+            and info.failure_code == "browser_evidence_decision_required"
+        ]
+        if len(browser_decisions) == 1:
+            task_id = browser_decisions[0]
+            return (
+                f"inspect the verified captures for task {task_id}, then record the decision: "
+                f"stagemesh evidence decide-browser --task {task_id} --decision PASS|FAIL "
+                "--reason '<what the approver observed>'"
+            )
         return "stagemesh doctor  # tasks " + ", ".join(t.task_id for t in decisions) + " need a design decision"
     planning_decisions = [
         t.task_id

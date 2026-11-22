@@ -13,6 +13,7 @@ from test_survivor_wave import Rig, make_store
 import stagemesh.cli as cli_module
 import stagemesh.run_window as rw
 from stagemesh import readiness
+from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.contract_binding import bind_task_contract
 from stagemesh.diagnosis import TOOL_FAILURE_EVENT
 from stagemesh.domain import ExecutionKind, Stage
@@ -254,6 +255,40 @@ def test_external_evidence_block_is_the_next_action_not_an_unrelated_closed_issu
     persisted_output = rw.format_window_report(persisted)
     assert "ended: selected work is blocked on external evidence" in persisted_output
     assert "ended: no eligible work left" not in persisted_output
+
+
+def test_verified_browser_recapture_prints_the_exact_decision_command(tmp_path: Path) -> None:
+    store, _project = make_store(tmp_path, ["138"])
+    store.advance_task("138", Stage.REVIEW)
+    record_block(
+        store,
+        "138",
+        BlockKind.HUMAN_DECISION,
+        "verified exact-candidate browser captures are ready for visual review",
+        stage=str(Stage.REVIEW),
+        candidate_sha="a" * 40,
+        detail={"failure_code": "browser_evidence_decision_required"},
+    )
+    report = rw.WindowReport(
+        "browser-decision",
+        rw.WindowOptions(),
+        waves=[
+            WaveReport(
+                tasks=[
+                    TaskRecord(
+                        "138",
+                        outcome="blocked_needs_decision",
+                        reason="BLOCKED_HUMAN_DECISION: verified captures require a decision",
+                    )
+                ]
+            )
+        ],
+    )
+
+    command = rw.next_command(report, store)
+
+    assert command.startswith("inspect the verified captures for task 138")
+    assert "stagemesh evidence decide-browser --task 138 --decision PASS|FAIL" in command
 
 
 def test_multiple_planning_decisions_never_print_a_fake_combined_command(tmp_path: Path) -> None:

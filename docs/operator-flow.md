@@ -162,7 +162,13 @@ server command, loopback origin, and named viewport/route captures. StageMesh:
 Captures made before CSS-viewport measurement are not trusted. If a legacy
 capture produced a FAIL, StageMesh resolves only that visual finding, clears
 its exact remediation attempt, preserves the candidate, and returns to REVIEW
-for recapture. It never sends that unverified failure back to implementation.
+for recapture. When that invalidated record contains a complete, unredacted
+loopback server command plus bounded routes and viewports, the next run window
+replays that exact recipe automatically. It never guesses a command, replays a
+redacted value, installs a dependency, or sends the unverified failure back to
+implementation. After a successful automatic recapture the task stops as
+`BLOCKED_HUMAN_DECISION` with the exact `decide-browser` command; only the
+visual PASS or FAIL judgment remains manual.
 
 The configured approval authority then records what it observed:
 

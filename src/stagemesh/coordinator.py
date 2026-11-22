@@ -13,6 +13,8 @@ from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
 from .browser_evidence import (
     ensure_browser_evidence_remediation,
+    invalidated_browser_recapture_recipe,
+    recapture_invalidated_browser_evidence,
     retire_unverified_browser_failure,
 )
 from .concurrency import IntegrationLockTimeout
@@ -580,6 +582,52 @@ class Coordinator:
         sha = str(candidate["sha"])
         if self.guard is not None and not self.guard.allow(stage, task_id, sha):
             return 0  # fail closed: the supervisor recorded why (external mutation, evidence not bound to this candidate, ...)
+        recapture_recipe = (
+            invalidated_browser_recapture_recipe(self.store, task_id, sha)
+            if stage is Stage.REVIEW
+            else None
+        )
+        if recapture_recipe is not None:
+            if not self._workspace_intact(
+                task_id,
+                sha,
+                "REVIEW:before_browser_recapture",
+                require=(EvidenceKind.VALIDATION,),
+            ):
+                return 1
+            try:
+                report = recapture_invalidated_browser_evidence(
+                    self.store, self.project, task_id, sha, recapture_recipe
+                )
+            except Exception as exc:  # noqa: BLE001 - external browser boundary must become a typed block
+                record_block(
+                    self.store,
+                    task_id,
+                    BlockKind.RECOVERABLE_OPERATIONAL,
+                    f"automatic exact-candidate browser recapture failed: {str(exc)[:500]}",
+                    stage=str(stage),
+                    candidate_sha=sha,
+                    runtime=runtime_fingerprint(self.project),
+                    detail={"failure_code": "browser_recapture_failed"},
+                )
+                return 1
+            if report is not None:
+                record_block(
+                    self.store,
+                    task_id,
+                    BlockKind.HUMAN_DECISION,
+                    "verified exact-candidate browser captures are ready for the accountable visual PASS or FAIL decision",
+                    stage=str(stage),
+                    candidate_sha=sha,
+                    detail={
+                        "failure_code": "browser_evidence_decision_required",
+                        "capture_id": report["capture_id"],
+                        "requirements": [
+                            "inspect the verified responsive captures and record PASS or FAIL"
+                        ],
+                    },
+                )
+                return 1
         prepare = getattr(self.integrator, "refresh_before_verification", None)
         if stage in {Stage.VALIDATE, Stage.REVIEW} and callable(prepare):
             bound = contract_for_candidate(self.store, task_id, sha, self.project)

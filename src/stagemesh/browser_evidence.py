@@ -22,6 +22,7 @@ import socket
 import sqlite3
 import struct
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,12 +31,13 @@ from typing import Self, cast
 from urllib.parse import urljoin, urlparse
 
 from .audit import record_audit
+from .concurrency import IntegrationLock
 from .config import load_config
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .execution import kill_process_tree, popen_session_kwargs
 from .git import GitWorkspace
 from .persistence import Store
-from .redaction import redact_command_secrets
+from .redaction import REDACTED, redact_command_secrets
 from .remediation import finding_identity
 from .spec_planning import PROVIDER_PROCESS_ENV
 from .workspaces import task_workspace
@@ -43,6 +45,7 @@ from .workspaces import task_workspace
 CAPTURE_EVENT = "task.browser_evidence_captured"
 DECISION_EVENT = "task.browser_evidence_decided"
 INVALIDATED_EVENT = "task.browser_evidence_invalidated"
+AUTOMATIC_RECAPTURE_EVENT = "task.browser_evidence_recaptured"
 CAPTURE_PROTOCOL = "cdp-device-metrics-v1"
 _BROWSER_REQUIREMENT_MARKERS = (
     "browser",
@@ -73,6 +76,18 @@ class CaptureRequest:
     width: int
     height: int
     route: str
+
+
+@dataclass(frozen=True)
+class BrowserRecaptureRecipe:
+    """A replay-safe recipe recovered from one invalidated exact-candidate capture."""
+
+    server_command: tuple[str, ...]
+    base_url: str
+    captures: tuple[CaptureRequest, ...]
+
+
+_AUTOMATIC_RECAPTURE_LOCK = threading.Lock()
 
 
 def browser_evidence_required(reason: str, requirements: tuple[str, ...] | list[str]) -> bool:
@@ -861,6 +876,117 @@ def retire_unverified_browser_failure(
         },
     )
     return True
+
+
+def invalidated_browser_recapture_recipe(
+    store: Store, task_id: str, candidate_sha: str
+) -> BrowserRecaptureRecipe | None:
+    """Recover a bounded recipe only when the current legacy capture was explicitly invalidated.
+
+    The prior command was already operator supplied and is stored in redacted form.  A
+    redacted command cannot be replayed because guessing its missing value would expand
+    authority.  Routes and viewports are reconstructed only from the invalidated
+    candidate-bound artifacts.
+    """
+    capture = latest_browser_capture(store, task_id, candidate_sha)
+    if capture is None or _capture_viewport_proof_error(capture) is None:
+        return None
+    capture_id = capture.get("capture_id")
+    decision = latest_browser_decision(store, task_id, candidate_sha)
+    if (
+        decision is None
+        or decision.get("decision") != "FAIL"
+        or decision.get("capture_id") != capture_id
+    ):
+        return None
+    invalidated = any(
+        event.get("candidate_sha") == candidate_sha
+        and event.get("capture_id") == capture_id
+        for event in _event_payloads(store, INVALIDATED_EVENT, task_id)
+    )
+    if not invalidated:
+        return None
+    command_text = capture.get("server_command")
+    if (
+        not isinstance(command_text, str)
+        or not command_text.strip()
+        or REDACTED in command_text
+    ):
+        return None
+    try:
+        command = parse_server_command(json.dumps(shlex.split(command_text)))
+        base_url = _loopback_base_url(str(capture.get("base_origin", "")))
+    except (BrowserEvidenceError, ValueError):
+        return None
+    artifacts = capture.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return None
+    requests: list[CaptureRequest] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            return None
+        name, route = artifact.get("name"), artifact.get("route")
+        viewport = artifact.get("requested_viewport") or artifact.get("viewport")
+        if (
+            not isinstance(name, str)
+            or not isinstance(route, str)
+            or not isinstance(viewport, str)
+        ):
+            return None
+        try:
+            requests.append(parse_capture_request(f"{name}={viewport}:{route}"))
+        except BrowserEvidenceError:
+            return None
+    if len({request.name for request in requests}) != len(requests):
+        return None
+    return BrowserRecaptureRecipe(command, base_url, tuple(requests))
+
+
+def recapture_invalidated_browser_evidence(
+    store: Store,
+    project: Path,
+    task_id: str,
+    candidate_sha: str,
+    expected_recipe: BrowserRecaptureRecipe | None = None,
+) -> dict[str, object] | None:
+    """Replay an invalidated legacy capture without provider or operator intervention."""
+    try:
+        with _AUTOMATIC_RECAPTURE_LOCK:
+            lock_path = project / ".stagemesh" / "locks" / f"browser-evidence-{_safe_task_id(task_id)}.lock"
+            with IntegrationLock(lock_path, timeout_seconds=60.0).hold(
+                f"browser-recapture:{task_id}"
+            ):
+                # Re-read under the process lock. Another StageMesh command may have
+                # completed the capture while this process waited.
+                recipe = invalidated_browser_recapture_recipe(store, task_id, candidate_sha)
+                if recipe is None or (
+                    expected_recipe is not None and recipe != expected_recipe
+                ):
+                    return None
+                report = capture_browser_evidence(
+                    store,
+                    project,
+                    task_id,
+                    server_command=recipe.server_command,
+                    base_url=recipe.base_url,
+                    captures=recipe.captures,
+                )
+                record_audit(
+                    store,
+                    AUTOMATIC_RECAPTURE_EVENT,
+                    {
+                        "task_id": task_id,
+                        "candidate_sha": candidate_sha,
+                        "capture_id": report["capture_id"],
+                        "source": "invalidated_exact_candidate_recipe",
+                        "artifact_count": len(recipe.captures),
+                    },
+                )
+    except OSError as exc:
+        raise BrowserEvidenceError(
+            f"automatic browser recapture could not create its local evidence: {type(exc).__name__}"
+        ) from exc
+    return report
 
 
 def decide_browser_evidence(
