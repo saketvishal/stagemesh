@@ -11,7 +11,10 @@ from .audit import record_audit
 from .auto_plan import outside_label_selector
 from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
-from .browser_evidence import ensure_browser_evidence_remediation
+from .browser_evidence import (
+    ensure_browser_evidence_remediation,
+    retire_unverified_browser_failure,
+)
 from .concurrency import IntegrationLockTimeout
 from .config import ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
@@ -1220,8 +1223,11 @@ class Coordinator:
         latest = self.store.latest_task_remediation(task_id)
         candidate = self.store.latest_candidate(task_id)
         if candidate is not None:
+            candidate_sha = str(candidate["sha"])
+            if retire_unverified_browser_failure(self.store, task_id, candidate_sha):
+                return True
             browser_remediation = ensure_browser_evidence_remediation(
-                self.store, task_id, str(candidate["sha"])
+                self.store, task_id, candidate_sha
             )
             if browser_remediation is not None:
                 latest = browser_remediation
