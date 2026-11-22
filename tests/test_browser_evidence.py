@@ -22,7 +22,15 @@ import stagemesh.browser_evidence as browser_evidence_module
 import stagemesh.cli as cli_module
 import stagemesh.coordinator as coordinator_module
 from stagemesh.audit import record_audit
-from stagemesh.block_kinds import BlockKind, classify_block, record_block
+from stagemesh.block_kinds import (
+    MAX_REENTRIES,
+    REENTER_EVENT,
+    BlockKind,
+    classify_block,
+    record_block,
+    reenter_blocked_task,
+    reentry_refusal,
+)
 from stagemesh.browser_evidence import (
     CAPTURE_EVENT,
     CAPTURE_PROTOCOL,
@@ -674,6 +682,55 @@ def test_verified_capture_recorded_after_persisted_browser_findings_gets_one_bou
     digest = _record_verified_capture(
         project, store, TASK, sha, capture_id="browser-after-findings"
     )
+    for attempt in range(1, MAX_REENTRIES + 1):
+        record_audit(
+            store,
+            REENTER_EVENT,
+            {
+                "task_id": TASK,
+                "attempt": attempt,
+                "of": MAX_REENTRIES,
+                "runtime": f"legacy-runtime-{attempt}",
+            },
+        )
+    record_block(
+        store,
+        TASK,
+        BlockKind.EXTERNAL_DEPENDENCY,
+        "external evidence is required for the existing candidate",
+        stage=str(Stage.REVIEW),
+        candidate_sha=sha,
+        runtime="legacy-runtime-3",
+        detail={
+            "failure_code": "external_evidence_required",
+            "requirements": [
+                "360-pixel browser review",
+                "internal acceptance record tied to the candidate",
+            ],
+        },
+    )
+
+    assert reentry_refusal(store, TASK, "upgraded-runtime") is None
+    migration = reenter_blocked_task(store, TASK, "upgraded-runtime")
+    assert migration is not None
+    assert (migration["attempt"], migration["of"]) == (1, 1)
+    assert migration["budget_class"] == "verified_browser_evidence_upgrade"
+
+    record_block(
+        store,
+        TASK,
+        BlockKind.EXTERNAL_DEPENDENCY,
+        "external evidence is required for the existing candidate",
+        stage=str(Stage.REVIEW),
+        candidate_sha=sha,
+        runtime="upgraded-runtime",
+        detail={"failure_code": "external_evidence_required"},
+    )
+    refusal = reentry_refusal(store, TASK, "upgraded-runtime")
+    assert refusal is not None
+    assert "BLOCKED_EXTERNAL_DEPENDENCY" in refusal
+    assert reenter_blocked_task(store, TASK, "upgraded-runtime") is None
+    assert store.unblock_task(TASK)
 
     class ExactBrowserReviewer:
         name = "codex"

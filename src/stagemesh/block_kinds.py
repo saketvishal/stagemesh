@@ -31,6 +31,7 @@ from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 
 BLOCK_EVENT = "task.block_classified"
 REENTER_EVENT = "task.block_reentered"
+BROWSER_EVIDENCE_UPGRADE_EVENT = "task.browser_evidence_upgrade_reentered"
 MAX_REENTRIES = 3
 
 
@@ -147,6 +148,21 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
                     f"{reason} [reclassified: review and validation evidence must be reconciled by the current runtime]",
                     "reclassified",
                     payload.get("runtime"),
+                    recorded.stage,
+                    recorded.candidate_sha,
+                    recorded.failure_code,
+                    recorded.requirements,
+                )
+            if (
+                kind is BlockKind.EXTERNAL_DEPENDENCY
+                and payload.get("failure_code") == "external_evidence_required"
+                and _browser_evidence_upgrade(store, task_id, recorded) is not None
+            ):
+                return BlockInfo(
+                    BlockKind.RECOVERABLE_OPERATIONAL,
+                    f"{reason} [reclassified: newer verified browser evidence now authorizes one independent re-review]",
+                    "reclassified",
+                    recorded.runtime,
                     recorded.stage,
                     recorded.candidate_sha,
                     recorded.failure_code,
@@ -283,6 +299,42 @@ def _last_reentry_runtime(store: Store, task_id: str) -> str | None:
     return None
 
 
+def _browser_evidence_upgrade(
+    store: Store, task_id: str, info: BlockInfo
+) -> dict[str, object] | None:
+    """The exact new capture that may cross one legacy blocked-state budget."""
+    if (
+        info.failure_code != "external_evidence_required"
+        or not info.candidate_sha
+    ):
+        return None
+    from .browser_evidence import browser_evidence_recheck_requirement
+    from .review_disposition import unresolved_adverse_review_findings
+
+    project = (
+        store.db_path.parent.parent
+        if store.db_path.parent.name == ".stagemesh"
+        else store.db_path.parent
+    )
+    pending = unresolved_adverse_review_findings(
+        store, task_id, info.candidate_sha
+    )
+    requirement = browser_evidence_recheck_requirement(
+        store, project, task_id, info.candidate_sha, pending
+    )
+    if requirement is None:
+        return None
+    capture_id = requirement.get("capture_id")
+    for row in store.task_audit_events(BROWSER_EVIDENCE_UPGRADE_EVENT, task_id):
+        payload = _loads(row["payload"])
+        if (
+            payload.get("candidate_sha") == info.candidate_sha
+            and payload.get("capture_id") == capture_id
+        ):
+            return None
+    return requirement
+
+
 def reentry_refusal(store: Store, task_id: str, fingerprint: str) -> str | None:
     """Why a BLOCKED task is not reconsidered right now, or None when it is eligible."""
     task = store.get_task(task_id)
@@ -295,6 +347,8 @@ def reentry_refusal(store: Store, task_id: str, fingerprint: str) -> str | None:
         return f"{info.kind.value}: {info.reason}"
     if store.has_active_claim(task_id) or any(row["task_id"] == task_id for row in store.running_executions()):
         return "has an active claim or running execution"
+    if _browser_evidence_upgrade(store, task_id, info) is not None:
+        return None
     used = reentries_used(store, task_id)
     if used >= MAX_REENTRIES:
         return f"{used} automatic re-entries are spent (limit {MAX_REENTRIES}); `retry-task` grants a fresh budget"
@@ -305,12 +359,33 @@ def reentry_refusal(store: Store, task_id: str, fingerprint: str) -> str | None:
 
 def reenter_blocked_task(store: Store, task_id: str, fingerprint: str) -> dict[str, Any] | None:
     """Return an eligible recoverable-operational task to OPEN with a fresh remediation budget. History, candidates and evidence stay."""
+    info = classify_block(store, task_id)
+    browser_upgrade = (
+        _browser_evidence_upgrade(store, task_id, info) if info is not None else None
+    )
     if reentry_refusal(store, task_id, fingerprint) is not None:
         return None
-    info = classify_block(store, task_id)
     assert info is not None
     task = store.get_task(task_id)
     stage = str(task["stage"]) if task is not None else None
+    if browser_upgrade is not None:
+        if not store.unblock_task(task_id):
+            return None
+        entry = {
+            "task_id": task_id,
+            "auto_recovery": "verified_browser_evidence_upgrade",
+            "budget_class": "verified_browser_evidence_upgrade",
+            "attempt": 1,
+            "of": 1,
+            "stage": stage,
+            "candidate_sha": info.candidate_sha,
+            "capture_id": browser_upgrade["capture_id"],
+            "was_blocked_because": info.reason[:300],
+            "block_source": info.source,
+            "runtime": fingerprint,
+        }
+        record_audit(store, BROWSER_EVIDENCE_UPGRADE_EVENT, entry)
+        return entry
     attempt = reentries_used(store, task_id) + 1  # counted before the unblock, which looks like an operator reset until our event follows
     if not store.unblock_task(task_id):
         return None
