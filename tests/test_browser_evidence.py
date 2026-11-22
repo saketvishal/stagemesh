@@ -10,6 +10,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -17,9 +18,11 @@ from pathlib import Path
 import pytest
 from test_bounded_execution import TASK, _setup
 
+import stagemesh.browser_evidence as browser_evidence_module
 import stagemesh.cli as cli_module
+import stagemesh.coordinator as coordinator_module
 from stagemesh.audit import record_audit
-from stagemesh.block_kinds import BlockKind, record_block
+from stagemesh.block_kinds import BlockKind, classify_block, record_block
 from stagemesh.browser_evidence import (
     CAPTURE_EVENT,
     CAPTURE_PROTOCOL,
@@ -39,17 +42,22 @@ from stagemesh.browser_evidence import (
     _safe_task_id,
     browser_evidence_accepted,
     browser_evidence_context,
+    capture_browser_evidence,
     decide_browser_evidence,
+    invalidated_browser_recapture_recipe,
     parse_capture_request,
     parse_server_command,
+    recapture_invalidated_browser_evidence,
     retire_unverified_browser_failure,
 )
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.execution import kill_process_tree, popen_session_kwargs
+from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.providers import _remediation_prompt
 from stagemesh.remediation import remediation_context
+from stagemesh.workspaces import task_workspace
 
 SHA = "a" * 40
 
@@ -283,6 +291,78 @@ def test_live_browser_capture_uses_exact_css_viewport() -> None:
         shutil.rmtree(live_root, ignore_errors=True)
 
 
+def test_live_invalidated_recipe_is_replayed_without_visible_browser(tmp_path: Path) -> None:
+    if os.environ.get("STAGEMESH_LIVE_BROWSER_TEST") != "1":
+        pytest.skip("set STAGEMESH_LIVE_BROWSER_TEST=1 for installed-browser acceptance")
+    project, store = _setup(tmp_path)
+    sha = GitWorkspace(project).head()
+    workspace = task_workspace(project, TASK)
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    GitWorkspace(project).run("worktree", "add", "--detach", str(workspace), sha)
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    port = _available_debug_port()
+    command = (
+        sys.executable,
+        "-m",
+        "http.server",
+        str(port),
+        "--bind",
+        "127.0.0.1",
+    )
+    first = capture_browser_evidence(
+        store,
+        project,
+        TASK,
+        server_command=command,
+        base_url=f"http://127.0.0.1:{port}/",
+        captures=(CaptureRequest("mobile", 360, 800, "/docs/a.md"),),
+    )
+    legacy = json.loads(list(store.task_audit_events(CAPTURE_EVENT, TASK))[-1]["payload"])
+    assert legacy["capture_id"] == first["capture_id"]
+    legacy.pop("capture_protocol")
+    for artifact in legacy["artifacts"]:
+        artifact.pop("requested_viewport")
+        artifact.pop("css_viewport")
+    with store.conn:
+        store.conn.execute("DELETE FROM audit_events WHERE event_type=?", (CAPTURE_EVENT,))
+    record_audit(store, CAPTURE_EVENT, legacy)
+    record_audit(
+        store,
+        INVALIDATED_EVENT,
+        {
+            "task_id": TASK,
+            "candidate_sha": sha,
+            "capture_id": first["capture_id"],
+            "reason": "legacy capture did not measure the CSS viewport",
+        },
+    )
+    record_audit(
+        store,
+        DECISION_EVENT,
+        {
+            "task_id": TASK,
+            "candidate_sha": sha,
+            "capture_id": first["capture_id"],
+            "decision": "FAIL",
+            "reason": "legacy screenshot appeared clipped",
+        },
+    )
+
+    recipe = invalidated_browser_recapture_recipe(store, TASK, sha)
+    assert recipe is not None and recipe.server_command == command
+    report = recapture_invalidated_browser_evidence(
+        store, project, TASK, sha, recipe
+    )
+
+    assert report is not None and report["capture_protocol"] == CAPTURE_PROTOCOL
+    artifacts = report["artifacts"]
+    assert isinstance(artifacts, list)
+    artifact = artifacts[0]
+    assert artifact["requested_viewport"] == artifact["css_viewport"] == "360x800"
+    assert artifact["viewport"] == "360x800"
+
+
 def test_failed_browser_decision_routes_exact_candidate_back_to_implementation(
     tmp_path: Path,
 ) -> None:
@@ -372,6 +452,8 @@ def test_legacy_unmeasured_browser_fail_is_retired_instead_of_reimplemented(
     for artifact in capture["artifacts"]:
         artifact.pop("requested_viewport")
         artifact.pop("css_viewport")
+    capture["base_origin"] = "http://127.0.0.1:4179/"
+    capture["server_command"] = "'C:\\Program Files\\nodejs\\npm.cmd' run dev -- --port 4179"
     with store.conn:
         store.conn.execute("DELETE FROM audit_events WHERE event_type=?", (CAPTURE_EVENT,))
     record_audit(store, CAPTURE_EVENT, capture)
@@ -395,6 +477,21 @@ def test_legacy_unmeasured_browser_fail_is_retired_instead_of_reimplemented(
 
     assert retire_unverified_browser_failure(store, TASK, SHA) is True
 
+    recipe = invalidated_browser_recapture_recipe(store, TASK, SHA)
+    assert recipe is not None
+    assert recipe.server_command == (
+        r"C:\Program Files\nodejs\npm.cmd",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "4179",
+    )
+    assert recipe.base_url == "http://127.0.0.1:4179/"
+    assert recipe.captures == (CaptureRequest("sources-mobile", 360, 800, "/sources"),)
+    block = classify_block(store, TASK)
+    assert block is not None and block.kind is BlockKind.RECOVERABLE_OPERATIONAL
+
     task = store.get_task(TASK)
     assert (task["stage"], task["status"]) == (Stage.REVIEW, TaskStatus.BLOCKED)
     assert store.get_finding(finding_id)["status"] == "RESOLVED"
@@ -406,6 +503,170 @@ def test_legacy_unmeasured_browser_fail_is_retired_instead_of_reimplemented(
     # Re-running recovery is idempotent and cannot reopen implementation.
     assert retire_unverified_browser_failure(store, TASK, SHA) is False
     assert Coordinator(store, project)._reroute_evidence_remediation(TASK) is False
+
+
+def test_invalidated_capture_with_redacted_command_is_not_replayed(tmp_path: Path) -> None:
+    project, store = _blocked_capture(tmp_path)
+    capture = json.loads(list(store.task_audit_events(CAPTURE_EVENT, TASK))[-1]["payload"])
+    capture.pop("capture_protocol")
+    for artifact in capture["artifacts"]:
+        artifact.pop("requested_viewport")
+        artifact.pop("css_viewport")
+    capture["base_origin"] = "http://127.0.0.1:4179/"
+    capture["server_command"] = "npm run dev -- --token ***REDACTED***"
+    with store.conn:
+        store.conn.execute("DELETE FROM audit_events WHERE event_type=?", (CAPTURE_EVENT,))
+    record_audit(store, CAPTURE_EVENT, capture)
+    record_audit(
+        store,
+        DECISION_EVENT,
+        {
+            "task_id": TASK,
+            "candidate_sha": SHA,
+            "capture_id": "browser-test",
+            "decision": "FAIL",
+        },
+    )
+
+    assert retire_unverified_browser_failure(store, TASK, SHA) is True
+    assert invalidated_browser_recapture_recipe(store, TASK, SHA) is None
+    block = classify_block(store, TASK)
+    assert block is not None and block.kind is BlockKind.EXTERNAL_DEPENDENCY
+    assert project.is_dir()
+
+
+def test_review_stage_automatically_recaptures_then_waits_for_accountable_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _setup(tmp_path)
+    sha = GitWorkspace(project).head()
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    order: list[str] = []
+    monkeypatch.setattr(
+        coordinator_module,
+        "invalidated_browser_recapture_recipe",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(
+        Coordinator,
+        "_workspace_intact",
+        lambda *_args, **_kwargs: order.append("workspace") or True,
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "recapture_invalidated_browser_evidence",
+        lambda *_args: order.append("recapture") or {"capture_id": "browser-verified"},
+    )
+
+    assert Coordinator(store, project).tick() == 1
+    assert order == ["workspace", "recapture"]
+
+    task = store.get_task(TASK)
+    assert (task["stage"], task["status"]) == (Stage.REVIEW, TaskStatus.BLOCKED)
+    block = classify_block(store, TASK)
+    assert block is not None and block.kind is BlockKind.HUMAN_DECISION
+    assert block.failure_code == "browser_evidence_decision_required"
+
+
+def test_review_stage_does_not_recapture_when_candidate_integrity_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _setup(tmp_path)
+    sha = GitWorkspace(project).head()
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    monkeypatch.setattr(
+        coordinator_module,
+        "invalidated_browser_recapture_recipe",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(Coordinator, "_workspace_intact", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        coordinator_module,
+        "recapture_invalidated_browser_evidence",
+        lambda *_args: pytest.fail("recapture must not run before workspace integrity"),
+    )
+
+    assert Coordinator(store, project).tick() == 1
+
+
+def test_unexpected_browser_failure_becomes_recoverable_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _setup(tmp_path)
+    sha = GitWorkspace(project).head()
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    monkeypatch.setattr(
+        coordinator_module,
+        "invalidated_browser_recapture_recipe",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(Coordinator, "_workspace_intact", lambda *_args, **_kwargs: True)
+
+    def fail_recapture(*_args: object) -> None:
+        raise RuntimeError("unexpected debugger transport failure")
+
+    monkeypatch.setattr(
+        coordinator_module, "recapture_invalidated_browser_evidence", fail_recapture
+    )
+
+    assert Coordinator(store, project).tick() == 1
+    block = classify_block(store, TASK)
+    assert block is not None and block.kind is BlockKind.RECOVERABLE_OPERATIONAL
+    assert block.failure_code == "browser_recapture_failed"
+
+
+def test_automatic_recapture_uses_project_cross_process_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _setup(tmp_path)
+    recipe = browser_evidence_module.BrowserRecaptureRecipe(
+        ("python", "-m", "http.server"),
+        "http://127.0.0.1:4179/",
+        (CaptureRequest("mobile", 360, 800, "/"),),
+    )
+    held: list[tuple[Path, str]] = []
+
+    class FakeLock:
+        def __init__(self, path: Path, timeout_seconds: float):
+            assert timeout_seconds == 60.0
+            self.path = path
+
+        def hold(self, owner: str):
+            class Held:
+                def __enter__(inner_self) -> None:
+                    held.append((self.path, owner))
+
+                def __exit__(inner_self, *_args: object) -> None:
+                    return None
+
+            return Held()
+
+    monkeypatch.setattr(browser_evidence_module, "IntegrationLock", FakeLock)
+    monkeypatch.setattr(
+        browser_evidence_module,
+        "invalidated_browser_recapture_recipe",
+        lambda *_args: recipe,
+    )
+    monkeypatch.setattr(
+        browser_evidence_module,
+        "capture_browser_evidence",
+        lambda *_args, **_kwargs: {"capture_id": "verified"},
+    )
+
+    report = recapture_invalidated_browser_evidence(
+        store, project, TASK, SHA, recipe
+    )
+
+    assert report == {"capture_id": "verified"}
+    assert held == [
+        (
+            project / ".stagemesh" / "locks" / f"browser-evidence-{TASK}.lock",
+            f"browser-recapture:{TASK}",
+        )
+    ]
 
 
 def test_passed_browser_decision_is_candidate_bound_and_still_requires_retry(
