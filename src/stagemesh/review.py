@@ -1051,6 +1051,9 @@ class Reviewer:
                         f"{contract_prompt(contract)}\n"
                         + planning_context + research_context + validation_context + browser_context + prior_context
                         + same_candidate_context +
+                        "This completed candidate-bound independent review is the internal acceptance record. Do not fail "
+                        "merely because no separate internal-acceptance artifact existed before this review; fail only when "
+                        "the technical evidence needed to reach a verdict is still missing. "
                         "Inspect the candidate, then reply with ONE final JSON verdict and nothing else (no progress text): "
                         + json.dumps(pass_verdict, separators=(",", ":")) + ", or "
                         "{\"decision\":\"FAIL_WITH_FINDINGS\",\"findings\":[{\"severity\":\"error\",\"message\":\"concrete defect\","

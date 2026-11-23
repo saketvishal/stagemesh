@@ -32,6 +32,7 @@ from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 BLOCK_EVENT = "task.block_classified"
 REENTER_EVENT = "task.block_reentered"
 BROWSER_EVIDENCE_UPGRADE_EVENT = "task.browser_evidence_upgrade_reentered"
+BROWSER_EVIDENCE_EXPANSION_REENTRY_EVENT = "task.browser_evidence_expansion_reentered"
 MAX_REENTRIES = 3
 
 
@@ -156,11 +157,14 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
             if (
                 kind is BlockKind.EXTERNAL_DEPENDENCY
                 and payload.get("failure_code") == "external_evidence_required"
-                and _browser_evidence_upgrade(store, task_id, recorded) is not None
+                and (
+                    _browser_evidence_upgrade(store, task_id, recorded) is not None
+                    or _browser_evidence_expansion(store, task_id, recorded) is not None
+                )
             ):
                 return BlockInfo(
                     BlockKind.RECOVERABLE_OPERATIONAL,
-                    f"{reason} [reclassified: newer verified browser evidence now authorizes one independent re-review]",
+                    f"{reason} [reclassified: StageMesh can collect or review the missing bounded headless evidence]",
                     "reclassified",
                     recorded.runtime,
                     recorded.stage,
@@ -335,6 +339,39 @@ def _browser_evidence_upgrade(
     return requirement
 
 
+def _browser_evidence_expansion(
+    store: Store, task_id: str, info: BlockInfo
+) -> Any | None:
+    """The retained recipe that can safely collect deeper same-origin UI states."""
+    if info.failure_code != "external_evidence_required" or not info.candidate_sha:
+        return None
+    from .browser_evidence import browser_evidence_expansion_recipe
+
+    project = (
+        store.db_path.parent.parent
+        if store.db_path.parent.name == ".stagemesh"
+        else store.db_path.parent
+    )
+    recipe = browser_evidence_expansion_recipe(
+        store,
+        project,
+        task_id,
+        info.candidate_sha,
+        info.requirements,
+    )
+    if recipe is None:
+        return None
+    for row in store.task_audit_events(BROWSER_EVIDENCE_EXPANSION_REENTRY_EVENT, task_id):
+        payload = _loads(row["payload"])
+        if (
+            payload.get("candidate_sha") == info.candidate_sha
+            and payload.get("source_capture_id") == recipe.source_capture_id
+            and payload.get("finding_digest") == recipe.finding_digest
+        ):
+            return None
+    return recipe
+
+
 def reentry_refusal(store: Store, task_id: str, fingerprint: str) -> str | None:
     """Why a BLOCKED task is not reconsidered right now, or None when it is eligible."""
     task = store.get_task(task_id)
@@ -349,6 +386,8 @@ def reentry_refusal(store: Store, task_id: str, fingerprint: str) -> str | None:
         return "has an active claim or running execution"
     if _browser_evidence_upgrade(store, task_id, info) is not None:
         return None
+    if _browser_evidence_expansion(store, task_id, info) is not None:
+        return None
     used = reentries_used(store, task_id)
     if used >= MAX_REENTRIES:
         return f"{used} automatic re-entries are spent (limit {MAX_REENTRIES}); `retry-task` grants a fresh budget"
@@ -362,6 +401,9 @@ def reenter_blocked_task(store: Store, task_id: str, fingerprint: str) -> dict[s
     info = classify_block(store, task_id)
     browser_upgrade = (
         _browser_evidence_upgrade(store, task_id, info) if info is not None else None
+    )
+    browser_expansion = (
+        _browser_evidence_expansion(store, task_id, info) if info is not None else None
     )
     if reentry_refusal(store, task_id, fingerprint) is not None:
         return None
@@ -385,6 +427,25 @@ def reenter_blocked_task(store: Store, task_id: str, fingerprint: str) -> dict[s
             "runtime": fingerprint,
         }
         record_audit(store, BROWSER_EVIDENCE_UPGRADE_EVENT, entry)
+        return entry
+    if browser_expansion is not None:
+        if not store.unblock_task(task_id):
+            return None
+        entry = {
+            "task_id": task_id,
+            "auto_recovery": "verified_browser_evidence_expansion",
+            "budget_class": "verified_browser_evidence_expansion",
+            "attempt": 1,
+            "of": 1,
+            "stage": stage,
+            "candidate_sha": info.candidate_sha,
+            "source_capture_id": browser_expansion.source_capture_id,
+            "finding_digest": browser_expansion.finding_digest,
+            "was_blocked_because": info.reason[:300],
+            "block_source": info.source,
+            "runtime": fingerprint,
+        }
+        record_audit(store, BROWSER_EVIDENCE_EXPANSION_REENTRY_EVENT, entry)
         return entry
     attempt = reentries_used(store, task_id) + 1  # counted before the unblock, which looks like an operator reset until our event follows
     if not store.unblock_task(task_id):

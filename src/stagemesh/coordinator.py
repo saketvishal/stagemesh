@@ -12,8 +12,11 @@ from .auto_plan import outside_label_selector
 from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
 from .browser_evidence import (
+    BrowserEvidenceError,
+    browser_evidence_expansion_recipe,
     browser_evidence_recheck_requirement,
     ensure_browser_evidence_remediation,
+    expand_browser_evidence,
     invalidated_browser_recapture_recipe,
     recapture_invalidated_browser_evidence,
     retire_unverified_browser_failure,
@@ -710,6 +713,45 @@ class Coordinator:
             reconcile_withdrawals(self.store, task_id, sha, bound.digest)
             if not self._review_satisfied(task_id, sha, bound.digest):
                 pending = AdverseSummary(tuple(unresolved_adverse_review_findings(self.store, task_id, sha)))
+                expansion = browser_evidence_expansion_recipe(
+                    self.store,
+                    self.project,
+                    task_id,
+                    sha,
+                    [str(item.get("message") or "") for item in pending.findings],
+                )
+                if expansion is not None:
+                    try:
+                        report = expand_browser_evidence(
+                            self.store, self.project, task_id, sha, expansion
+                        )
+                    except BrowserEvidenceError as exc:
+                        record_block(
+                            self.store,
+                            task_id,
+                            BlockKind.EXTERNAL_DEPENDENCY,
+                            "automatic headless browser evidence expansion could not satisfy the retained finding: "
+                            + str(exc)[:500],
+                            stage=str(Stage.REVIEW),
+                            candidate_sha=sha,
+                            runtime=runtime_fingerprint(self.project),
+                            detail={
+                                "failure_code": "browser_evidence_expansion_failed",
+                                "requirements": [str(item.get("message") or "") for item in pending.findings][:20],
+                            },
+                        )
+                        return 1
+                    record_audit(
+                        self.store,
+                        "task.browser_evidence_expansion_completed",
+                        {
+                            "task_id": task_id,
+                            "candidate_sha": sha,
+                            "capture_id": report["capture_id"],
+                            "source_capture_id": expansion.source_capture_id,
+                        },
+                    )
+                    return 1
                 browser_recheck = browser_evidence_recheck_requirement(
                     self.store, self.project, task_id, sha, pending.findings
                 )

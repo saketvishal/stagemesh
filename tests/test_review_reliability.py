@@ -122,6 +122,7 @@ def test_complete_pass_is_accepted_and_bound_to_the_exact_candidate_and_contract
     assert (payload["candidate_sha"], payload["contract_hash"], payload["contract_version"]) == (candidate, bound.digest, bound.version)
     assert payload["independent_reviewer"] is True and payload["review_execution_invoked"] is True
     assert store.has_bound_evidence(UNIT_TASK, candidate, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED)
+    assert "This completed candidate-bound independent review is the internal acceptance record" in adapter.prompts[0]
 
 
 def test_browser_capture_pass_requires_exact_independent_review_receipt(tmp_path: Path) -> None:
