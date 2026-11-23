@@ -1,10 +1,10 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.48 gives existing blocked
-tasks one evidence-specific migration when their verified browser capture was
-recorded only after the older generic recovery budget was exhausted.
-See the [0.6.48 release notes](releases/0.6.48.md),
+files as reinstallable package points. Version 0.6.49 lets an existing retained
+candidate collect bounded missing browser states and resume independent review.
+See the [0.6.49 release notes](releases/0.6.49.md),
+[0.6.48 release notes](releases/0.6.48.md),
 [0.6.47 release notes](releases/0.6.47.md),
 [0.6.46 release notes](releases/0.6.46.md),
 [0.6.45 release notes](releases/0.6.45.md),
@@ -47,14 +47,14 @@ See the [0.6.48 release notes](releases/0.6.48.md),
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.48` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.49` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.48
+python -m pip install --no-cache-dir stagemesh==0.6.49
 ```
 
-The preceding `0.6.47` release remains available for rollback. The older
+The preceding `0.6.48` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -63,6 +63,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.49`: one-time, same-origin headless evidence expansion for retained browser-review candidates, followed by receipt-bound independent re-review.
 - `0.6.48`: one-time migration for exhausted legacy recovery budgets when newer verified browser evidence authorizes exact-candidate re-review.
 - `0.6.47`: verified browser evidence recorded after persisted evidence findings authorizes one receipt-bound re-review by the originating reviewer.
 - `0.6.46`: verified browser captures continue through hash-bound independent review without a redundant operator approval.

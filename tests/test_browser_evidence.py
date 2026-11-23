@@ -44,15 +44,18 @@ from stagemesh.browser_evidence import (
     _close_debug_browser,
     _debugger_target,
     _DebuggerClient,
+    _expanded_capture_requests,
     _headless_command,
     _loopback_base_url,
     _remove_profile,
     _safe_task_id,
     browser_evidence_accepted,
     browser_evidence_context,
+    browser_evidence_expansion_recipe,
     browser_review_requirement,
     capture_browser_evidence,
     decide_browser_evidence,
+    expand_browser_evidence,
     invalidated_browser_recapture_recipe,
     materialize_browser_review_bundle,
     parse_capture_request,
@@ -102,6 +105,7 @@ def _record_verified_capture(
     candidate_sha: str,
     *,
     capture_id: str = "browser-test",
+    replayable: bool = False,
 ) -> str:
     artifact = (
         project
@@ -117,10 +121,7 @@ def _record_verified_capture(
         b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 360, 800)
     )
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    record_audit(
-        store,
-        CAPTURE_EVENT,
-        {
+    payload: dict[str, object] = {
             "task_id": task_id,
             "candidate_sha": candidate_sha,
             "capture_id": capture_id,
@@ -138,8 +139,15 @@ def _record_verified_capture(
                     "bytes": artifact.stat().st_size,
                 }
             ],
-        },
-    )
+        }
+    if replayable:
+        payload.update(
+            {
+                "base_origin": "http://127.0.0.1:4179/",
+                "server_command": "python -m http.server 4179 --bind 127.0.0.1",
+            }
+        )
+    record_audit(store, CAPTURE_EVENT, payload)
     return digest
 
 
@@ -225,6 +233,70 @@ class _FakeDebugger:
         assert method == "Page.loadEventFired"
 
 
+class _ExpansionDebugger:
+    def __init__(self) -> None:
+        self.route = "/"
+
+    def call(
+        self, method: str, params: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        if method == "Page.navigate":
+            assert params is not None
+            self.route = "/" + str(params["url"]).split("/", 3)[-1]
+            return {}
+        if method == "Runtime.evaluate":
+            assert params is not None
+            expression = str(params["expression"])
+            if "const links" not in expression:
+                raise AssertionError("unexpected Runtime.evaluate during route discovery")
+            if self.route == "/sources":
+                value = {
+                    "links": [
+                        {
+                            "route": "/sources/readings/DOC-B/2/4",
+                            "text": "Read DOC-B page 2 paragraph 4",
+                        },
+                        {"route": "/settings", "text": "Settings"},
+                        {"route": "https://example.com/out", "text": "External"},
+                    ],
+                    "dialogs": [],
+                }
+            elif self.route == "/sources/readings/DOC-B/2/4":
+                value = {"links": [], "dialogs": ["Open larger page"]}
+            else:
+                value = {"links": [], "dialogs": []}
+            return {"result": {"value": value}}
+        return {}
+
+    def wait_event(self, method: str, timeout_seconds: float = 15.0) -> None:
+        assert method == "Page.loadEventFired"
+
+
+def test_browser_expansion_discovers_relevant_same_origin_route_and_declared_dialog() -> None:
+    captures = (
+        CaptureRequest("home-mobile", 360, 800, "/"),
+        CaptureRequest("sources-mobile", 360, 800, "/sources"),
+        CaptureRequest("home-desktop", 1280, 900, "/"),
+        CaptureRequest("sources-desktop", 1280, 900, "/sources"),
+    )
+
+    expanded = _expanded_capture_requests(
+        _ExpansionDebugger(),  # type: ignore[arg-type]
+        "http://127.0.0.1:4179/",
+        captures,
+        (
+            "The selected DOC-B page 2 paragraph 4 reading and enlarged preview are missing",
+        ),
+    )
+
+    assert expanded[:4] == captures
+    assert {(item.route, item.dialog_trigger) for item in expanded[4:]} == {
+        ("/sources/readings/DOC-B/2/4", None),
+        ("/sources/readings/DOC-B/2/4", "Open larger page"),
+    }
+    assert len(expanded) == 8
+
+
 def test_capture_overrides_and_measures_css_viewport_before_screenshot(tmp_path: Path) -> None:
     client = _FakeDebugger()
 
@@ -247,6 +319,43 @@ def test_capture_overrides_and_measures_css_viewport_before_screenshot(tmp_path:
     assert metrics is not None and metrics["width"] == 360 and metrics["height"] == 800
     assert artifact["requested_viewport"] == artifact["css_viewport"] == "360x800"
     assert artifact["viewport"] == "360x800"
+
+
+def test_capture_opens_only_the_exact_declared_dialog_before_screenshot(
+    tmp_path: Path,
+) -> None:
+    class DialogDebugger(_FakeDebugger):
+        def call(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            if method == "Runtime.evaluate" and params is not None:
+                expression = str(params.get("expression", ""))
+                if "aria-haspopup" in expression:
+                    self.calls.append((method, params))
+                    assert '"open larger page"' in expression
+                    return {"result": {"value": {"clicked": True, "dialog": True}}}
+            return super().call(method, params)
+
+    client = DialogDebugger()
+    artifact = _capture_one(
+        client,  # type: ignore[arg-type]
+        tmp_path,
+        "http://127.0.0.1:4179/",
+        CaptureRequest(
+            "reading-dialog",
+            360,
+            800,
+            "/sources/readings/DOC-B/2/4",
+            "Open larger page",
+        ),
+    )
+
+    assert artifact["interaction"] == {
+        "kind": "declared_dialog_trigger",
+        "accessible_name": "Open larger page",
+    }
+    methods = [method for method, _params in client.calls]
+    assert methods.index("Runtime.evaluate") < methods.index("Page.captureScreenshot")
 
 
 def test_capture_fails_closed_when_browser_uses_a_wider_css_viewport(tmp_path: Path) -> None:
@@ -323,6 +432,68 @@ def test_live_browser_capture_uses_exact_css_viewport() -> None:
         thread.join(timeout=5)
         _remove_profile(profile, live_root)
         shutil.rmtree(live_root, ignore_errors=True)
+
+
+def test_live_browser_expansion_captures_relevant_route_and_declared_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.environ.get("STAGEMESH_LIVE_BROWSER_TEST") != "1":
+        pytest.skip("set STAGEMESH_LIVE_BROWSER_TEST=1 for installed-browser acceptance")
+    project, store = _setup(tmp_path)
+    sources = project / "sources"
+    reading = sources / "readings" / "DOC-B" / "2" / "4"
+    reading.mkdir(parents=True)
+    (sources / "index.html").write_text(
+        "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<a href='/sources/readings/DOC-B/2/4/'>Read DOC-B page 2 paragraph 4</a>",
+        encoding="utf-8",
+    )
+    (reading / "index.html").write_text(
+        "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<p>Selected paragraph four</p>"
+        "<button aria-haspopup='dialog' onclick=\"document.body.insertAdjacentHTML('beforeend','<div role=dialog>Large page</div>')\">Open larger page</button>",
+        encoding="utf-8",
+    )
+    sha = GitWorkspace(project).commit_all("fixture browser states")
+    monkeypatch.setattr(browser_evidence_module, "task_workspace", lambda *_args: project)
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        functools.partial(_QuietHandler, directory=str(project)),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        report = capture_browser_evidence(
+            store,
+            project,
+            TASK,
+            server_command=(sys.executable, "-c", "import time; time.sleep(60)"),
+            base_url=f"http://127.0.0.1:{server.server_port}/",
+            captures=(
+                CaptureRequest("sources-mobile", 360, 800, "/sources/"),
+                CaptureRequest("sources-desktop", 1280, 900, "/sources/"),
+            ),
+            expand_findings=(
+                "Browser evidence must show selected DOC-B page 2 paragraph 4 and enlarged preview",
+            ),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    artifacts = report["artifacts"]
+    assert isinstance(artifacts, list)
+    assert len(artifacts) == 6
+    expanded = [item for item in artifacts if item["name"].startswith("expanded-")]
+    assert {item["route"] for item in expanded} == {"/sources/readings/DOC-B/2/4/"}
+    assert sum("interaction" in item for item in expanded) == 2
 
 
 def test_live_invalidated_recipe_is_replayed_without_visible_browser(tmp_path: Path) -> None:
@@ -769,6 +940,193 @@ def test_verified_capture_recorded_after_persisted_browser_findings_gets_one_bou
         json.loads(row["payload"])["disposition"] == "withdrawn_by_reviewer"
         for row in dispositions
     )
+
+
+def test_persisted_browser_gap_gets_one_bounded_expansion_after_retry_budget_is_spent(
+    tmp_path: Path,
+) -> None:
+    project, store = _setup(tmp_path)
+    (project / ".gitignore").write_text(".stagemesh/\n", encoding="utf-8")
+    GitWorkspace(project).commit_all("ignore runtime")
+    (project / "docs" / "a.md").write_text("candidate\n", encoding="utf-8")
+    sha = GitWorkspace(project).commit_all("candidate")
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    digest = _record_verified_capture(
+        project, store, TASK, sha, capture_id="browser-shallow", replayable=True
+    )
+
+    class MissingReadingStateReviewer:
+        name = "codex"
+
+        def review(self, _prompt: str) -> str:
+            return json.dumps(
+                {
+                    "decision": "FAIL_WITH_FINDINGS",
+                    "findings": [
+                        {
+                            "severity": "error",
+                            "message": (
+                                "Browser captures omit selected DOC-B page 2 paragraph 4 "
+                                "and its enlarged preview dialog"
+                            ),
+                            "remediation": "external_evidence",
+                        }
+                    ],
+                    "browser_evidence": {
+                        "capture_id": "browser-shallow",
+                        "artifact_sha256s": [digest],
+                    },
+                }
+            )
+
+    assert Reviewer(
+        adapter=MissingReadingStateReviewer(), require_independent=True
+    ).review(store, TASK, sha, project) == EvidenceStatus.FAILED
+    requirement = "browser review of selected DOC-B page 2 paragraph 4 and enlarged preview"
+    for attempt in range(1, MAX_REENTRIES + 1):
+        record_audit(
+            store,
+            REENTER_EVENT,
+            {
+                "task_id": TASK,
+                "attempt": attempt,
+                "of": MAX_REENTRIES,
+                "runtime": f"old-runtime-{attempt}",
+            },
+        )
+    record_block(
+        store,
+        TASK,
+        BlockKind.EXTERNAL_DEPENDENCY,
+        "external evidence is required for the retained candidate",
+        stage=str(Stage.REVIEW),
+        candidate_sha=sha,
+        runtime="old-runtime-3",
+        detail={
+            "failure_code": "external_evidence_required",
+            "requirements": [requirement],
+        },
+    )
+
+    recipe = browser_evidence_expansion_recipe(
+        store, project, TASK, sha, (requirement,)
+    )
+    assert recipe is not None
+    assert recipe.source_capture_id == "browser-shallow"
+    assert reentry_refusal(store, TASK, "new-runtime") is None
+    entry = reenter_blocked_task(store, TASK, "new-runtime")
+    assert entry is not None
+    assert entry["budget_class"] == "verified_browser_evidence_expansion"
+    assert (entry["attempt"], entry["of"]) == (1, 1)
+
+    record_block(
+        store,
+        TASK,
+        BlockKind.EXTERNAL_DEPENDENCY,
+        "external evidence is required for the retained candidate",
+        stage=str(Stage.REVIEW),
+        candidate_sha=sha,
+        runtime="new-runtime",
+        detail={
+            "failure_code": "external_evidence_required",
+            "requirements": [requirement],
+        },
+    )
+    assert reentry_refusal(store, TASK, "new-runtime") is not None
+    assert reenter_blocked_task(store, TASK, "new-runtime") is None
+
+
+def test_review_stage_collects_bounded_browser_expansion_before_calling_reviewer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _setup(tmp_path)
+    (project / ".gitignore").write_text(".stagemesh/\n", encoding="utf-8")
+    GitWorkspace(project).commit_all("ignore runtime")
+    (project / "docs" / "a.md").write_text("candidate\n", encoding="utf-8")
+    sha = GitWorkspace(project).commit_all("candidate")
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    digest = _record_verified_capture(
+        project, store, TASK, sha, capture_id="browser-shallow", replayable=True
+    )
+
+    class MissingStateReviewer:
+        name = "codex"
+
+        def review(self, _prompt: str) -> str:
+            return json.dumps(
+                {
+                    "decision": "FAIL_WITH_FINDINGS",
+                    "findings": [
+                        {
+                            "severity": "error",
+                            "message": "browser enlarged preview dialog is missing",
+                            "remediation": "external_evidence",
+                        }
+                    ],
+                    "browser_evidence": {
+                        "capture_id": "browser-shallow",
+                        "artifact_sha256s": [digest],
+                    },
+                }
+            )
+
+    assert Reviewer(
+        adapter=MissingStateReviewer(), require_independent=True
+    ).review(store, TASK, sha, project) == EvidenceStatus.FAILED
+    calls: list[str] = []
+
+    def expand(_store, _project, task_id, candidate_sha, recipe):
+        calls.append(recipe.source_capture_id)
+        assert (task_id, candidate_sha) == (TASK, sha)
+        return {"capture_id": "browser-expanded"}
+
+    class MustNotReview:
+        name = "codex"
+
+        def review(self, _prompt: str) -> str:
+            raise AssertionError("review must wait for persisted expanded evidence")
+
+    monkeypatch.setattr(Coordinator, "_workspace_intact", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(coordinator_module, "expand_browser_evidence", expand)
+    coordinator = Coordinator(
+        store,
+        project,
+        reviewer=Reviewer(adapter=MustNotReview(), require_independent=True),
+    )
+
+    assert coordinator.tick() == 1
+    assert calls == ["browser-shallow"]
+    assert store.get_task(TASK)["stage"] == Stage.REVIEW
+
+
+def test_expansion_wrapper_is_candidate_bound_and_cannot_repeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _setup(tmp_path)
+    sha = GitWorkspace(project).head()
+    store.add_candidate(TASK, sha, "claude", durable_handoff=True)
+    store.advance_task(TASK, Stage.REVIEW)
+    _record_verified_capture(
+        project, store, TASK, sha, capture_id="browser-shallow", replayable=True
+    )
+    findings = ("browser enlarged preview dialog is missing",)
+    recipe = browser_evidence_expansion_recipe(store, project, TASK, sha, findings)
+    assert recipe is not None
+    seen: list[tuple[tuple[str, ...], str | None]] = []
+
+    def capture(_store, _project, task_id, **kwargs):
+        assert task_id == TASK
+        seen.append((kwargs["expand_findings"], kwargs["expanded_from_capture"]))
+        return {"capture_id": "browser-expanded", "artifacts": [{"name": "state"}]}
+
+    monkeypatch.setattr(browser_evidence_module, "capture_browser_evidence", capture)
+    report = expand_browser_evidence(store, project, TASK, sha, recipe)
+
+    assert report["capture_id"] == "browser-expanded"
+    assert seen == [(findings, "browser-shallow")]
+    assert browser_evidence_expansion_recipe(store, project, TASK, sha, findings) is None
 
 
 def test_verified_capture_does_not_recheck_unrelated_persisted_code_finding(

@@ -2,8 +2,10 @@
 
 The browser is an explicitly headless local process.  StageMesh never opens a
 desktop window, never navigates away from a loopback origin, and never installs
-a browser or project dependency.  Captures are evidence, not approval: a
-configured accountable approver must separately record PASS or FAIL.
+a browser or project dependency. Captures are evidence, not approval:
+independent candidate review must bind the exact capture receipt. A human
+decision is required only when the governing specification leaves an
+owner-decision gate unresolved.
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ CAPTURE_EVENT = "task.browser_evidence_captured"
 DECISION_EVENT = "task.browser_evidence_decided"
 INVALIDATED_EVENT = "task.browser_evidence_invalidated"
 AUTOMATIC_RECAPTURE_EVENT = "task.browser_evidence_recaptured"
+AUTOMATIC_EXPANSION_EVENT = "task.browser_evidence_expanded"
+AUTOMATIC_EXPANSION_FAILED_EVENT = "task.browser_evidence_expansion_failed"
 CAPTURE_PROTOCOL = "cdp-device-metrics-v1"
 _BROWSER_REQUIREMENT_MARKERS = (
     "browser",
@@ -76,6 +80,7 @@ class CaptureRequest:
     width: int
     height: int
     route: str
+    dialog_trigger: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,18 @@ class BrowserRecaptureRecipe:
     server_command: tuple[str, ...]
     base_url: str
     captures: tuple[CaptureRequest, ...]
+
+
+@dataclass(frozen=True)
+class BrowserExpansionRecipe:
+    """A bounded same-origin expansion of one verified exact-candidate capture."""
+
+    source_capture_id: str
+    finding_digest: str
+    server_command: tuple[str, ...]
+    base_url: str
+    captures: tuple[CaptureRequest, ...]
+    findings: tuple[str, ...]
 
 
 _AUTOMATIC_RECAPTURE_LOCK = threading.Lock()
@@ -539,13 +556,17 @@ def _close_debug_browser(port: int) -> None:
         time.sleep(0.1)
 
 
-def _capture_one(
+def _remote_value(response: dict[str, object]) -> object:
+    remote = response.get("result")
+    return remote.get("value") if isinstance(remote, dict) else None
+
+
+def _navigate_capture(
     client: _DebuggerClient,
-    root: Path,
     origin: str,
     capture: CaptureRequest,
-) -> dict[str, object]:
-    target = root / f"{capture.name}.png"
+) -> str:
+    """Navigate one bounded same-origin GET route at its exact CSS viewport."""
     target_url = urljoin(origin, capture.route.lstrip("/"))
     requested = f"{capture.width}x{capture.height}"
     client.call("Page.enable")
@@ -568,6 +589,57 @@ def _capture_one(
             f"headless capture {capture.name} navigation failed: {navigation['errorText']}"
         )
     client.wait_event("Page.loadEventFired")
+    return requested
+
+
+def _open_declared_dialog(
+    client: _DebuggerClient,
+    capture: CaptureRequest,
+) -> None:
+    """Click only an element that explicitly declares a dialog popup."""
+    if capture.dialog_trigger is None:
+        return
+    wanted = json.dumps(" ".join(capture.dialog_trigger.split()).casefold())
+    response = client.call(
+        "Runtime.evaluate",
+        {
+            "expression": f"""(async () => {{
+const norm = value => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+const wanted = {wanted};
+const nodes = [...document.querySelectorAll('[aria-haspopup=\"dialog\"]')];
+const target = nodes.find(node => norm(node.getAttribute('aria-label') || node.textContent) === wanted);
+if (!target) return {{clicked:false, dialog:false}};
+target.click();
+for (let attempt = 0; attempt < 30; attempt += 1) {{
+  if (document.querySelector('[role=\"dialog\"]')) return {{clicked:true, dialog:true}};
+  await new Promise(resolve => setTimeout(resolve, 50));
+}}
+return {{clicked:true, dialog:false}};
+}})()""",
+            "awaitPromise": True,
+            "returnByValue": True,
+        },
+    )
+    result = _remote_value(response)
+    if not isinstance(result, dict) or result.get("clicked") is not True:
+        raise BrowserEvidenceError(
+            f"capture {capture.name} could not find its declared dialog trigger"
+        )
+    if result.get("dialog") is not True:
+        raise BrowserEvidenceError(
+            f"capture {capture.name} trigger did not open a declared dialog"
+        )
+
+
+def _capture_one(
+    client: _DebuggerClient,
+    root: Path,
+    origin: str,
+    capture: CaptureRequest,
+) -> dict[str, object]:
+    target = root / f"{capture.name}.png"
+    requested = _navigate_capture(client, origin, capture)
+    _open_declared_dialog(client, capture)
     measured = client.call(
         "Runtime.evaluate",
         {
@@ -575,8 +647,7 @@ def _capture_one(
             "returnByValue": True,
         },
     )
-    remote = measured.get("result")
-    value = remote.get("value") if isinstance(remote, dict) else None
+    value = _remote_value(measured)
     if not isinstance(value, dict):
         raise BrowserEvidenceError(f"capture {capture.name} could not measure its CSS viewport")
     css_width, css_height = value.get("width"), value.get("height")
@@ -603,7 +674,7 @@ def _capture_one(
         raise BrowserEvidenceError(
             f"capture {capture.name} has unexpected dimensions {width}x{height}"
         )
-    return {
+    artifact: dict[str, object] = {
         "name": capture.name,
         "route": capture.route,
         "requested_viewport": requested,
@@ -614,6 +685,12 @@ def _capture_one(
         "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
         "bytes": target.stat().st_size,
     }
+    if capture.dialog_trigger is not None:
+        artifact["interaction"] = {
+            "kind": "declared_dialog_trigger",
+            "accessible_name": capture.dialog_trigger,
+        }
+    return artifact
 
 
 def _remove_profile(profile: Path, root: Path) -> None:
@@ -628,6 +705,152 @@ def _remove_profile(profile: Path, root: Path) -> None:
                 time.sleep(0.1)
 
 
+_EVIDENCE_STOP_WORDS = frozenset(
+    {
+        "browser",
+        "capture",
+        "desktop",
+        "evidence",
+        "internal",
+        "missing",
+        "mobile",
+        "record",
+        "required",
+        "responsive",
+        "review",
+        "supplied",
+        "verified",
+        "viewport",
+    }
+)
+
+
+def _evidence_tokens(findings: tuple[str, ...]) -> set[str]:
+    return {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]{2,}", " ".join(findings))
+        if token.casefold() not in _EVIDENCE_STOP_WORDS
+    }
+
+
+def _probe_page_states(
+    client: _DebuggerClient,
+    origin: str,
+    route: str,
+    width: int,
+    height: int,
+) -> dict[str, list[dict[str, str]] | list[str]]:
+    """Read bounded same-origin links and explicitly declared dialog triggers."""
+    probe = CaptureRequest("probe", width, height, route)
+    _navigate_capture(client, origin, probe)
+    response = client.call(
+        "Runtime.evaluate",
+        {
+            "expression": """(() => {
+const norm = value => (value || '').replace(/\\s+/g, ' ').trim();
+const links = [...document.querySelectorAll('a[href]')].slice(0, 100).flatMap(node => {
+  try {
+    const url = new URL(node.getAttribute('href'), location.href);
+    if (url.origin !== location.origin) return [];
+    return [{route:url.pathname + url.search + url.hash, text:norm(node.getAttribute('aria-label') || node.textContent)}];
+  } catch (_) { return []; }
+});
+const dialogs = [...document.querySelectorAll('[aria-haspopup=\"dialog\"]')].slice(0, 20)
+  .map(node => norm(node.getAttribute('aria-label') || node.textContent)).filter(Boolean);
+return {links, dialogs};
+})()""",
+            "returnByValue": True,
+        },
+    )
+    value = _remote_value(response)
+    if not isinstance(value, dict):
+        raise BrowserEvidenceError("headless evidence expansion could not inspect page states")
+    raw_links, raw_dialogs = value.get("links"), value.get("dialogs")
+    links: list[dict[str, str]] = []
+    for item in raw_links if isinstance(raw_links, list) else []:
+        if not isinstance(item, dict):
+            continue
+        route_value, text_value = item.get("route"), item.get("text")
+        if not isinstance(route_value, str) or not isinstance(text_value, str):
+            continue
+        try:
+            parsed = parse_capture_request(f"probe={width}x{height}:{route_value}")
+        except BrowserEvidenceError:
+            continue
+        links.append({"route": parsed.route, "text": " ".join(text_value.split())[:500]})
+    dialog_values = raw_dialogs if isinstance(raw_dialogs, list) else []
+    dialogs = [
+        " ".join(item.split())[:200]
+        for item in dialog_values if isinstance(item, str) and item.strip()
+    ]
+    return {"links": links, "dialogs": dialogs}
+
+
+def _expanded_capture_requests(
+    client: _DebuggerClient,
+    origin: str,
+    captures: tuple[CaptureRequest, ...],
+    findings: tuple[str, ...],
+) -> tuple[CaptureRequest, ...]:
+    """Expand a route-only recipe with relevant same-origin GET and dialog states."""
+    if not findings or any(capture.dialog_trigger is not None for capture in captures):
+        return captures
+    viewports = tuple(dict.fromkeys((capture.width, capture.height) for capture in captures))
+    if not viewports:
+        return captures
+    probe_width, probe_height = min(viewports, key=lambda item: item[0] * item[1])
+    tokens = _evidence_tokens(findings)
+    existing_routes = {capture.route for capture in captures}
+    candidates: dict[str, tuple[int, str]] = {}
+    for seed in captures:
+        first_segment = seed.route.split("/", 2)[1] if seed.route.startswith("/") and seed.route != "/" else ""
+        if not first_segment:
+            continue
+        states = _probe_page_states(client, origin, seed.route, probe_width, probe_height)
+        for item in states["links"]:
+            assert isinstance(item, dict)
+            route, text = item["route"], item["text"]
+            if route in existing_routes or not route.startswith(f"/{first_segment}/"):
+                continue
+            haystack = f"{route} {text}".casefold()
+            score = sum(1 for token in tokens if token in haystack)
+            if score > 0 and score > candidates.get(route, (0, ""))[0]:
+                candidates[route] = (score, text)
+    selected = sorted(candidates.items(), key=lambda item: (-item[1][0], item[0]))[:3]
+    if not selected:
+        raise BrowserEvidenceError(
+            "verified browser evidence has no relevant bounded same-origin route to expand"
+        )
+    result = list(captures)
+    wants_dialog = any(
+        marker in " ".join(findings).casefold()
+        for marker in ("dialog", "enlarg", "modal", "preview", "open larger")
+    )
+    for route_index, (route, _rank) in enumerate(selected, start=1):
+        states = _probe_page_states(client, origin, route, probe_width, probe_height)
+        dialog_names = states["dialogs"] if wants_dialog else []
+        dialog_name = str(dialog_names[0]) if len(dialog_names) == 1 else None
+        for viewport_index, (width, height) in enumerate(viewports, start=1):
+            result.append(
+                CaptureRequest(
+                    f"expanded-{route_index}-{viewport_index}", width, height, route
+                )
+            )
+            if dialog_name is not None:
+                result.append(
+                    CaptureRequest(
+                        f"expanded-{route_index}-{viewport_index}-dialog",
+                        width,
+                        height,
+                        route,
+                        dialog_name,
+                    )
+                )
+    if len(result) > 20:
+        raise BrowserEvidenceError("bounded browser evidence expansion exceeds 20 captures")
+    return tuple(result)
+
+
 def _capture_session(
     *,
     root: Path,
@@ -638,6 +861,7 @@ def _capture_session(
     executable: Path,
     captures: tuple[CaptureRequest, ...],
     startup_timeout_seconds: float,
+    expand_findings: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
     profile = root / "browser-profile"
     server: subprocess.Popen[str] | None = None
@@ -684,7 +908,12 @@ def _capture_session(
                 ) from exc
             endpoint = _debugger_target(debug_port)
             with _DebuggerClient(endpoint) as client:
-                return [_capture_one(client, root, origin, capture) for capture in captures]
+                requested = (
+                    _expanded_capture_requests(client, origin, captures, expand_findings)
+                    if expand_findings
+                    else captures
+                )
+                return [_capture_one(client, root, origin, capture) for capture in requested]
     finally:
         if debug_port is not None:
             _close_debug_browser(debug_port)
@@ -705,6 +934,8 @@ def capture_browser_evidence(
     captures: tuple[CaptureRequest, ...],
     browser: str | None = None,
     startup_timeout_seconds: float = 30.0,
+    expand_findings: tuple[str, ...] = (),
+    expanded_from_capture: str | None = None,
 ) -> dict[str, object]:
     """Capture exact-candidate screenshots without ever creating a visible browser window."""
     if os.environ.get(PROVIDER_PROCESS_ENV):
@@ -744,6 +975,7 @@ def capture_browser_evidence(
         executable=executable,
         captures=captures,
         startup_timeout_seconds=startup_timeout_seconds,
+        expand_findings=expand_findings,
     )
     for artifact in artifacts:
         artifact_path = artifact["path"]
@@ -762,6 +994,11 @@ def capture_browser_evidence(
         "server_command": redact_command_secrets(shlex.join(server_command)),
         "artifacts": artifacts,
     }
+    if expand_findings:
+        payload["expanded_from_capture"] = expanded_from_capture
+        payload["expansion_finding_digest"] = hashlib.sha256(
+            json.dumps(sorted(expand_findings), separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
     manifest = root / "manifest.json"
     manifest.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     payload["manifest"] = manifest.relative_to(project).as_posix()
@@ -876,6 +1113,135 @@ def retire_unverified_browser_failure(
         },
     )
     return True
+
+
+def browser_evidence_expansion_recipe(
+    store: Store,
+    project: Path,
+    task_id: str,
+    candidate_sha: str,
+    findings: tuple[str, ...] | list[str],
+) -> BrowserExpansionRecipe | None:
+    """Return one safe route/dialog expansion for unresolved browser coverage."""
+    messages = tuple(str(item).strip() for item in findings if str(item).strip())
+    if not messages or not any(browser_evidence_required(item, [item]) for item in messages):
+        return None
+    capture = latest_browser_capture(store, task_id, candidate_sha)
+    if capture is None:
+        return None
+    try:
+        _verify_capture_artifacts(project, capture)
+        command_text = capture.get("server_command")
+        if not isinstance(command_text, str) or not command_text.strip() or REDACTED in command_text:
+            return None
+        command = parse_server_command(json.dumps(shlex.split(command_text)))
+        base_url = _loopback_base_url(str(capture.get("base_origin", "")))
+    except (BrowserEvidenceError, ValueError):
+        return None
+    artifacts = capture.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return None
+    captures: list[CaptureRequest] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            return None
+        name, route = artifact.get("name"), artifact.get("route")
+        viewport = artifact.get("requested_viewport") or artifact.get("viewport")
+        if not isinstance(name, str) or not isinstance(route, str) or not isinstance(viewport, str):
+            return None
+        try:
+            captures.append(parse_capture_request(f"{name}={viewport}:{route}"))
+        except BrowserEvidenceError:
+            return None
+    source_capture_id = capture.get("capture_id")
+    if not isinstance(source_capture_id, str):
+        return None
+    finding_digest = hashlib.sha256(
+        json.dumps(sorted(messages), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if capture.get("expansion_finding_digest") == finding_digest:
+        return None
+    for event_type in (AUTOMATIC_EXPANSION_EVENT, AUTOMATIC_EXPANSION_FAILED_EVENT):
+        for event in _event_payloads(store, event_type, task_id):
+            if (
+                event.get("candidate_sha") == candidate_sha
+                and event.get("source_capture_id") == source_capture_id
+                and event.get("finding_digest") == finding_digest
+            ):
+                return None
+    return BrowserExpansionRecipe(
+        source_capture_id,
+        finding_digest,
+        command,
+        base_url,
+        tuple(captures),
+        messages,
+    )
+
+
+def expand_browser_evidence(
+    store: Store,
+    project: Path,
+    task_id: str,
+    candidate_sha: str,
+    expected_recipe: BrowserExpansionRecipe,
+) -> dict[str, object]:
+    """Capture relevant same-origin routes and declared dialogs without app edits."""
+    try:
+        with _AUTOMATIC_RECAPTURE_LOCK:
+            lock_path = project / ".stagemesh" / "locks" / f"browser-evidence-{_safe_task_id(task_id)}.lock"
+            with IntegrationLock(lock_path, timeout_seconds=60.0).hold(
+                f"browser-expand:{task_id}"
+            ):
+                recipe = browser_evidence_expansion_recipe(
+                    store,
+                    project,
+                    task_id,
+                    candidate_sha,
+                    expected_recipe.findings,
+                )
+                if recipe != expected_recipe:
+                    raise BrowserEvidenceError("browser evidence expansion state changed while waiting")
+                report = capture_browser_evidence(
+                    store,
+                    project,
+                    task_id,
+                    server_command=recipe.server_command,
+                    base_url=recipe.base_url,
+                    captures=recipe.captures,
+                    expand_findings=recipe.findings,
+                    expanded_from_capture=recipe.source_capture_id,
+                )
+                record_audit(
+                    store,
+                    AUTOMATIC_EXPANSION_EVENT,
+                    {
+                        "task_id": task_id,
+                        "candidate_sha": candidate_sha,
+                        "source_capture_id": recipe.source_capture_id,
+                        "capture_id": report["capture_id"],
+                        "finding_digest": recipe.finding_digest,
+                        "artifact_count": len(cast(list[object], report["artifacts"])),
+                    },
+                )
+                return report
+    except (BrowserEvidenceError, OSError) as exc:
+        record_audit(
+            store,
+            AUTOMATIC_EXPANSION_FAILED_EVENT,
+            {
+                "task_id": task_id,
+                "candidate_sha": candidate_sha,
+                "source_capture_id": expected_recipe.source_capture_id,
+                "finding_digest": expected_recipe.finding_digest,
+                "reason": str(exc)[:500],
+            },
+        )
+        if isinstance(exc, BrowserEvidenceError):
+            raise
+        raise BrowserEvidenceError(
+            f"automatic browser evidence expansion failed: {type(exc).__name__}"
+        ) from exc
 
 
 def invalidated_browser_recapture_recipe(
