@@ -376,6 +376,95 @@ def test_coordinator_ticks_reopen_between_roles_and_advance_only_after_pair(tmp_
         store.close()
 
 
+def test_coordinator_does_not_remediate_after_normal_recheck_supersedes_its_failure(role_rig, monkeypatch):
+    project, store, candidate, policy, pool, reviewer, bound = role_rig
+    store.add_evidence(
+        TASK,
+        candidate,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {
+            "contract_hash": bound.digest,
+            "review_role": "normal",
+            "adverse_review_gate": False,
+            "adverse_policy_digest": policy.digest(),
+            "findings": [
+                {
+                    "severity": "major",
+                    "message": "the earlier browser capture omitted the selected reading",
+                }
+            ],
+        },
+    )
+    store.add_evidence(
+        TASK,
+        candidate,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {
+            "contract_hash": bound.digest,
+            "findings": [
+                {
+                    "severity": "major",
+                    "message": "legacy browser review failed before review roles were recorded",
+                }
+            ],
+        },
+    )
+    assert reviewer.review(store, TASK, candidate, project) == EvidenceStatus.PASSED
+    store.advance_task(TASK, Stage.REVIEW)
+    coordinator = Coordinator(
+        store,
+        project,
+        reviewer=reviewer,
+        require_independent_review=True,
+        adverse_policy=policy,
+    )
+    monkeypatch.setattr(coordinator, "_workspace_intact", lambda *args, **kwargs: True)
+
+    assert coordinator.tick() == 1
+
+    assert store.get_task(TASK)["stage"] == Stage.INTEGRATE
+    assert store.latest_task_remediation(TASK) is None
+    assert len(pool.adapters["claude"].calls) == len(pool.adapters["grok"].calls) == 1
+
+
+def test_adverse_reviewer_capacity_after_normal_recheck_never_returns_to_implementation(role_rig, monkeypatch):
+    project, store, candidate, policy, pool, reviewer, bound = role_rig
+    for payload in (
+        {
+            "contract_hash": bound.digest,
+            "review_role": "normal",
+            "adverse_review_gate": False,
+            "adverse_policy_digest": policy.digest(),
+            "findings": [{"severity": "major", "message": "superseded role-aware finding"}],
+        },
+        {
+            "contract_hash": bound.digest,
+            "findings": [{"severity": "major", "message": "superseded legacy finding"}],
+        },
+    ):
+        store.add_evidence(TASK, candidate, EvidenceKind.REVIEW, EvidenceStatus.FAILED, payload)
+    assert reviewer.review(store, TASK, candidate, project) == EvidenceStatus.PASSED
+    pool.pools[REVIEW] = ("claude",)  # the normal reviewer cannot also supply the adverse role
+    store.advance_task(TASK, Stage.REVIEW)
+    coordinator = Coordinator(
+        store,
+        project,
+        reviewer=reviewer,
+        require_independent_review=True,
+        adverse_policy=policy,
+    )
+    monkeypatch.setattr(coordinator, "_workspace_intact", lambda *args, **kwargs: True)
+
+    coordinator.tick()
+
+    assert store.get_task(TASK)["stage"] == Stage.REVIEW
+    assert store.latest_task_remediation(TASK) is None
+    assert store.latest_candidate(TASK)["sha"] == candidate
+    assert len(pool.adapters["claude"].calls) == 1 and not pool.adapters["grok"].calls
+
+
 @pytest.mark.parametrize("boundary", ["budget", "stop"])
 def test_run_ready_checks_budget_and_stop_between_roles(role_rig, boundary, monkeypatch):
     from stagemesh import run_ready

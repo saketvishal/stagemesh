@@ -7,6 +7,7 @@ from pathlib import Path
 
 from test_bounded_execution import TASK, _setup
 
+from stagemesh.audit import record_audit
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.run_ready import RunSummary, drive_task
 from stagemesh.step_progress import (
@@ -114,6 +115,45 @@ def test_activity_without_a_resolved_cause_is_not_progress(tmp_path: Path) -> No
     store.add_candidate(TASK, SHA + "2", "p", durable_handoff=True)
     store.add_evidence(TASK, SHA + "2", EvidenceKind.REVIEW, EvidenceStatus.FAILED, {"findings": [{"code": "other", "message": "a different problem"}]})
     assert made_progress(mid, progress_state(store, TASK))[0] is True
+
+
+def test_exact_browser_capture_and_independent_review_role_are_progress_milestones(tmp_path: Path) -> None:
+    _project, store = _setup(tmp_path)
+    store.advance_task(TASK, Stage.REVIEW)
+    candidate = SHA + "0"
+    store.add_candidate(TASK, candidate, "claude", durable_handoff=True)
+    before_capture = progress_state(store, TASK)
+    record_audit(
+        store,
+        "task.browser_evidence_captured",
+        {"task_id": TASK, "candidate_sha": candidate, "capture_id": "capture-expanded"},
+    )
+
+    after_capture = progress_state(store, TASK)
+    assert made_progress(before_capture, after_capture) == (
+        True,
+        "new exact-candidate browser evidence was captured",
+    )
+
+    store.add_evidence(
+        TASK,
+        candidate,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.PASSED,
+        {
+            "contract_hash": "c" * 64,
+            "review_role": "normal",
+            "review_provider": "codex",
+            "implementer_provider": "claude",
+            "independent_reviewer": True,
+            "review_execution_invoked": True,
+        },
+    )
+
+    assert made_progress(after_capture, progress_state(store, TASK)) == (
+        True,
+        "an executed independent review role passed on the exact candidate",
+    )
 
 
 def test_first_substantive_review_findings_reset_an_existing_step_cap_streak(tmp_path: Path) -> None:

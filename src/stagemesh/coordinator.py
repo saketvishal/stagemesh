@@ -85,7 +85,15 @@ from .remediation_recovery import (
     stalled_since_last_round,
 )
 from .research_context import research_scope_gate
-from .review import Reviewer, adverse_gate, independent_review_verified
+from .review import (
+    ROLE_ADVERSE,
+    ROLE_NORMAL,
+    Reviewer,
+    adverse_gate,
+    independent_review_verified,
+    latest_review_role_evidence,
+    review_failure_requires_remediation,
+)
 from .review_disposition import (
     UNRESOLVED_EVENT,
     AdverseSummary,
@@ -799,17 +807,34 @@ class Coordinator:
                 if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
                     return 1
                 reconcile_withdrawals(self.store, task_id, sha, bound.digest)
-                if (self.adverse_policy is not None and getattr(self.reviewer, "separate_roles", False) and review_status == EvidenceStatus.PASSED
-                        and not self._review_satisfied(task_id, sha, bound.digest)
-                        and not self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED)):
-                    current = [p for p in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, bound.digest)
-                               if p.get("adverse_policy_digest") == self.adverse_policy.digest()]
-                    if any(p.get("review_role") == "normal" for p in current) and not any(p.get("review_role") == "adverse" for p in current):
+                if (
+                    self.adverse_policy is not None
+                    and getattr(self.reviewer, "separate_roles", False)
+                    and review_status == EvidenceStatus.PASSED
+                    and not self._review_satisfied(task_id, sha, bound.digest)
+                ):
+                    current = latest_review_role_evidence(
+                        self.store,
+                        task_id,
+                        sha,
+                        bound.digest,
+                        policy_digest=self.adverse_policy.digest(),
+                    )
+                    if (
+                        current.get(ROLE_NORMAL, {}).get("status") == EvidenceStatus.PASSED
+                        and ROLE_ADVERSE not in current
+                    ):
                         record_task_owner_state(self.store, task_id, "normal_review_completed_adverse_pending", self.project)
                         return 1  # normal completion is progress; the next budget-checked tick earns adverse review
             if self._review_satisfied(task_id, sha, bound.digest):
                 return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
-            if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
+            if review_failure_requires_remediation(
+                self.store,
+                task_id,
+                sha,
+                bound.digest,
+                policy_digest=self.adverse_policy.digest() if self.adverse_policy is not None else None,
+            ):
                 return self._remediate_or_block(task_id, sha, Stage.REVIEW)
             if not self._review_satisfied(task_id, sha, bound.digest):
                 capacity_row = self.store.conn.execute(

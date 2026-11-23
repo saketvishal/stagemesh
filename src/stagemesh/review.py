@@ -213,6 +213,104 @@ class AdverseGateDecision:
     overridden: bool = False
 
 
+def latest_review_role_evidence(
+    store: Store,
+    task_id: str,
+    candidate_sha: str,
+    contract_hash: str,
+    *,
+    policy_digest: str | None = None,
+) -> dict[str, dict[str, object]]:
+    """Latest exact-candidate evidence for each review role.
+
+    Normal review may be repeated on the same candidate after new bounded
+    evidence is captured.  Its latest result is authoritative.  Adverse review
+    remains a separate role: an older normal failure must never be mistaken for
+    an adverse failure merely because both rows use ``kind=REVIEW``.
+    """
+    latest: dict[str, dict[str, object]] = {}
+    rows = store.conn.execute(
+        "SELECT id, status, payload, created_at, rowid FROM evidence "
+        "WHERE task_id=? AND candidate_sha=? AND kind=? "
+        "AND status IN (?, ?) ORDER BY rowid",
+        (
+            task_id,
+            candidate_sha,
+            EvidenceKind.REVIEW,
+            EvidenceStatus.PASSED,
+            EvidenceStatus.FAILED,
+        ),
+    )
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("contract_hash") != contract_hash:
+            continue
+        role = payload.get("review_role")
+        if role not in {ROLE_NORMAL, ROLE_ADVERSE}:
+            role = ROLE_ADVERSE if payload.get("adverse_review_gate") is True else "legacy"
+        if (
+            role in {ROLE_NORMAL, ROLE_ADVERSE}
+            and policy_digest is not None
+            and payload.get("adverse_policy_digest") != policy_digest
+        ):
+            continue
+        latest[str(role)] = {
+            "evidence_id": str(row["id"]),
+            "status": str(row["status"]),
+            "created_at": float(row["created_at"]),
+            "payload": payload,
+        }
+    return latest
+
+
+def review_failure_requires_remediation(
+    store: Store,
+    task_id: str,
+    candidate_sha: str,
+    contract_hash: str,
+    *,
+    policy_digest: str | None = None,
+) -> bool:
+    """Whether the current role-aware review state requires new implementation.
+
+    A successful normal recheck supersedes that role's earlier failure.  A
+    failed adverse gate is intentionally sticky for the candidate and is
+    handled separately by :func:`adverse_gate`.
+    """
+    current = latest_review_role_evidence(
+        store,
+        task_id,
+        candidate_sha,
+        contract_hash,
+        policy_digest=policy_digest,
+    )
+    if current.get(ROLE_NORMAL, {}).get("status") == EvidenceStatus.FAILED:
+        return True
+    legacy = current.get("legacy", {})
+    normal = current.get(ROLE_NORMAL, {})
+    if legacy.get("status") == EvidenceStatus.FAILED and not (
+        normal.get("status") == EvidenceStatus.PASSED
+        and float(normal.get("created_at") or 0.0) > float(legacy.get("created_at") or 0.0)
+    ):
+        return True
+    failed_adverse = store.bound_evidence_payloads(
+        task_id,
+        candidate_sha,
+        EvidenceKind.REVIEW,
+        contract_hash,
+        EvidenceStatus.FAILED,
+    )
+    return any(
+        payload.get("adverse_review_gate") is True
+        and payload.get("review_role") in {None, ROLE_ADVERSE}
+        and (policy_digest is None or payload.get("adverse_policy_digest") == policy_digest)
+        for payload in failed_adverse
+    )
+
+
 def adverse_gate(
     store: Store,
     task_id: str,
@@ -237,12 +335,17 @@ def adverse_gate(
     ]
     if not passed:
         reasons.append("missing required adverse review bound to this candidate, contract and policy")
-    if store.has_bound_evidence(
-        task_id,
-        candidate_sha,
-        EvidenceKind.REVIEW,
-        contract_hash,
-        EvidenceStatus.FAILED,
+    if any(
+        payload.get("adverse_review_gate") is True
+        and payload.get("review_role") in {None, ROLE_ADVERSE}
+        and payload.get("adverse_policy_digest") == policy.digest()
+        for payload in store.bound_evidence_payloads(
+            task_id,
+            candidate_sha,
+            EvidenceKind.REVIEW,
+            contract_hash,
+            EvidenceStatus.FAILED,
+        )
     ):
         reasons.append("candidate previously failed adverse review and must be replaced before integration")
     for row in store.open_findings_for_candidate(task_id, candidate_sha):
@@ -469,19 +572,24 @@ def _actionable_findings(raw: object) -> tuple[dict[str, str], ...]:
     return tuple(kept)
 
 
-def _decision_objects(text: str) -> list[dict[str, object]]:
+def _decision_objects(text: str) -> tuple[list[dict[str, object]], str]:
     decoder = json.JSONDecoder()
     found: list[dict[str, object]] = []
+    outside: list[str] = []
     index = 0
+    consumed = 0
     while True:
         index = text.find("{", index)
         if index < 0:
-            return found
+            outside.append(text[consumed:])
+            return found, "".join(outside)
         try:
             parsed, end = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             index += 1
             continue
+        outside.append(text[consumed:index])
+        consumed = index + end
         if isinstance(parsed, dict) and "decision" in parsed:
             found.append(parsed)
         index += end
@@ -509,8 +617,8 @@ def _fenced_inner(text: str) -> str | None:
     return None
 
 
-def _buried_in_chatter(text: str, verdict: dict[str, object]) -> bool:
-    return bool(_PRELIMINARY.search(text.replace(json.dumps(verdict), "")) or looks_preliminary(text))
+def _buried_in_chatter(text: str) -> bool:
+    return bool(_PRELIMINARY.search(text) or looks_preliminary(text))
 
 
 def _collect_decisions(text: str, depth: int = 0) -> list[dict[str, object]] | None:
@@ -520,8 +628,8 @@ def _collect_decisions(text: str, depth: int = 0) -> list[dict[str, object]] | N
     try:
         document = json.loads(body)
     except (TypeError, ValueError):
-        objects = _decision_objects(body)
-        if objects and _buried_in_chatter(body, objects[0]):
+        objects, outside = _decision_objects(body)
+        if objects and _buried_in_chatter(outside):
             return None  # a verdict echoed inside progress text ("I will inspect ... {"decision":"PASS"}") is not an answer
         return objects
     if not isinstance(document, dict):
@@ -600,6 +708,16 @@ def parse_review_response(response: str) -> dict[str, object] | None:
     if not isinstance(response, str):
         return None
     text = response.strip()
+    decisions = _collect_decisions(text)
+    if decisions is None:
+        return None
+    if decisions:
+        terminal = [item for item in decisions if item.get("decision") != VERDICT_REVIEW_INCOMPLETE]
+        if len(decisions) == 1:
+            return decisions[0]
+        if len(terminal) == 1:
+            return terminal[0]
+        return None
     try:
         parsed = json.loads(text)
     except (TypeError, json.JSONDecodeError):

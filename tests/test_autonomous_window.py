@@ -23,6 +23,7 @@ from stagemesh.audit import record_audit
 from stagemesh.block_kinds import (
     BLOCK_EVENT,
     MAX_REENTRIES,
+    REVIEW_LIFECYCLE_REPAIR_EVENT,
     BlockKind,
     classify_block,
     record_block,
@@ -30,7 +31,7 @@ from stagemesh.block_kinds import (
     reentries_used,
     reentry_refusal,
 )
-from stagemesh.domain import EvidenceKind, EvidenceStatus, TaskStatus
+from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.persistence import Store
 from stagemesh.survivor_wave import RunResult
 
@@ -181,6 +182,86 @@ def test_a_recorded_block_with_the_same_runtime_as_the_last_attempt_waits(tmp_pa
     assert reenter_blocked_task(store, "R", "fp2") is not None
     record_block(store, "R", BlockKind.RECOVERABLE_OPERATIONAL, "failed again with fp2 code", runtime="fp2")
     assert reentry_refusal(store, "R", "fp2") is not None  # it already ran on this runtime: no loop without a change
+
+
+def test_false_review_step_cap_block_repairs_to_pending_adverse_role_without_operator_retry(tmp_path: Path) -> None:
+    store, _ = make_store(tmp_path, ["138"])
+    candidate = "2" * 40
+    contract_hash = "c" * 64
+    policy_digest = "p" * 64
+    store.add_candidate("138", candidate, "claude", True)
+    store.bind_contract("138", candidate, "1" * 40, 1, contract_hash, "{}")
+    store.advance_task("138", Stage.REVIEW)
+    store.add_evidence(
+        "138",
+        candidate,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {
+            "contract_hash": contract_hash,
+            "review_role": "normal",
+            "adverse_review_gate": False,
+            "adverse_policy_digest": policy_digest,
+            "findings": [{"severity": "major", "message": "capture selected reading"}],
+        },
+    )
+    store.add_evidence(
+        "138",
+        candidate,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.PASSED,
+        {
+            "contract_hash": contract_hash,
+            "review_role": "normal",
+            "adverse_review_gate": False,
+            "adverse_policy_digest": policy_digest,
+            "review_provider": "codex",
+            "implementer_provider": "claude",
+            "independent_reviewer": True,
+            "review_execution_invoked": True,
+        },
+    )
+    synthetic_finding = f"{candidate}:failed-{Stage.REVIEW}"
+    store.upsert_finding(
+        synthetic_finding,
+        "138",
+        candidate,
+        "error",
+        "REVIEW failed without structured findings",
+    )
+    remediation_id = store.add_task_remediation("138", Stage.REVIEW, candidate)
+    store.advance_task("138", Stage.IMPLEMENT)
+    record_block(
+        store,
+        "138",
+        BlockKind.RECOVERABLE_OPERATIONAL,
+        "step cap incorrectly treated the pending adverse role as no progress",
+        stage=str(Stage.IMPLEMENT),
+        candidate_sha=candidate,
+        runtime="same-runtime",
+        detail={"failure_code": "step_cap_no_progress"},
+    )
+
+    assert reentry_refusal(store, "138", "same-runtime") is None
+    entry = reenter_blocked_task(store, "138", "same-runtime")
+
+    assert entry is not None and entry["auto_recovery"] == "review_role_lifecycle_repair"
+    assert entry["attempt"] == entry["of"] == 1
+    assert store.get_task("138")["status"] == TaskStatus.OPEN
+    assert store.get_task("138")["stage"] == Stage.REVIEW
+    assert store.task_remediation(remediation_id)["cleared"] == 1
+    assert store.get_finding(synthetic_finding)["status"] == "RESOLVED"
+    repair = list(store.task_audit_events(REVIEW_LIFECYCLE_REPAIR_EVENT, "138"))
+    assert len(repair) == 1
+
+
+def test_window_report_tolerates_legacy_reentry_without_budget_counters() -> None:
+    report = rw.WindowReport("window", rw.WindowOptions())
+    report.reentered.append({"task_id": "138", "was_blocked_because": "legacy repair"})
+
+    rendered = rw.format_window_report(report)
+
+    assert "reconsidered blocked task 138: was blocked because legacy repair" in rendered
 
 
 def test_run_window_reconsiders_a_recoverable_block_and_explains_every_block_it_leaves_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

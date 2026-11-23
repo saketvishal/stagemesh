@@ -1167,7 +1167,7 @@ def run_window(
                     problem = validate(pending_records, deadline)
                     if problem:
                         raise RuntimeError(problem)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - preflight reports an unavailable ordering check instead of crashing
                 owned = False
                 report.preflight.append(Check("prior_pr_order", False, f"cannot verify pending candidate order: {exc}"))
         report.preflight.append(Check("prior_prs", owned,
@@ -1193,7 +1193,7 @@ def run_window(
                 should_stop=control.blocks_admission, clock=clock,
             )
             refreshed = provider_check(store, config, strict_live=options.strict_live)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider recheck failure is a typed preflight result
             refreshed = Check("providers", False, f"provider recheck unavailable: {type(exc).__name__}", fix="stagemesh capacity")
         report.preflight = [refreshed if check.name == "providers" else check for check in report.preflight]
     failed = [check for check in report.preflight if not check.ok and check.fatal]
@@ -1286,7 +1286,7 @@ def run_window(
                     recovery_options = replace(options, max_tasks=options.max_tasks - len(
                         attempted - {task.task_id for task in suffix}))
                     return accept_recovery(recover(suffix, merged, deadline, hooks, recovery_options))
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - recovery failure must stop the bounded window cleanly
                     report.stop_reason = f"auto-merge recovery stopped: {type(exc).__name__}: {exc}"
                     return False
             if merged.get("remote_landed") is True:
@@ -1390,7 +1390,7 @@ def run_window(
                     for source in task_sources_from_config(config):
                         discovered = reconcile_project_spec_dependencies(source.discover(), project, base_ref)
                         sync_source(store, discovered, preserve_existing_dependencies=True)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - best-effort refresh; selection below retains prior trusted state
                     pass
             fresh, skipped = (
                 select_tasks(
@@ -1558,7 +1558,7 @@ def run_window(
                         problem = validate(ready, deadline)
                         if problem:
                             raise RuntimeError(problem)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - landing must fail closed with the exact reason
                     report.stop_reason = f"auto-merge stopped: cannot verify candidate order: {exc}"
                     break
                 if options.batch_ci and len(ready) > 1:
@@ -1849,7 +1849,13 @@ def format_window_report(report: WindowReport) -> str:
         if task.pr_error:
             lines.append(f"      PR error: {task.pr_error}")
     for entry in report.reentered:
-        lines.append(f"  reconsidered blocked task {entry['task_id']} (attempt {entry['attempt']} of {entry['of']}): was blocked because {entry['was_blocked_because']}")
+        attempt = entry.get("attempt")
+        total = entry.get("of")
+        budget = f" (attempt {attempt} of {total})" if attempt is not None and total is not None else ""
+        lines.append(
+            f"  reconsidered blocked task {entry['task_id']}{budget}: "
+            f"was blocked because {entry.get('was_blocked_because', 'reason not recorded')}"
+        )
     for entry in report.continued:
         lines.append(f"  resumed {entry['task_id']} after the step cap (run {entry['attempt'] + 1}): stage {entry['stage']}, candidate {str(entry['candidate_sha'])[:7]}")
     if report.not_selected:

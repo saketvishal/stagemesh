@@ -718,6 +718,48 @@ def test_default_queue_mode_skips_only_a_recorded_live_failure_and_keeps_never_c
     assert verdicts["proven"].eligible is True
 
 
+@pytest.mark.parametrize(
+    ("block_unproven", "review_eligible"),
+    [(False, True), (True, False)],
+)
+def test_implementation_only_failure_does_not_poison_review_routing(
+    tmp_path: Path,
+    block_unproven: bool,
+    review_eligible: bool,
+) -> None:
+    rig = Rig(
+        tmp_path,
+        {"grok": "ok"},
+        require_live_acceptance=True,
+        block_unproven=block_unproven,
+    )
+    record_live_provider_acceptance(
+        rig.store,
+        LiveProviderSmokeResult(
+            status="FAIL",
+            provider="grok",
+            execution_status=ExecutionStatus.FAILED,
+            candidate_sha=None,
+            file_ok=False,
+            implementation_checked=True,
+            review_checked=False,
+            implementation_ready=False,
+            review_ready=True,
+            review_json_ok=False,
+            failure_reason="no_implementation_change",
+        ),
+    )
+
+    implementation = _verdicts(rig, IMPLEMENT)["grok"]
+    review = _verdicts(rig, REVIEW)["grok"]
+
+    assert implementation.eligible is False
+    assert implementation.reason == "live_acceptance_failed: no_implementation_change"
+    assert review.eligible is review_eligible
+    if not review_eligible:
+        assert review.reason.startswith("live_acceptance_unproven: the latest check did not exercise review")
+
+
 def test_required_mode_refuses_a_provider_with_no_passing_live_check_and_says_what_to_run(tmp_path: Path) -> None:
     rig = Rig(tmp_path, {"failed": "ok", "unproven": "ok", "proven": "ok"}, require_live_acceptance=True, block_unproven=True)
     record_live_provider_acceptance(rig.store, _live_result("failed", False))
