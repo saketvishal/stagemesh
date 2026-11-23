@@ -422,7 +422,7 @@ def refresh_expired_quota_checks(
                         adapter, timeout_seconds=timeout,
                         should_stop=lambda: should_stop() or (deadline is not None and clock() >= deadline),
                     )
-                except Exception:  # fail closed without persisting provider output or secrets
+                except Exception:  # noqa: BLE001 - fail closed without persisting provider output or secrets
                     result = LiveProviderSmokeResult(
                         "FAIL", adapter.name, ExecutionStatus.FAILED, None,
                         False, "code" in adapter.capabilities, "review" in adapter.capabilities,
@@ -447,6 +447,11 @@ def live_provider_readiness(
         payload.get(f"{capability_prefix}_checked") is True
         and payload.get(f"{capability_prefix}_ready") is True
     )
+    if capability_prefix is not None and payload.get(f"{capability_prefix}_checked") is not True:
+        return False, (
+            f"live_acceptance_unproven: the latest check did not exercise {capability}; "
+            "run stagemesh provider-acceptance --live --provider " + provider
+        )
     # Expiry requests a real recheck; it never establishes readiness on its own.
     if not capability_ready and _temporary_check_expired(payload):
         return False, (

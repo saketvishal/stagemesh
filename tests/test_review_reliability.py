@@ -39,6 +39,7 @@ from stagemesh.review import (
     VERDICT_REVIEW_INCOMPLETE,
     Reviewer,
     classify_review_response,
+    parse_review_response,
 )
 from stagemesh.serialized_integration import SerializedIntegrator
 from stagemesh.spec_planning import (
@@ -503,6 +504,34 @@ def test_structured_progress_before_one_terminal_verdict_is_not_ambiguous() -> N
     assert classify_review_response(progress + '{"decision":"PASS"}{"decision":"PASS"}').reason == (
         "ambiguous_review_output"
     )
+
+
+def test_provider_progress_words_inside_structured_records_do_not_hide_the_terminal_verdict() -> None:
+    progress = (
+        '{"decision":"REVIEW_INCOMPLETE",'
+        '"reason":"Starting read-only review of the candidate and browser evidence."}'
+        '{"decision":"REVIEW_INCOMPLETE",'
+        '"reason":"Reading project guidance and checking pending acceptance evidence."}'
+    )
+    terminal = {
+        "decision": "PASS",
+        "browser_evidence": {
+            "capture_id": "capture-1",
+            "artifact_sha256s": ["a" * 64],
+        },
+    }
+    response = progress + json.dumps(terminal)
+
+    assert classify_review_response(response).kind == VERDICT_PASS
+    assert parse_review_response(response) == terminal
+    assert classify_review_response(progress).reason == "ambiguous_review_output"
+
+
+def test_unstructured_progress_outside_a_structured_pass_remains_incomplete() -> None:
+    response = 'Starting review now. {"decision":"PASS"}'
+
+    assert classify_review_response(response).kind == VERDICT_REVIEW_INCOMPLETE
+    assert parse_review_response(response) is None
 
 
 def test_concrete_findings_that_mention_progress_words_are_kept() -> None:

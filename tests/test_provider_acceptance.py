@@ -622,6 +622,38 @@ def test_live_provider_readiness_is_capability_specific_for_mixed_results(tmp_pa
     assert review_reason == "live_acceptance_failed: invalid_review_json"
 
 
+def test_implementation_only_failure_does_not_poison_unchecked_review_capability(tmp_path: Path) -> None:
+    store = Store(tmp_path / "stagemesh.sqlite3")
+    store.migrate()
+    try:
+        record_live_provider_acceptance(
+            store,
+            LiveProviderSmokeResult(
+                "FAIL",
+                "grok",
+                ExecutionStatus.FAILED,
+                None,
+                False,
+                True,
+                False,
+                False,
+                True,
+                False,
+                "no_implementation_change",
+            ),
+        )
+
+        implementation_ready, implementation_reason = live_provider_readiness(store, "grok", "code")
+        review_ready, review_reason = live_provider_readiness(store, "grok", "review")
+    finally:
+        store.close()
+
+    assert implementation_ready is False
+    assert implementation_reason == "live_acceptance_failed: no_implementation_change"
+    assert review_ready is False
+    assert review_reason.startswith("live_acceptance_unproven: the latest check did not exercise review")
+
+
 def test_live_provider_readiness_treats_old_passing_acceptance_as_stale(tmp_path: Path) -> None:
     store = Store(tmp_path / "stagemesh.sqlite3")
     store.migrate()

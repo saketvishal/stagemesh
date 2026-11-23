@@ -24,7 +24,7 @@ from typing import Any
 
 from .audit import record_audit
 from .diagnosis import CONTRACT_SCOPE, _last_reset
-from .domain import TaskStatus
+from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .persistence import Store
 from .recovery_decision import RecoveryAction, RecoveryDecision
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
@@ -33,6 +33,7 @@ BLOCK_EVENT = "task.block_classified"
 REENTER_EVENT = "task.block_reentered"
 BROWSER_EVIDENCE_UPGRADE_EVENT = "task.browser_evidence_upgrade_reentered"
 BROWSER_EVIDENCE_EXPANSION_REENTRY_EVENT = "task.browser_evidence_expansion_reentered"
+REVIEW_LIFECYCLE_REPAIR_EVENT = "task.review_lifecycle_repaired"
 MAX_REENTRIES = 3
 
 
@@ -372,6 +373,101 @@ def _browser_evidence_expansion(
     return recipe
 
 
+def _review_lifecycle_repair(
+    store: Store, task_id: str, info: BlockInfo
+) -> dict[str, object] | None:
+    """Recognize the 0.6.49 false step-cap block after a normal review recheck passed.
+
+    The bad state is deliberately narrow: the task was sent from REVIEW back to
+    IMPLEMENT by a remediation created *after* a newer independent normal PASS,
+    while the distinct adverse role has not run.  Existing candidate, evidence
+    and review history are preserved; only the false remediation handoff is
+    undone.
+    """
+    task = store.get_task(task_id)
+    if (
+        info.failure_code != "step_cap_no_progress"
+        or info.candidate_sha is None
+        or task is None
+        or task["status"] != TaskStatus.BLOCKED
+        or task["stage"] != Stage.IMPLEMENT
+    ):
+        return None
+    remediation = store.latest_task_remediation(task_id)
+    if (
+        remediation is None
+        or str(remediation["stage"]) != str(Stage.REVIEW)
+        or str(remediation["candidate_sha"]) != info.candidate_sha
+    ):
+        return None
+    binding = store.contract_binding(task_id, info.candidate_sha)
+    if binding is None:
+        return None
+    from .review import (
+        ROLE_ADVERSE,
+        ROLE_NORMAL,
+        independent_review_verified,
+        latest_review_role_evidence,
+    )
+
+    digest = str(binding["digest"])
+    all_normal = store.bound_evidence_payloads(
+        task_id,
+        info.candidate_sha,
+        EvidenceKind.REVIEW,
+        digest,
+        EvidenceStatus.FAILED,
+    )
+    policy_digests = {
+        str(payload.get("adverse_policy_digest"))
+        for payload in all_normal
+        if payload.get("review_role") == ROLE_NORMAL
+        and isinstance(payload.get("adverse_policy_digest"), str)
+    }
+    if not policy_digests:
+        return None
+    # A single candidate can only be repaired for the policy carried by its
+    # newest successful normal role.  Changed policies require fresh review.
+    current = latest_review_role_evidence(
+        store,
+        task_id,
+        info.candidate_sha,
+        digest,
+    )
+    normal = current.get(ROLE_NORMAL)
+    if normal is None or normal.get("status") != EvidenceStatus.PASSED:
+        return None
+    payload = normal.get("payload")
+    open_findings = store.open_findings_for_candidate(task_id, info.candidate_sha)
+    synthetic_finding_id = f"{info.candidate_sha}:failed-{Stage.REVIEW}"
+    unexpected_findings = [
+        finding
+        for finding in open_findings
+        if not (
+            str(finding["id"]) == synthetic_finding_id
+            and str(finding["message"]) == "REVIEW failed without structured findings"
+            and float(finding["created_at"]) >= float(normal.get("created_at") or 0.0)
+        )
+    ]
+    if (
+        not isinstance(payload, dict)
+        or not independent_review_verified(payload)
+        or payload.get("adverse_policy_digest") not in policy_digests
+        or ROLE_ADVERSE in current
+        or float(remediation["created_at"]) < float(normal.get("created_at") or 0.0)
+        or unexpected_findings
+    ):
+        return None
+    return {
+        "candidate_sha": info.candidate_sha,
+        "contract_hash": digest,
+        "normal_review_evidence_id": normal["evidence_id"],
+        "adverse_policy_digest": payload["adverse_policy_digest"],
+        "remediation_id": str(remediation["id"]),
+        "synthetic_finding_id": synthetic_finding_id if open_findings else None,
+    }
+
+
 def reentry_refusal(store: Store, task_id: str, fingerprint: str) -> str | None:
     """Why a BLOCKED task is not reconsidered right now, or None when it is eligible."""
     task = store.get_task(task_id)
@@ -384,6 +480,8 @@ def reentry_refusal(store: Store, task_id: str, fingerprint: str) -> str | None:
         return f"{info.kind.value}: {info.reason}"
     if store.has_active_claim(task_id) or any(row["task_id"] == task_id for row in store.running_executions()):
         return "has an active claim or running execution"
+    if _review_lifecycle_repair(store, task_id, info) is not None:
+        return None
     if _browser_evidence_upgrade(store, task_id, info) is not None:
         return None
     if _browser_evidence_expansion(store, task_id, info) is not None:
@@ -405,11 +503,34 @@ def reenter_blocked_task(store: Store, task_id: str, fingerprint: str) -> dict[s
     browser_expansion = (
         _browser_evidence_expansion(store, task_id, info) if info is not None else None
     )
+    review_repair = (
+        _review_lifecycle_repair(store, task_id, info) if info is not None else None
+    )
     if reentry_refusal(store, task_id, fingerprint) is not None:
         return None
     assert info is not None
     task = store.get_task(task_id)
     stage = str(task["stage"]) if task is not None else None
+    if review_repair is not None:
+        if not store.unblock_task(task_id):
+            return None
+        if review_repair.get("synthetic_finding_id"):
+            store.close_finding(str(review_repair["synthetic_finding_id"]))
+        store.advance_task(task_id, Stage.REVIEW)
+        entry = {
+            "task_id": task_id,
+            "auto_recovery": "review_role_lifecycle_repair",
+            "attempt": 1,
+            "of": 1,
+            "stage": stage,
+            "restored_stage": str(Stage.REVIEW),
+            "was_blocked_because": info.reason[:300],
+            "block_source": info.source,
+            "runtime": fingerprint,
+            **review_repair,
+        }
+        record_audit(store, REVIEW_LIFECYCLE_REPAIR_EVENT, entry)
+        return entry
     if browser_upgrade is not None:
         if not store.unblock_task(task_id):
             return None

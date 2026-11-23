@@ -141,12 +141,39 @@ def test_same_candidate_cannot_replace_a_failed_adverse_review_with_a_pass(tmp_p
         NEW,
         EvidenceKind.REVIEW,
         EvidenceStatus.FAILED,
-        {"contract_hash": DIGEST, "findings": [{"severity": "major", "message": "needs repair"}]},
+        {
+            "contract_hash": DIGEST,
+            "review_role": "adverse",
+            "adverse_review_gate": True,
+            "adverse_policy_digest": POLICY.digest(),
+            "findings": [{"severity": "major", "message": "needs repair"}],
+        },
     )
     _review(store)
     decision = _gate(store)
     assert not decision.allowed
     assert "must be replaced" in decision.reasons[0]
+
+
+def test_historical_normal_failure_is_not_misclassified_as_failed_adverse_review(tmp_path):
+    store = _store(tmp_path)
+    store.add_evidence(
+        TASK,
+        NEW,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {
+            "contract_hash": DIGEST,
+            "review_role": "normal",
+            "adverse_review_gate": False,
+            "adverse_policy_digest": POLICY.digest(),
+            "findings": [{"severity": "major", "message": "capture the missing responsive state"}],
+        },
+    )
+
+    _review(store)
+
+    assert _gate(store).allowed
 
 
 def test_findings_feed_remediation_and_must_be_resolved_on_new_candidate(tmp_path):

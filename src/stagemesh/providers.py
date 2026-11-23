@@ -908,6 +908,7 @@ class RuntimeCommandAdapter:
             return _review_infrastructure_failure(reason)
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
         review_path = Path(temp_dir) / "candidate"
+        provider_prompt_file: Path | None = None
         cleanup_confirmed = True  # no provider owns the checkout until Popen succeeds
         try:
             setup_error = _prepare_review_checkout(Path(project), review_path, candidate_sha)
@@ -998,12 +999,15 @@ class RuntimeCommandAdapter:
                 return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
             except CapabilityRegistryError as exc:
                 return _review_infrastructure_failure(f"capability_unavailable: {exc}")
-            if self.name.casefold() == "agy":
-                patch, patch_error = _agy_review_patch(review_path, candidate_sha)
+            if self.name.casefold() in {"agy", "grok"}:
+                provider_label = self.name.upper()
+                patch, patch_error = _review_patch(
+                    review_path, candidate_sha, provider_label=provider_label
+                )
                 if patch_error:
                     return _review_infrastructure_failure(patch_error)
                 review_prompt += (
-                    "\nAGY headless review boundary:\n"
+                    f"\n{provider_label} headless review boundary:\n"
                     "- Do not invoke terminal, shell, Git, browser, file URL, web, or MCP tools.\n"
                     "- StageMesh prepared the exact candidate patch below and owns Git operations.\n"
                     "- Use native read-file tools inside the review workspace only when more file context is needed.\n"
@@ -1047,7 +1051,15 @@ class RuntimeCommandAdapter:
                         f"{CAPABILITY_EVIDENCE_MISSING}: {exc}"
                     )
             command_identity = command_snapshot(self.name, configured_command, self.all_commands())
-            command, provider_input = _command_and_input(configured_command, review_prompt, structured_review=True)
+            if self.name.casefold() == "grok":
+                provider_prompt_file = Path(temp_dir) / "grok-review-prompt.md"
+                provider_prompt_file.write_text(review_prompt, encoding="utf-8")
+            command, provider_input = _command_and_input(
+                configured_command,
+                review_prompt,
+                structured_review=True,
+                prompt_file=provider_prompt_file,
+            )
             refused = _authorization_refusal(
                 self,
                 project,
@@ -1204,6 +1216,8 @@ class RuntimeCommandAdapter:
                     ) from exc
             raise
         finally:
+            if provider_prompt_file is not None:
+                provider_prompt_file.unlink(missing_ok=True)
             if cleanup_confirmed:
                 _cleanup_review_workspace(Path(temp_dir))
 
@@ -1417,11 +1431,27 @@ def _harden_unattended_command(args: list[str]) -> list[str]:
     return args
 
 
-def _command_and_input(command: tuple[str, ...], prompt: str, *, structured_review: bool = False) -> tuple[list[str], str]:
+def _command_and_input(
+    command: tuple[str, ...],
+    prompt: str,
+    *,
+    structured_review: bool = False,
+    prompt_file: Path | None = None,
+) -> tuple[list[str], str]:
     args = _harden_unattended_command(list(command))
     executable = Path(args[0]).name.lower() if args else ""
     if executable in {"grok", "grok.exe"}:
-        args = _ensure_arg(args, "--json-schema", REVIEW_JSON_SCHEMA) if structured_review else args
+        if structured_review:
+            review_tools = _restricted_grok_tools(_explicit_grok_tool_values(args)) or "Read,Grep"
+            args = _without_option(args, "--allow", takes_value=True)
+            args = _without_grok_tools(args)
+            args.extend(("--tools", review_tools))
+            args = _ensure_arg(args, "--json-schema", REVIEW_JSON_SCHEMA)
+        if prompt_file is not None:
+            for flag in ("-p", "--single"):
+                args = _without_prompt_option(args, flag)
+            args = _without_option(args, "--prompt-file", takes_value=True)
+            return [*args, "--prompt-file", str(prompt_file)], ""
         for flag in ("-p", "--single"):
             if flag in args:
                 index = args.index(flag)
@@ -2268,7 +2298,9 @@ def _git_output(path: Path, *args: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _agy_review_patch(review_path: Path, candidate_sha: str) -> tuple[str, str | None]:
+def _review_patch(
+    review_path: Path, candidate_sha: str, *, provider_label: str
+) -> tuple[str, str | None]:
     result = subprocess.run(
         [
             "git",
@@ -2288,14 +2320,21 @@ def _agy_review_patch(review_path: Path, candidate_sha: str) -> tuple[str, str |
     )
     if result.returncode != 0:
         detail = _bounded_process_output(result)
-        return "", "AGY review patch preparation failed" + (f": {detail}" if detail else "")
+        return "", f"{provider_label} review patch preparation failed" + (
+            f": {detail}" if detail else ""
+        )
     patch = result.stdout.rstrip()
     if len(patch) > MAX_AGY_REVIEW_PATCH_CHARS:
         return "", (
-            "AGY review patch exceeds the bounded prompt limit; use a smaller candidate or "
+            f"{provider_label} review patch exceeds the bounded prompt limit; use a smaller candidate or "
             "a different authorized reviewer"
         )
     return patch, None
+
+
+def _agy_review_patch(review_path: Path, candidate_sha: str) -> tuple[str, str | None]:
+    """Compatibility seam for the existing exact-patch acceptance tests."""
+    return _review_patch(review_path, candidate_sha, provider_label="AGY")
 
 
 def _tracked_content_changed(path: Path) -> bool:

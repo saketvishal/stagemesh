@@ -43,6 +43,23 @@ def test_grok_review_uses_json_schema_single_turn_mode() -> None:
     assert command[:3] == ["grok", "-p", "review it"]
     schema = json.loads(command[command.index("--json-schema") + 1])
     assert schema["properties"]["decision"]["enum"] == ["PASS", "FAIL_WITH_FINDINGS", "REVIEW_INCOMPLETE"]
+    assert command[command.index("--tools") + 1] == "Read,Grep"
+    assert "--allow" not in command
+    assert stdin == ""
+
+
+def test_grok_large_review_prompt_uses_a_prompt_file_instead_of_the_windows_command_line(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "review-prompt.md"
+    command, stdin = _command_and_input(
+        ("grok", "-p", "old prompt", "--permission-mode", "acceptEdits"),
+        "x" * 40_000,
+        structured_review=True,
+        prompt_file=prompt_file,
+    )
+
+    assert "-p" not in command and "--single" not in command
+    assert command[-2:] == ["--prompt-file", str(prompt_file)]
+    assert "x" * 100 not in " ".join(command)
     assert stdin == ""
 
 
