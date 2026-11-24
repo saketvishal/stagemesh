@@ -715,40 +715,45 @@ def check_pr_window_baseline(store: Store, project: Path, base_ref: str, *, plan
                 f"{branch} differs from live origin/{branch} at {remote}; a preview cannot refresh the checkout",
                 fix="a live PR-only window can fast-forward a clean checkout",
             )
-        with IntegrationLock(project / ".stagemesh" / "integration.lock", timeout_seconds=5).hold("window-baseline"), store.conn:
-            # Serialize the checkout update with claims and with StageMesh integration.
-            store.conn.execute("BEGIN IMMEDIATE")
-            if QueueStopControl(store).blocks_admission():
-                return Check("repo", False, "queue admission is paused; checkout left unchanged", fix="stagemesh queue-control resume")
-            if store.conn.execute("SELECT 1 FROM claims WHERE active=1 LIMIT 1").fetchone() or any(store.running_executions()):
-                return Check("repo", False, "active StageMesh work owns the checkout", fix="let the active execution finish, then rerun")
-            current = git.git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
-            if current != base_ref or git.resolve(base_ref) != local:
-                return Check("repo", False, "the checkout changed during refresh", fix="verify the checkout and rerun the window")
-            if not local or not git.is_ancestor(local, remote):
-                return Check(
-                    "repo", False, f"{branch} cannot fast-forward to live origin/{branch} at {remote}",
-                    fix="preserve local commits and restore an aligned integration checkout before rerunning",
-                )
-            status = git.git.run(
-                "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "-z", encoding="utf-8",
-            ).stdout
-            # StageMesh creates untracked runtime files even in projects that do not ignore .stagemesh.
-            if any(entry and not entry.startswith("?? .stagemesh/") for entry in status.split("\0")):
-                return Check(
-                    "repo", False, "the integration checkout has local changes",
-                    fix="preserve the local changes on a separate branch or worktree, then rerun",
-                )
-            updated = git.git.run("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", remote, check=False)
-            if updated.returncode or git.resolve("HEAD") != remote:
-                return Check("repo", False, f"could not fast-forward {branch} to {remote}", fix="inspect the checkout and rerun")
-        return Check(
-            "repo", True, f"fast-forwarded {branch} from {local} to live origin/{branch} at {remote}", revision=remote,
-        )
+        return _fast_forward_window_baseline(store, git, base_ref, local, remote)
     except subprocess.TimeoutExpired:
         return Check("repo", False, f"timed out verifying live origin/{branch}", fix=access_hint)
     except (GitError, IntegrationLockTimeout, OSError, sqlite3.Error):
         return Check("repo", False, f"could not verify or refresh {branch} safely", fix="run stagemesh doctor and inspect the checkout")
+
+
+def _fast_forward_window_baseline(store: Store, git: GitFacts, base_ref: str, local: str | None, remote: str) -> Check:
+    branch = base_ref.removeprefix("refs/heads/")
+    with IntegrationLock(git.path / ".stagemesh" / "integration.lock", timeout_seconds=5).hold("window-baseline"), store.conn:
+        # Serialize the checkout update with claims and with StageMesh integration.
+        store.conn.execute("BEGIN IMMEDIATE")
+        if QueueStopControl(store).blocks_admission():
+            return Check("repo", False, "queue admission is paused; checkout left unchanged", fix="stagemesh queue-control resume")
+        if store.conn.execute("SELECT 1 FROM claims WHERE active=1 LIMIT 1").fetchone() or any(store.running_executions()):
+            return Check("repo", False, "active StageMesh work owns the checkout", fix="let the active execution finish, then rerun")
+        current = git.git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
+        if current != base_ref or git.resolve(base_ref) != local:
+            return Check("repo", False, "the checkout changed during refresh", fix="verify the checkout and rerun the window")
+        if not local or not git.is_ancestor(local, remote):
+            return Check(
+                "repo", False, f"{branch} cannot fast-forward to live origin/{branch} at {remote}",
+                fix="preserve local commits and restore an aligned integration checkout before rerunning",
+            )
+        status = git.git.run(
+            "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "-z", encoding="utf-8",
+        ).stdout
+        # StageMesh creates untracked runtime files even in projects that do not ignore .stagemesh.
+        if any(entry and not entry.startswith("?? .stagemesh/") for entry in status.split("\0")):
+            return Check(
+                "repo", False, "the integration checkout has local changes",
+                fix="preserve the local changes on a separate branch or worktree, then rerun",
+            )
+        updated = git.git.run("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", remote, check=False)
+        if updated.returncode or git.resolve("HEAD") != remote:
+            return Check("repo", False, f"could not fast-forward {branch} to {remote}", fix="inspect the checkout and rerun")
+    return Check(
+        "repo", True, f"fast-forwarded {branch} from {local} to live origin/{branch} at {remote}", revision=remote,
+    )
 
 
 def repository_preflight_checks(
