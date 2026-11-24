@@ -1480,7 +1480,17 @@ def _github_outbound(config, store: Store, *, dry_run: bool):
     if dry_run or not names or not (github.owner and github.repo and github.token):
         return None, frozenset()
     client = GitHubClient(github.owner, github.repo, UrlLibGitHubTransport(github.token))
-    return GitHubOutboundSync(store, client), names
+    approver_id = None if config.approval_authority is None else config.approval_authority.approver_id
+    return GitHubOutboundSync(store, client, approver_id=approver_id), names
+
+
+def _reconcile_github_outbound(store: Store, sync, names: frozenset[str]) -> None:
+    """Repair source delivery before selection, including when no coding task is eligible."""
+    if sync is None or not names:
+        return
+    from .outbound_lifecycle import sync_outbound_outcomes
+
+    sync_outbound_outcomes(store, sync, names, store.tasks(), {})
 
 
 @dataclass
@@ -2152,6 +2162,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             if merger is not None:
                 merger.progress = reporter.line
         outbound_sync, outbound_names = _github_outbound(config, store, dry_run=False)
+        _reconcile_github_outbound(store, outbound_sync, outbound_names)
 
         def on_merged(task_id: str) -> None:
             task = store.get_task(task_id)

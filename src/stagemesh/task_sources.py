@@ -707,9 +707,147 @@ class OutboundSync:
 
 
 class GitHubOutboundSync(OutboundSync):
-    def __init__(self, store: Store, client: GitHubClient):
+    def __init__(self, store: Store, client: GitHubClient, *, approver_id: str | None = None):
         super().__init__(store)
         self.client = client
+        self.approver_id = approver_id
+
+    def reconcile_merged(self, task_id: str) -> bool:
+        """Observe a StageMesh-published PR merged outside the landing guard.
+
+        Exact published heads need only the already-recorded StageMesh evidence.
+        A head changed after publication additionally needs the configured GitHub
+        approver and a complete green hosted-check rollup. Every path proves that
+        the candidate, merged head, merge commit, and current base form one ancestry
+        chain before recording delivery.
+        """
+        from .delivery_state import (
+            pr_url_repository,
+            publication_record,
+            record_observed_merge,
+            task_delivery,
+        )
+
+        if task_delivery(self.store, task_id).state == "MERGED":
+            return True
+        candidate_row = self.store.latest_candidate(task_id)
+        if candidate_row is None:
+            return False
+        candidate = str(candidate_row["sha"])
+        repository = f"{self.client.owner}/{self.client.repo}".casefold()
+        published = publication_record(self.store, task_id, candidate, repository)
+        if published is None or pr_url_repository(str(published.get("pr_url") or "")) != repository:
+            return False
+        match = re.fullmatch(r"https?://[^/\s]+/[^/\s]+/[^/\s]+/pull/(\d+)(?:[/?#].*)?", str(published.get("pr_url") or ""), re.IGNORECASE)
+        if match is None:
+            return False
+        number = int(match.group(1))
+        repository_result = self.client.repository()
+        pull_result = self.client.pull_request(number)
+        if repository_result.status != "OK" or pull_result.status != "OK":
+            return False
+        repo, pull = repository_result.payload, pull_result.payload
+        if not isinstance(repo, dict) or not isinstance(pull, dict):
+            return False
+        full_name = str(repo.get("full_name") or "").casefold()
+        default_base = str(repo.get("default_branch") or "")
+        head, base = pull.get("head") or {}, pull.get("base") or {}
+        if (
+            full_name != repository
+            or pull.get("number") != number
+            or pull.get("state") != "closed"
+            or pull.get("merged") is not True
+            or not pull.get("merged_at")
+            or not isinstance(head, dict)
+            or not isinstance(base, dict)
+        ):
+            return False
+        for side in (head, base):
+            side_repo = side.get("repo")
+            if not isinstance(side_repo, dict):
+                return False
+            if str(side_repo.get("full_name") or "").casefold() != repository:
+                return False
+        published_base = str(published.get("base") or "")
+        expected_base = published_base or default_base
+        if not expected_base or str(base.get("ref") or "") != expected_base:
+            return False
+        merged_head = str(head.get("sha") or "")
+        published_head = str(published.get("head_sha") or published.get("candidate_sha") or "")
+        merge_commit = str(pull.get("merge_commit_sha") or "")
+        if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (candidate, published_head, merged_head, merge_commit)):
+            return False
+        if not self._contains(candidate, merged_head) or not self._contains(merged_head, merge_commit):
+            return False
+        branch_result = self.client.branch(expected_base)
+        branch_payload = branch_result.payload
+        branch_commit = branch_payload.get("commit") if isinstance(branch_payload, dict) else None
+        base_tip = str(branch_commit.get("sha") or "") if isinstance(branch_commit, dict) else ""
+        if branch_result.status != "OK" or not re.fullmatch(r"[0-9a-f]{40}", base_tip) or not self._contains(merge_commit, base_tip):
+            return False
+        merged_by_payload = pull.get("merged_by")
+        if not isinstance(merged_by_payload, dict):
+            return False
+        merged_by = str(merged_by_payload.get("login") or "")
+        if not merged_by:
+            return False
+        if merged_head != published_head:
+            expected_approver = self._github_approver()
+            if not expected_approver or merged_by.casefold() != expected_approver.casefold() or not self._green_checks(merged_head):
+                return False
+        record_observed_merge(
+            self.store,
+            task_id,
+            candidate,
+            repository=repository,
+            pr=number,
+            published_head_sha=published_head,
+            merged_head_sha=merged_head,
+            merge_commit_sha=merge_commit,
+            base=expected_base,
+            merged_by=merged_by,
+        )
+        return True
+
+    def _github_approver(self) -> str | None:
+        prefix, separator, value = str(self.approver_id or "").partition(":")
+        return value if separator and prefix.casefold() == "github" and value else None
+
+    def _contains(self, ancestor: str, descendant: str) -> bool:
+        if ancestor == descendant:
+            return True
+        result = self.client.compare_commits(ancestor, descendant)
+        payload = result.payload
+        if result.status != "OK" or not isinstance(payload, dict):
+            return False
+        merge_base = payload.get("merge_base_commit")
+        return bool(
+            isinstance(merge_base, dict)
+            and payload.get("status") in {"ahead", "identical"}
+            and str(merge_base.get("sha") or "") == ancestor
+        )
+
+    def _green_checks(self, head_sha: str) -> bool:
+        result = self.client.check_runs(head_sha)
+        payload = result.payload
+        if result.status != "OK" or not isinstance(payload, dict):
+            return False
+        runs = payload.get("check_runs")
+        total = payload.get("total_count")
+        return bool(
+            isinstance(runs, list)
+            and runs
+            and type(total) is int
+            and total == len(runs)
+            and total <= 100
+            and all(
+                isinstance(run, dict)
+                and run.get("head_sha") == head_sha
+                and run.get("status") == "completed"
+                and run.get("conclusion") == "success"
+                for run in runs
+            )
+        )
 
     def publish_done(self, issue_number: str, candidate_sha: str) -> str:
         retry = RetryRegistry(self.store)
@@ -721,6 +859,15 @@ class GitHubOutboundSync(OutboundSync):
                 issue_number,
                 "BACKOFF",
                 {"candidate_sha": candidate_sha, "next_attempt_at": decision.next_attempt_at},
+            )
+        label = self.client.remove_issue_label(issue_number, BLOCKED_OUTBOUND_LABEL)
+        if label.status != "OK":
+            retry.record_failure(key, label.status)
+            return self.publish(
+                "github",
+                issue_number,
+                label.status,
+                {"candidate_sha": candidate_sha, "label": label.status},
             )
         comment = self.client.comment_issue(
             issue_number, f"StageMesh integrated candidate `{candidate_sha}`.")
@@ -734,7 +881,7 @@ class GitHubOutboundSync(OutboundSync):
             "github",
             issue_number,
             status,
-            {"candidate_sha": candidate_sha, "comment": comment.status, "close": close.status},
+            {"candidate_sha": candidate_sha, "label": label.status, "comment": comment.status, "close": close.status},
         )
 
     def publish_blocked(self, issue_number: str, reason: str) -> str:
