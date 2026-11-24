@@ -533,7 +533,11 @@ def test_closed_source_does_not_distract_from_an_actionable_issue(tmp_path: Path
 def test_closed_spec_does_not_mask_source_contract_block(tmp_path: Path) -> None:
     store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["137", "205"])
     states = {
-        "137": {"state": "CLOSED", "eligible": False},
+        "137": {
+            "state": "CLOSED",
+            "eligible": False,
+            "objective": "StageMesh status: BLOCKED - old authorization request",
+        },
         "205": {
             "state": "OPEN",
             "eligible": False,
@@ -1488,7 +1492,7 @@ def test_cli_plan_is_read_only_and_shows_the_selection(tmp_path: Path, capsys: p
     again.close()
 
 
-@pytest.mark.parametrize("blocker", [None, "dirty", "active", "diverged", "unavailable"])
+@pytest.mark.parametrize("blocker", [None, "dead", "dirty", "active", "diverged", "unavailable"])
 def test_pr_window_refresh_uses_live_tip_or_preserves_the_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str | None,
 ) -> None:
@@ -1515,15 +1519,32 @@ def test_pr_window_refresh_uses_live_tip_or_preserves_the_checkout(
     monkeypatch.setattr(rw, "_remote_baseline", upstream)
     if blocker == "dirty":
         (project / "keep.txt").write_text("unsaved work", encoding="utf-8")
-    if blocker == "active":
-        store.start_execution(task_id="1", claim_id=None, kind=ExecutionKind.VALIDATION)
+    if blocker in {"active", "dead"}:
+        kind = ExecutionKind.REVIEW if blocker == "dead" else ExecutionKind.VALIDATION
+        store.start_execution(task_id="1", claim_id=None, kind=kind)
+    if blocker == "dead":
+        monkeypatch.setattr("stagemesh.queue_visibility.classify_process", lambda *_: "DEAD")
+        monkeypatch.setattr("stagemesh.operator_actions._process_state", lambda *_: "DEAD")
     preview = rw.check_pr_window_baseline(store, project, ref, plan=True)
     assert not preview.ok
     assert facts.git.head() == facts.resolve(tracked) == old
+    if blocker in {"active", "dead"}:
+        assert len(list(store.running_executions())) == 1
 
-    result = rw.check_pr_window_baseline(store, project, ref, plan=False)
+    startup_recoveries = []
+    result = rw.check_pr_window_baseline(store, project, ref, plan=False, startup_recoveries=startup_recoveries)
 
-    assert result.ok == (blocker is None)
+    assert result.ok == (blocker in {None, "dead"})
+    if blocker == "dead":
+        assert not list(store.running_executions())
+        checks, recovered = rw.preflight(
+            store, project, cli_module.load_config(project),
+            rw.WindowOptions(report_path=None), base_ref=ref, runtime=FRESH, provider_check=OK_PROVIDERS,
+            repo_state=lambda: RepoState(main_ref=ref, main_sha=remote, origin_sha=remote, relation="in_sync"),
+            live_baseline=result, startup_recoveries=startup_recoveries,
+        )
+        assert all(check.ok for check in checks)
+        assert [receipt["action"] for receipt in recovered] == ["RELEASED"]
     assert facts.git.head() == (remote if result.ok else old)
     if blocker == "dirty":
         assert (project / "keep.txt").read_text(encoding="utf-8") == "unsaved work"

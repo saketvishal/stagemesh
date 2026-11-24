@@ -2082,8 +2082,9 @@ def command_run_window(args: argparse.Namespace) -> int:
             persisted.close()
     store.migrate()
     try:
+        startup_recoveries = []
         live_baseline = None if local or options.auto_merge_ff else check_pr_window_baseline(
-            store, project, base_ref, plan=args.plan,
+            store, project, base_ref, plan=args.plan, startup_recoveries=startup_recoveries,
         )
         repository_ready = live_baseline is None or live_baseline.ok
         scope = None
@@ -2193,6 +2194,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
             checkout_ref=lambda: _current_branch_ref(project),
             live_baseline=live_baseline,
+            startup_recoveries=startup_recoveries,
             on_merged=on_merged,
             follow_up_scheduler=default_scheduler(project) if options.follow_up else None,
         )

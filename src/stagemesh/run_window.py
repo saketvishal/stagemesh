@@ -361,7 +361,7 @@ def _actionable_source_reason(state: dict[str, Any], reason: str) -> str:
     """Turn an internal source refusal into a plain reason plus a safe next action."""
     if reason == "source synchronization incomplete":
         return "GitHub issue eligibility was not fully synchronized; next: rerun stagemesh init, then rerun stagemesh run-window"
-    if reason == "source closed":
+    if reason == "source closed" or str(state.get("state", "")).upper() == "CLOSED":
         return "GitHub issue is closed"
     if reason == "source contract declares BLOCKED":
         detail = declared_block_detail(str(state.get("objective") or ""))
@@ -695,7 +695,10 @@ def _remote_baseline(project: Path, base_ref: str, *, plan: bool) -> str | None:
     return None
 
 
-def check_pr_window_baseline(store: Store, project: Path, base_ref: str, *, plan: bool) -> Check:
+def check_pr_window_baseline(
+    store: Store, project: Path, base_ref: str, *, plan: bool,
+    startup_recoveries: list[dict[str, Any]] | None = None,
+) -> Check:
     """Verify a live upstream tip before source sync can use the local integration branch."""
     branch = base_ref.removeprefix("refs/heads/")
     access_hint = f"verify Git access to origin/{branch}, then rerun the window"
@@ -715,6 +718,10 @@ def check_pr_window_baseline(store: Store, project: Path, base_ref: str, *, plan
                 f"{branch} differs from live origin/{branch} at {remote}; a preview cannot refresh the checkout",
                 fix="a live PR-only window can fast-forward a clean checkout",
             )
+        # The normal preflight recovery must happen before a behind checkout can move.
+        recovered = _recover_dead_executions(store, queue_control_report(store)["active_executions"])
+        if startup_recoveries is not None:
+            startup_recoveries.extend(recovered)
         return _fast_forward_window_baseline(store, git, base_ref, local, remote)
     except subprocess.TimeoutExpired:
         return Check("repo", False, f"timed out verifying live origin/{branch}", fix=access_hint)
@@ -835,6 +842,11 @@ def repository_preflight_checks(
     return checks
 
 
+def _recover_dead_executions(store: Store, executions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tasks = sorted({row["task_id"] for row in executions if row["process_state"] == "DEAD"})
+    return [{"task_id": task_id, **action.to_dict()} for task_id in tasks for action in recover_stale(store, task_id)]
+
+
 def preflight(
     store: Store,
     project: Path,
@@ -848,6 +860,7 @@ def preflight(
     recover: bool = True,
     checkout_ref: Callable[[], str | None] | None = None,
     live_baseline: Check | None = None,
+    startup_recoveries: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Check], list[dict[str, Any]]]:
     """Everything that must be true before unattended work starts. Returns (checks, executions auto-recovered)."""
     checks: list[Check] = []
@@ -857,7 +870,7 @@ def preflight(
                  and options.merge_policy in {"hosted", "stagemesh"}
                  and (options.merge_policy != "stagemesh" or (type(options.check_app_id) is int and options.check_app_id > 0)))
         checks.append(Check("auto_merge_ff", valid, f"{options.merge_policy} parallel development with serialized exact-candidate landing and named hosted checks" if valid else "automatic merging requires PR mode, positive concurrency, PR publishing, independent review, named checks and a trusted check app for stagemesh mode"))
-    recovered: list[dict[str, Any]] = []
+    recovered = list(startup_recoveries or ())
 
     fresh = runtime or check_runtime(project)
     if fresh.stale:
@@ -881,10 +894,8 @@ def preflight(
     )
 
     # Stale executions: DEAD ones are recovered (provably safe); LIVE and UNKNOWN ones fail closed.
-    active = list(control["active_executions"])
-    for task_id in sorted({e["task_id"] for e in active if e["process_state"] == "DEAD"}) if recover else []:
-        for action in recover_stale(store, task_id):
-            recovered.append({"task_id": task_id, **action.to_dict()})
+    if recover:
+        recovered.extend(_recover_dead_executions(store, control["active_executions"]))
     still = [e for e in queue_control_report(store)["active_executions"]]
     if still:
         lines = []
@@ -1177,6 +1188,7 @@ def run_window(
     prepare_staging: Callable[[], object] | None = None,
     checkout_ref: Callable[[], str | None] | None = None,
     live_baseline: Check | None = None,
+    startup_recoveries: list[dict[str, Any]] | None = None,
     clock: Callable[[], float] = time.time,
     merge_pr: Callable[[Any, float], dict[str, Any]] | None = None,
     merge_setup_error: str | None = None,
@@ -1191,7 +1203,7 @@ def run_window(
     window_wall_start = time.time()  # ledger timestamps are wall-clock even when the window runs on an injected clock
     report.preflight, report.recovered = preflight(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
-        checkout_ref=checkout_ref, live_baseline=live_baseline,
+        checkout_ref=checkout_ref, live_baseline=live_baseline, startup_recoveries=startup_recoveries,
     )
     attached_scope = getattr(store, "selection_scope", None)
     if attached_scope is not None:
