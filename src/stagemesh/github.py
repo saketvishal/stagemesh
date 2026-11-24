@@ -148,6 +148,38 @@ class GitHubClient:
             return GitHubResult("UNKNOWN", result.payload)
         return result
 
+    def repository(self) -> GitHubResult:
+        code, headers, payload = self.transport.request(
+            "GET", f"/repos/{self.owner}/{self.repo}"
+        )
+        return self._result(code, headers, payload)
+
+    def pull_request(self, number: int) -> GitHubResult:
+        code, headers, payload = self.transport.request(
+            "GET", f"/repos/{self.owner}/{self.repo}/pulls/{int(number)}"
+        )
+        return self._result(code, headers, payload)
+
+    def branch(self, name: str) -> GitHubResult:
+        code, headers, payload = self.transport.request(
+            "GET", f"/repos/{self.owner}/{self.repo}/branches/{quote(name, safe='')}"
+        )
+        return self._result(code, headers, payload)
+
+    def compare_commits(self, base: str, head: str) -> GitHubResult:
+        code, headers, payload = self.transport.request(
+            "GET",
+            f"/repos/{self.owner}/{self.repo}/compare/{quote(base, safe='')}...{quote(head, safe='')}",
+        )
+        return self._result(code, headers, payload)
+
+    def check_runs(self, sha: str) -> GitHubResult:
+        code, headers, payload = self.transport.request(
+            "GET",
+            f"/repos/{self.owner}/{self.repo}/commits/{quote(sha, safe='')}/check-runs?per_page=100",
+        )
+        return self._result(code, headers, payload)
+
     def comment_issue(self, number: str, body: str) -> GitHubResult:
         code, headers, payload = self.transport.request(
             "POST", f"/repos/{self.owner}/{self.repo}/issues/{number}/comments", {"body": body}

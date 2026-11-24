@@ -1,9 +1,10 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.50 preserves a successful
-normal-review recheck, schedules only the pending adverse role, and repairs the
-false 0.6.49 step-cap block without rerunning implementation. See the
+files as reinstallable package points. Version 0.6.51 reconciles a StageMesh-
+published PR that was merged outside the active landing callback, then safely
+clears the stale source block and closes the delivered GitHub issue. See the
+[0.6.51 release notes](releases/0.6.51.md),
 [0.6.50 release notes](releases/0.6.50.md),
 [0.6.49 release notes](releases/0.6.49.md),
 [0.6.48 release notes](releases/0.6.48.md),
@@ -49,14 +50,14 @@ false 0.6.49 step-cap block without rerunning implementation. See the
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.50` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.51` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.50
+python -m pip install --no-cache-dir stagemesh==0.6.51
 ```
 
-The preceding `0.6.49` release remains available for rollback. The older
+The preceding `0.6.50` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -65,6 +66,7 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 
 Current lines:
 
+- `0.6.51`: verified external-merge reconciliation and automatic GitHub source completion for StageMesh-published PRs.
 - `0.6.50`: role-aware review history, durable browser/review progress milestones, and automatic repair of the 0.6.49 false review step-cap block.
 - `0.6.49`: one-time, same-origin headless evidence expansion for retained browser-review candidates, followed by receipt-bound independent re-review.
 - `0.6.48`: one-time migration for exhausted legacy recovery budgets when newer verified browser evidence authorizes exact-candidate re-review.

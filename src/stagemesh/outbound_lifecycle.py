@@ -22,8 +22,8 @@ def sync_outbound_outcomes(
     """Publish DONE/BLOCKED outcomes of GitHub-sourced tasks; never raises and never changes local task state.
 
     `tasks` are the rows this coordinator owns (a parallel worker never touches another task's issue). `transitioned` maps task ids that reached DONE or BLOCKED during this tick to that outcome. Only those tasks are published,
-    plus tasks whose last outbound attempt for the same outcome failed, so enabling sync never comments on or closes
-    historical issues. Local-only tasks are skipped. A failed publish is recorded as a source event and retried with backoff.
+    plus tasks whose last outbound attempt for the same outcome failed or whose StageMesh-published PR is now proven merged.
+    Local-only tasks are skipped. A failed publish is recorded as a source event and retried with backoff.
     """
     results: list[dict[str, Any]] = []
     for task in tasks:
@@ -46,8 +46,13 @@ def sync_outbound_outcomes(
             subject = _subject(store, task_id, outcome)
             if subject is None:
                 continue
+            if outcome == "DONE":
+                reconcile = getattr(sync, "reconcile_merged", None)
+                if callable(reconcile):
+                    reconcile(task_id)
             state = _last_attempt(store, issue, outcome, subject)
-            if state == "OK" or (state is None and transitioned.get(task_id) != outcome):
+            delivery_merged = outcome == "DONE" and _delivery_state(store, task_id) == "MERGED"
+            if state == "OK" or (state is None and transitioned.get(task_id) != outcome and not delivery_merged):
                 continue
             if not RetryRegistry(store).decision(key).allowed:
                 continue
@@ -117,6 +122,12 @@ def _delivery_allows_closure(store: Store, task_id: str) -> bool:
     from .delivery_state import task_delivery
 
     return task_delivery(store, task_id).state in {"MERGED", "INTEGRATED_LOCALLY"}
+
+
+def _delivery_state(store: Store, task_id: str) -> str:
+    from .delivery_state import task_delivery
+
+    return task_delivery(store, task_id).state
 
 
 def outcomes(tasks: list[Any]) -> dict[str, str]:

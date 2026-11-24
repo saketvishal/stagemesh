@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 from test_parallel import Rig, ScriptedExecutor
@@ -9,9 +10,12 @@ from test_parallel import Rig, ScriptedExecutor
 from stagemesh.audit import record_audit
 from stagemesh.concurrency import IntegrationLock
 from stagemesh.coordinator import Coordinator
+from stagemesh.delivery_state import PR_MERGED_OBSERVED, record_publication, task_delivery
+from stagemesh.domain import Stage
 from stagemesh.github import GitHubClient
 from stagemesh.outbound_lifecycle import sync_outbound_outcomes
 from stagemesh.parallel import worker_id_for
+from stagemesh.persistence import Store
 from stagemesh.serialized_integration import SerializedIntegrator
 from stagemesh.task_sources import BLOCKED_OUTBOUND_LABEL, GitHubOutboundSync, _blocked_marker
 
@@ -99,6 +103,239 @@ def test_done_sync_is_idempotent_across_ticks(tmp_path):
         coord.tick()
     assert rig.store.get_task("A")["status"] == "DONE"
     assert len(transport.calls("POST")) == 1 and len(transport.calls("PATCH")) == 1
+
+
+class MergedPRTransport(FakeTransport):
+    def __init__(
+        self,
+        candidate: str,
+        *,
+        changed_head: bool = False,
+        merged: bool = True,
+        merged_by: str = "owner",
+        checks: str = "success",
+        contain_candidate: bool = True,
+        merge_on_base: bool = True,
+        state: str = "closed",
+        base_ref: str = "main",
+        head_repo: str = "o/r",
+        label_status: int = 200,
+    ):
+        super().__init__()
+        self.candidate = candidate
+        self.head = "a" * 40 if changed_head else candidate
+        self.merge = "b" * 40
+        self.tip = "c" * 40
+        self.merged = merged
+        self.merged_by = merged_by
+        self.checks = checks
+        self.contain_candidate = contain_candidate
+        self.merge_on_base = merge_on_base
+        self.state = state
+        self.base_ref = base_ref
+        self.head_repo = head_repo
+        self.label_status = label_status
+
+    def request(self, method, path, body=None):
+        self.requests.append((method, path, body))
+        root = "/repos/o/r"
+        if method == "GET" and path == root:
+            return 200, {}, {"full_name": "o/r", "default_branch": "main"}
+        if method == "GET" and path == f"{root}/pulls/236":
+            return 200, {}, {
+                "number": 236,
+                "state": self.state if self.merged else "open",
+                "merged": self.merged,
+                "merged_at": "2026-11-23T23:34:12Z" if self.merged else None,
+                "merge_commit_sha": self.merge if self.merged else None,
+                "merged_by": {"login": self.merged_by},
+                "head": {"sha": self.head, "ref": "wave/task-A", "repo": {"full_name": self.head_repo}},
+                "base": {"ref": self.base_ref, "repo": {"full_name": "o/r"}},
+            }
+        if method == "GET" and path == f"{root}/branches/main":
+            return 200, {}, {"commit": {"sha": self.tip}}
+        if method == "GET" and path.startswith(f"{root}/compare/"):
+            pair = path.removeprefix(f"{root}/compare/")
+            ancestor, descendant = pair.split("...", 1)
+            allowed = {
+                (self.candidate, self.head): self.contain_candidate,
+                (self.head, self.merge): True,
+                (self.merge, self.tip): self.merge_on_base,
+            }
+            if allowed.get((ancestor, descendant), False):
+                return 200, {}, {"status": "ahead", "merge_base_commit": {"sha": ancestor}}
+            return 200, {}, {"status": "diverged", "merge_base_commit": {"sha": "d" * 40}}
+        if method == "GET" and path == f"{root}/commits/{self.head}/check-runs?per_page=100":
+            runs = [] if self.checks == "missing" else [{
+                "name": "check",
+                "head_sha": self.head,
+                "status": "completed",
+                "conclusion": self.checks,
+            }]
+            return 200, {}, {"total_count": len(runs), "check_runs": runs}
+        if method == "GET" and path.startswith(f"{root}/issues/101/comments?"):
+            return 200, {}, []
+        if method == "DELETE":
+            return self.label_status, {}, {}
+        if method == "POST":
+            return 201, {}, {"id": 1}
+        if method == "PATCH":
+            return 200, {}, {}
+        return 404, {}, {"message": "not found"}
+
+
+def _published_done_task(tmp_path):
+    store = Store(tmp_path / "ledger.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("task 101", source="github", source_id="101")
+    candidate = "1" * 40
+    store.add_candidate(task_id, candidate, "codex", durable_handoff=True)
+    store.advance_task(task_id, Stage.DONE)
+    record_publication(
+        store,
+        task_id,
+        "https://github.com/o/r/pull/236",
+        candidate,
+        "main",
+        repository="o/r",
+    )
+    return store, task_id, candidate
+
+
+@pytest.mark.parametrize("changed_head", [False, True])
+def test_externally_merged_stage_owned_pr_closes_issue_once(tmp_path, changed_head):
+    store, task_id, candidate = _published_done_task(tmp_path)
+    transport = MergedPRTransport(candidate, changed_head=changed_head)
+    sync = GitHubOutboundSync(
+        store,
+        GitHubClient("o", "r", transport),
+        approver_id="github:owner",
+    )
+
+    for _ in range(2):
+        sync_outbound_outcomes(
+            store, sync, frozenset({"github"}), [store.get_task(task_id)], {}
+        )
+
+    assert task_delivery(store, task_id, "o/r").state == "MERGED"
+    observed = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type=?", (PR_MERGED_OBSERVED,)
+    ).fetchall()
+    assert len(observed) == 1
+    payload = json.loads(observed[0]["payload"])
+    assert payload["candidate_sha"] == candidate
+    assert payload["merged_head_sha"] == transport.head
+    assert payload["head_changed_after_publication"] is changed_head
+    check_paths = [path for method, path, _ in transport.requests if method == "GET" and "check-runs" in path]
+    assert bool(check_paths) is changed_head
+    assert transport.calls("DELETE") == [
+        ("DELETE", "/repos/o/r/issues/101/labels/stagemesh%3Atask-blocked", None)
+    ]
+    assert len(transport.calls("PATCH")) == 1
+    assert len([call for call in transport.calls("POST") if call[1].endswith("/comments")]) == 1
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"merged": False},
+        {"changed_head": True, "merged_by": "someone-else"},
+        {"changed_head": True, "checks": "failure"},
+        {"changed_head": True, "checks": "missing"},
+        {"changed_head": True, "contain_candidate": False},
+        {"merge_on_base": False},
+        {"state": "open"},
+        {"base_ref": "release"},
+        {"head_repo": "somebody/fork"},
+        {"merged_by": ""},
+    ],
+)
+def test_external_merge_reconciliation_fails_closed(tmp_path, options):
+    store, task_id, candidate = _published_done_task(tmp_path)
+    transport = MergedPRTransport(candidate, **options)
+    sync = GitHubOutboundSync(
+        store,
+        GitHubClient("o", "r", transport),
+        approver_id="github:owner",
+    )
+
+    sync_outbound_outcomes(
+        store, sync, frozenset({"github"}), [store.get_task(task_id)], {}
+    )
+
+    assert task_delivery(store, task_id, "o/r").state != "MERGED"
+    assert transport.calls("DELETE") == []
+    assert transport.calls("PATCH") == []
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE event_type=?", (PR_MERGED_OBSERVED,)
+    ).fetchone()[0] == 0
+
+
+def test_changed_head_requires_configured_github_approver(tmp_path):
+    store, task_id, candidate = _published_done_task(tmp_path)
+    transport = MergedPRTransport(candidate, changed_head=True)
+    sync = GitHubOutboundSync(store, GitHubClient("o", "r", transport))
+
+    sync_outbound_outcomes(
+        store, sync, frozenset({"github"}), [store.get_task(task_id)], {}
+    )
+
+    assert task_delivery(store, task_id, "o/r").state == "PUBLISHED"
+    assert transport.calls("DELETE") == []
+    assert transport.calls("PATCH") == []
+
+
+def test_merged_issue_is_not_closed_when_blocked_label_cannot_be_removed(tmp_path):
+    store, task_id, candidate = _published_done_task(tmp_path)
+    transport = MergedPRTransport(candidate, label_status=403)
+    sync = GitHubOutboundSync(
+        store,
+        GitHubClient("o", "r", transport),
+        approver_id="github:owner",
+    )
+
+    sync_outbound_outcomes(
+        store, sync, frozenset({"github"}), [store.get_task(task_id)], {}
+    )
+
+    assert task_delivery(store, task_id, "o/r").state == "MERGED"
+    assert transport.calls("PATCH") == []
+    assert [call for call in transport.calls("POST") if call[1].endswith("/comments")] == []
+
+
+def test_cli_wires_protected_approval_authority_into_merge_reconciliation(tmp_path):
+    from stagemesh.cli import _github_outbound
+
+    store = Store(tmp_path / "ledger.sqlite3")
+    store.migrate()
+    config = SimpleNamespace(
+        task_sources=(SimpleNamespace(name="issues", kind="github"),),
+        github=SimpleNamespace(owner="o", repo="r", token="token"),
+        approval_authority=SimpleNamespace(approver_id="github:owner"),
+    )
+
+    sync, sources = _github_outbound(config, store, dry_run=False)
+
+    assert sources == frozenset({"issues"})
+    assert sync.approver_id == "github:owner"
+
+
+def test_run_window_start_reconciles_merged_pr_without_eligible_coding_work(tmp_path):
+    from stagemesh.cli import _reconcile_github_outbound
+
+    store, task_id, candidate = _published_done_task(tmp_path)
+    transport = MergedPRTransport(candidate, changed_head=True)
+    sync = GitHubOutboundSync(
+        store,
+        GitHubClient("o", "r", transport),
+        approver_id="github:owner",
+    )
+
+    _reconcile_github_outbound(store, sync, frozenset({"github"}))
+
+    assert store.get_task(task_id)["status"] == "DONE"
+    assert task_delivery(store, task_id, "o/r").state == "MERGED"
+    assert len(transport.calls("PATCH")) == 1
 
 
 def test_enabling_sync_does_not_touch_tasks_that_were_already_done(tmp_path):

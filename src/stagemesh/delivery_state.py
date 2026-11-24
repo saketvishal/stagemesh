@@ -10,7 +10,7 @@ from facts the ledger already records plus two it now records (`delivery.pr_publ
     DELIVERY_PENDING       publication was deferred (window deadline, publisher unavailable or failed); the work is preserved
     PUBLISHED              PR open for the exact integrated head
     AWAITING_CHECKS        PR open and the landing guard is waiting for hosted checks or mergeability
-    MERGED                 the exact head landed upstream (verified by the landing guard)
+    MERGED                 the task candidate landed upstream in a verified merge
     EXTERNALLY_BLOCKED     an external permission or approval is required; recorded once, never worked around
 
 `complete` is true only for MERGED, or INTEGRATED_LOCALLY when the operator chose local mode. Upstream issue closure is derived
@@ -30,10 +30,11 @@ from .domain import Stage, TaskStatus
 from .persistence import Store
 
 PR_PUBLISHED = "delivery.pr_published"
+PR_MERGED_OBSERVED = "delivery.pr_merged_observed"
 EXTERNALLY_BLOCKED = "delivery.externally_blocked"
 DELIVERY_UNBLOCKED = "delivery.unblocked"
 PENDING = "task.pr_delivery_pending"
-MERGED_EVENTS = ("window.fast_forward_merged",)
+MERGED_EVENTS = ("window.fast_forward_merged", PR_MERGED_OBSERVED)
 LANDING_STATUS = "window.landing_status"
 LANDING_RESULT = "window.landing_result"
 
@@ -150,6 +151,45 @@ def record_publication(
     })
 
 
+def publication_record(
+    store: Store, task_id: str, candidate_sha: str, repository: str | None = None
+) -> dict[str, Any] | None:
+    return _latest(store, PR_PUBLISHED, task_id, candidate_sha, repository)
+
+
+def record_observed_merge(
+    store: Store,
+    task_id: str,
+    candidate_sha: str,
+    *,
+    repository: str,
+    pr: int,
+    published_head_sha: str,
+    merged_head_sha: str,
+    merge_commit_sha: str,
+    base: str,
+    merged_by: str,
+) -> bool:
+    """Record one externally completed, identity- and ancestry-verified delivery."""
+    if _latest(store, PR_MERGED_OBSERVED, task_id, candidate_sha, repository) is not None:
+        return False
+    record_audit(store, PR_MERGED_OBSERVED, {
+        "task_id": task_id,
+        "candidate_sha": candidate_sha,
+        "repository": repository.casefold(),
+        "pr": pr,
+        "published_head_sha": published_head_sha,
+        "merged_head_sha": merged_head_sha,
+        "merge_commit_sha": merge_commit_sha,
+        "base": base,
+        "merged_by": merged_by,
+        "head_changed_after_publication": merged_head_sha != published_head_sha,
+        "observed_external_merge": True,
+        "at": time.time(),
+    })
+    return True
+
+
 def record_external_block(store: Store, task_id: str, candidate_sha: str | None, reason: str, needed: str) -> bool:
     """Record an external-permission blocker once per task and candidate. Returns False when it was already on record."""
     existing = _latest(store, EXTERNALLY_BLOCKED, task_id, candidate_sha)
@@ -190,7 +230,7 @@ def task_delivery(store: Store, task_id: str, repository: str | None = None) -> 
     if blocked is not None and not _merged(store, task_id, sha):
         return Delivery("EXTERNALLY_BLOCKED", False, f"needs {blocked.get('needed')}: {blocked.get('reason')}", pr_url, sha)
     if _merged(store, task_id, sha):
-        return Delivery("MERGED", True, "the exact reviewed head landed upstream", pr_url, sha)
+        return Delivery("MERGED", True, "the task candidate landed upstream in a verified merge", pr_url, sha)
     if published is not None:
         status = _latest(store, LANDING_STATUS, task_id, sha, repository)
         if status is not None and status.get("state") in {"waiting", "refresh required", "blocked"}:
