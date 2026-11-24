@@ -24,6 +24,8 @@ import json
 import os
 import re
 import shlex
+import sqlite3
+import subprocess
 import time
 import uuid
 from collections.abc import Callable
@@ -33,6 +35,7 @@ from typing import Any
 
 from .audit import record_audit
 from .auto_plan import AutoPlanError, create_contract, outside_label_selector
+from .autonomy.gitfacts import GitFacts
 from .block_kinds import (
     BlockKind,
     classify_block,
@@ -41,7 +44,7 @@ from .block_kinds import (
     runtime_fingerprint,
 )
 from .capabilities import CapabilityRegistryError, task_capability_summary
-from .concurrency import contract_conflict
+from .concurrency import IntegrationLock, IntegrationLockTimeout, contract_conflict
 from .config import StageMeshConfig
 from .contracts import ContractError, bound_contract_from_record
 from .delivery_followup import register_pending_follow_ups, repository_of
@@ -49,6 +52,8 @@ from .delivery_state import externally_blocked, record_external_block, record_la
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .efficiency import BudgetPolicy, check_window_budget
 from .follow_through import consolidate_blockers
+from .git import GitError
+from .objective_roots import declared_block_detail
 from .operator_actions import recover_stale
 from .persistence import Store
 from .queue_control import QueueStopControl
@@ -103,9 +108,13 @@ class Check:
     detail: str
     fatal: bool = True  # a failed fatal check refuses to start the window
     fix: str = ""
+    revision: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return dict(self.__dict__)
+        result = dict(self.__dict__)
+        if self.revision is None:
+            result.pop("revision")
+        return result
 
 
 @dataclass
@@ -352,8 +361,11 @@ def _actionable_source_reason(state: dict[str, Any], reason: str) -> str:
     """Turn an internal source refusal into a plain reason plus a safe next action."""
     if reason == "source synchronization incomplete":
         return "GitHub issue eligibility was not fully synchronized; next: rerun stagemesh init, then rerun stagemesh run-window"
-    if reason == "source closed":
-        return "GitHub issue is closed; next: reopen it only if the work is still required, then rerun stagemesh init"
+    if reason == "source closed" or str(state.get("state", "")).upper() == "CLOSED":
+        return "GitHub issue is closed"
+    if reason == "source contract declares BLOCKED":
+        detail = declared_block_detail(str(state.get("objective") or ""))
+        return f"{reason} {detail}" if detail else reason
     if reason != "source no longer eligible":
         return reason
 
@@ -364,6 +376,8 @@ def _actionable_source_reason(state: dict[str, Any], reason: str) -> str:
         detail = detail[len(wrapper) : -1]
     if detail == "source no longer eligible":
         detail = ""
+    if detail == "source contract declares BLOCKED":
+        return _actionable_source_reason(state, detail)
     if detail.startswith("missing required label(s):"):
         labels = detail.split(":", 1)[1].strip()
         return (
@@ -657,6 +671,98 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
     return Check("providers", True, detail)
 
 
+def _remote_baseline(project: Path, base_ref: str, *, plan: bool) -> str | None:
+    """Read one remote branch, or fetch it into its tracking ref in a live window."""
+    branch = base_ref.removeprefix("refs/heads/")
+    args = (
+        ("ls-remote", "--exit-code", "--refs", "origin", base_ref)
+        if plan else
+        ("fetch", "--no-tags", "--no-prune", "--no-auto-gc", "--no-recurse-submodules",
+         "origin", f"+{base_ref}:refs/remotes/origin/{branch}")
+    )
+    result = subprocess.run(
+        ["git", *args], cwd=project, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=30, check=False,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
+    )
+    if result.returncode:
+        return None
+    if not plan:
+        return GitFacts(project).resolve(f"refs/remotes/origin/{branch}")
+    fields = result.stdout.split()
+    if len(fields) == 2 and fields[1] == base_ref and re.fullmatch(r"[a-f0-9]{40}", fields[0]):
+        return fields[0]
+    return None
+
+
+def check_pr_window_baseline(
+    store: Store, project: Path, base_ref: str, *, plan: bool,
+    startup_recoveries: list[dict[str, Any]] | None = None,
+) -> Check:
+    """Verify a live upstream tip before source sync can use the local integration branch."""
+    branch = base_ref.removeprefix("refs/heads/")
+    access_hint = f"verify Git access to origin/{branch}, then rerun the window"
+    git = GitFacts(project)
+    try:
+        if git.git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.strip() != base_ref:
+            return Check("repo", False, f"the checkout must be on {base_ref}", fix=f"git switch {branch}")
+        remote = _remote_baseline(project, base_ref, plan=plan)
+        if remote is None:
+            return Check("repo", False, f"could not verify live origin/{branch}", fix=access_hint)
+        local = git.resolve(base_ref)
+        if local == remote:
+            return Check("repo", True, f"{branch} matches live origin/{branch} at {remote}", revision=remote)
+        if plan:
+            return Check(
+                "repo", False,
+                f"{branch} differs from live origin/{branch} at {remote}; a preview cannot refresh the checkout",
+                fix="a live PR-only window can fast-forward a clean checkout",
+            )
+        # The normal preflight recovery must happen before a behind checkout can move.
+        recovered = _recover_dead_executions(store, queue_control_report(store)["active_executions"])
+        if startup_recoveries is not None:
+            startup_recoveries.extend(recovered)
+        return _fast_forward_window_baseline(store, git, base_ref, local, remote)
+    except subprocess.TimeoutExpired:
+        return Check("repo", False, f"timed out verifying live origin/{branch}", fix=access_hint)
+    except (GitError, IntegrationLockTimeout, OSError, sqlite3.Error):
+        return Check("repo", False, f"could not verify or refresh {branch} safely", fix="run stagemesh doctor and inspect the checkout")
+
+
+def _fast_forward_window_baseline(store: Store, git: GitFacts, base_ref: str, local: str | None, remote: str) -> Check:
+    branch = base_ref.removeprefix("refs/heads/")
+    with IntegrationLock(git.path / ".stagemesh" / "integration.lock", timeout_seconds=5).hold("window-baseline"), store.conn:
+        # Serialize the checkout update with claims and with StageMesh integration.
+        store.conn.execute("BEGIN IMMEDIATE")
+        if QueueStopControl(store).blocks_admission():
+            return Check("repo", False, "queue admission is paused; checkout left unchanged", fix="stagemesh queue-control resume")
+        if store.conn.execute("SELECT 1 FROM claims WHERE active=1 LIMIT 1").fetchone() or any(store.running_executions()):
+            return Check("repo", False, "active StageMesh work owns the checkout", fix="let the active execution finish, then rerun")
+        current = git.git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
+        if current != base_ref or git.resolve(base_ref) != local:
+            return Check("repo", False, "the checkout changed during refresh", fix="verify the checkout and rerun the window")
+        if not local or not git.is_ancestor(local, remote):
+            return Check(
+                "repo", False, f"{branch} cannot fast-forward to live origin/{branch} at {remote}",
+                fix="preserve local commits and restore an aligned integration checkout before rerunning",
+            )
+        status = git.git.run(
+            "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "-z", encoding="utf-8",
+        ).stdout
+        # StageMesh creates untracked runtime files even in projects that do not ignore .stagemesh.
+        if any(entry and not entry.startswith("?? .stagemesh/") for entry in status.split("\0")):
+            return Check(
+                "repo", False, "the integration checkout has local changes",
+                fix="preserve the local changes on a separate branch or worktree, then rerun",
+            )
+        updated = git.git.run("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", remote, check=False)
+        if updated.returncode or git.resolve("HEAD") != remote:
+            return Check("repo", False, f"could not fast-forward {branch} to {remote}", fix="inspect the checkout and rerun")
+    return Check(
+        "repo", True, f"fast-forwarded {branch} from {local} to live origin/{branch} at {remote}", revision=remote,
+    )
+
+
 def repository_preflight_checks(
     *,
     integration_mode: str,
@@ -664,6 +770,7 @@ def repository_preflight_checks(
     state: Any | None,
     current_ref: str | None = None,
     check_checkout: bool = False,
+    live_baseline: Check | None = None,
 ) -> list[Check]:
     """Static repository checks shared by `init` and the default run window."""
     if integration_mode != INTEGRATION_PR:
@@ -692,7 +799,12 @@ def repository_preflight_checks(
                 fix=f"git switch {base_ref.removeprefix('refs/heads/')}",
             )
         )
-    if state is None:
+    if live_baseline is not None:
+        if live_baseline.ok and (state is None or state.main_sha != live_baseline.revision):
+            checks.append(Check("repo", False, "the integration branch moved after baseline verification", fix="rerun the window"))
+        else:
+            checks.append(live_baseline)
+    elif state is None:
         checks.append(Check("repo", False, f"cannot read local {base_ref} against origin", fix="git fetch origin"))
     elif not state.main_sha or not state.origin_sha or state.relation not in {"in_sync", "ahead", "behind", "diverged"}:
         checks.append(
@@ -730,6 +842,11 @@ def repository_preflight_checks(
     return checks
 
 
+def _recover_dead_executions(store: Store, executions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tasks = sorted({row["task_id"] for row in executions if row["process_state"] == "DEAD"})
+    return [{"task_id": task_id, **action.to_dict()} for task_id in tasks for action in recover_stale(store, task_id)]
+
+
 def preflight(
     store: Store,
     project: Path,
@@ -742,6 +859,8 @@ def preflight(
     repo_state: Callable[[], Any] | None = None,
     recover: bool = True,
     checkout_ref: Callable[[], str | None] | None = None,
+    live_baseline: Check | None = None,
+    startup_recoveries: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Check], list[dict[str, Any]]]:
     """Everything that must be true before unattended work starts. Returns (checks, executions auto-recovered)."""
     checks: list[Check] = []
@@ -751,7 +870,7 @@ def preflight(
                  and options.merge_policy in {"hosted", "stagemesh"}
                  and (options.merge_policy != "stagemesh" or (type(options.check_app_id) is int and options.check_app_id > 0)))
         checks.append(Check("auto_merge_ff", valid, f"{options.merge_policy} parallel development with serialized exact-candidate landing and named hosted checks" if valid else "automatic merging requires PR mode, positive concurrency, PR publishing, independent review, named checks and a trusted check app for stagemesh mode"))
-    recovered: list[dict[str, Any]] = []
+    recovered = list(startup_recoveries or ())
 
     fresh = runtime or check_runtime(project)
     if fresh.stale:
@@ -775,10 +894,8 @@ def preflight(
     )
 
     # Stale executions: DEAD ones are recovered (provably safe); LIVE and UNKNOWN ones fail closed.
-    active = list(control["active_executions"])
-    for task_id in sorted({e["task_id"] for e in active if e["process_state"] == "DEAD"}) if recover else []:
-        for action in recover_stale(store, task_id):
-            recovered.append({"task_id": task_id, **action.to_dict()})
+    if recover:
+        recovered.extend(_recover_dead_executions(store, control["active_executions"]))
     still = [e for e in queue_control_report(store)["active_executions"]]
     if still:
         lines = []
@@ -804,6 +921,7 @@ def preflight(
             state=repo_state() if options.integration_mode == INTEGRATION_PR and repo_state is not None else None,
             current_ref=checkout_ref() if options.integration_mode == INTEGRATION_PR and checkout_ref is not None else None,
             check_checkout=checkout_ref is not None,
+            live_baseline=live_baseline,
         )
     )
     checks.append(provider_check(store, config, strict_live=options.strict_live))
@@ -852,7 +970,7 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
         return "stagemesh doctor  # a shared fault stopped the window: inspect it before running again"
     prs = [t for t in report.tasks if getattr(t, "ready_for_merge", False)]
     if prs or report.open_wave_prs:
-        return "review and merge the open wave PRs oldest first (normal merge commit), pull main, then run the window again"
+        return "review and merge the open wave PRs oldest first (normal merge commit), then run the window again"
     actionable = [
         task for task in report.tasks if _task_source_still_actionable(store, task.task_id)
     ]
@@ -972,6 +1090,15 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
         return actions.pop()
     if actions:
         return "review the left-alone reasons above and complete each listed next action"
+    source_blocks = [
+        task_id for task_id, reason in report.not_selected.items()
+        if reason.startswith("source contract declares BLOCKED")
+    ]
+    if source_blocks:
+        return (
+            "selected task(s) " + ", ".join(sorted(source_blocks, key=_task_sort_key))
+            + " are held by their GitHub issue contracts; see the declared reasons above"
+        )
     return "nothing to do: no eligible work left"
 
 
@@ -1060,6 +1187,8 @@ def run_window(
     provider_check: Callable[..., Check] = provider_pool_check,
     prepare_staging: Callable[[], object] | None = None,
     checkout_ref: Callable[[], str | None] | None = None,
+    live_baseline: Check | None = None,
+    startup_recoveries: list[dict[str, Any]] | None = None,
     clock: Callable[[], float] = time.time,
     merge_pr: Callable[[Any, float], dict[str, Any]] | None = None,
     merge_setup_error: str | None = None,
@@ -1074,7 +1203,7 @@ def run_window(
     window_wall_start = time.time()  # ledger timestamps are wall-clock even when the window runs on an injected clock
     report.preflight, report.recovered = preflight(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
-        checkout_ref=checkout_ref,
+        checkout_ref=checkout_ref, live_baseline=live_baseline, startup_recoveries=startup_recoveries,
     )
     attached_scope = getattr(store, "selection_scope", None)
     if attached_scope is not None:

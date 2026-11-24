@@ -22,7 +22,7 @@ DIRECT_EXECUTION_LABELS = frozenset(
 
 _PROGRAM_MARKER = re.compile(r"<!--\s*stagemesh-program:v\d+\s*-->", re.IGNORECASE)
 _OPERATIONS_GATE_MARKER = re.compile(r"<!--\s*stagemesh-operations-gate:v\d+\s*-->", re.IGNORECASE)
-_DECLARED_BLOCKED = re.compile(r"^\s*StageMesh\s+status\s*:\s*BLOCKED\b", re.IGNORECASE | re.MULTILINE)
+_DECLARED_BLOCKED = re.compile(r"^\s*StageMesh\s+status\s*:\s*BLOCKED\b([^\r\n]*)", re.IGNORECASE | re.MULTILINE)
 _NO_REPOSITORY_EDITS = re.compile(
     r"(?:^|\n)\s*(?:(?:#{1,6}|[-*])\s*)?(?:\*\*)?Allowed files(?:\*\*)?\s*:?\s*(?:\r?\n\s*)?"
     r"(?:[-*]\s*)?(?:\*\*)?No repository file edits\.?(?:\*\*)?(?=\s|$)",
@@ -47,6 +47,12 @@ def source_issue_is_objective(labels: tuple[str, ...]) -> bool:
     """
     folded = folded_labels(labels)
     return _has_objective_label(folded) and not bool(folded & DIRECT_EXECUTION_LABELS)
+
+
+def declared_block_detail(body: str) -> str:
+    """Bounded explanation from the same declaration used to refuse admission."""
+    match = _DECLARED_BLOCKED.search(body)
+    return "" if match is None else "".join(char for char in match.group(1) if char.isprintable()).strip()[:240]
 
 
 def source_contract_refusal_reason(body: str) -> str | None:

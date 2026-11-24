@@ -1999,6 +1999,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     from .run_window import (
         Check,
         WindowOptions,
+        check_pr_window_baseline,
         format_left_alone,
         format_window_report,
         parse_duration,
@@ -2081,29 +2082,36 @@ def command_run_window(args: argparse.Namespace) -> int:
             persisted.close()
     store.migrate()
     try:
-        try:
-            scope = _prepare_selection_scope(
-                store,
-                project,
-                config,
-                args,
-                integration_ref=base_ref,
-                infer_unfinished=True,
-            )
-        except _SetupError as exc:
-            return exc.code
-        if scope is None:
-            _sync_all_sources(
-                store,
-                project,
-                config,
-                None,
-                preserve_existing_dependencies=True,
-                integration_ref=base_ref,
-            )
-        else:
-            options.required_label = scope.label
-            options.scope_id = scope.id
+        startup_recoveries = []
+        live_baseline = None if local or options.auto_merge_ff else check_pr_window_baseline(
+            store, project, base_ref, plan=args.plan, startup_recoveries=startup_recoveries,
+        )
+        repository_ready = live_baseline is None or live_baseline.ok
+        scope = None
+        if repository_ready:
+            try:
+                scope = _prepare_selection_scope(
+                    store,
+                    project,
+                    config,
+                    args,
+                    integration_ref=base_ref,
+                    infer_unfinished=True,
+                )
+            except _SetupError as exc:
+                return exc.code
+            if scope is None:
+                _sync_all_sources(
+                    store,
+                    project,
+                    config,
+                    None,
+                    preserve_existing_dependencies=True,
+                    integration_ref=base_ref,
+                )
+            else:
+                options.required_label = scope.label
+                options.scope_id = scope.id
         staging_ref = None if local else STAGING_REF
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr,
@@ -2124,7 +2132,7 @@ def command_run_window(args: argparse.Namespace) -> int:
         if args.plan:  # read-only: the same preflight (without recovering anything) and the same selection, nothing started
             checks, _ = preflight(
                 store, project, config, options, base_ref=base_ref, provider_check=provider_pool_check, repo_state=hooks.repo_state, recover=False,
-                checkout_ref=lambda: _current_branch_ref(project),
+                checkout_ref=lambda: _current_branch_ref(project), live_baseline=live_baseline,
             )
             if options.auto_merge_ff:
                 try:
@@ -2132,7 +2140,7 @@ def command_run_window(args: argparse.Namespace) -> int:
                 except Exception as exc:  # noqa: BLE001 -- a read-only policy probe must fail closed
                     policy_error = f"{type(exc).__name__}: {exc}"
                 checks.append(Check("hosted_landing_policy", policy_error is None, policy_error or f"{options.merge_policy} guarded exact-candidate landing policy"))
-            picked, skipped = planned_selection(store, options, project)
+            picked, skipped = planned_selection(store, options, project) if repository_ready else ([], {})
             payload = {
                 "preflight": [c.to_dict() for c in checks],
                 "would_run": picked,
@@ -2161,8 +2169,10 @@ def command_run_window(args: argparse.Namespace) -> int:
             hooks = with_progress(hooks, db_path(project), reporter, heartbeat_seconds=args.heartbeat)
             if merger is not None:
                 merger.progress = reporter.line
-        outbound_sync, outbound_names = _github_outbound(config, store, dry_run=False)
-        _reconcile_github_outbound(store, outbound_sync, outbound_names)
+        outbound_sync, outbound_names = (None, frozenset())
+        if repository_ready:
+            outbound_sync, outbound_names = _github_outbound(config, store, dry_run=False)
+            _reconcile_github_outbound(store, outbound_sync, outbound_names)
 
         def on_merged(task_id: str) -> None:
             task = store.get_task(task_id)
@@ -2183,6 +2193,8 @@ def command_run_window(args: argparse.Namespace) -> int:
             merge_setup_error=merger_error,
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
             checkout_ref=lambda: _current_branch_ref(project),
+            live_baseline=live_baseline,
+            startup_recoveries=startup_recoveries,
             on_merged=on_merged,
             follow_up_scheduler=default_scheduler(project) if options.follow_up else None,
         )
