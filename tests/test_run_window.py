@@ -13,6 +13,7 @@ from test_survivor_wave import Rig, make_store
 import stagemesh.cli as cli_module
 import stagemesh.run_window as rw
 from stagemesh import readiness
+from stagemesh.autonomy.gitfacts import GitFacts
 from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.contract_binding import bind_task_contract
 from stagemesh.diagnosis import TOOL_FAILURE_EVENT
@@ -34,6 +35,7 @@ def OK_PROVIDERS(store, config, strict_live):
 def _no_real_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(readiness, "check_runtime", lambda project: FRESH)  # build_readiness would otherwise run two CLI subprocesses
     monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
+    monkeypatch.setattr(rw, "_remote_baseline", lambda project, base_ref, *, plan: GitFacts(project).resolve(base_ref))
 
 
 class Clock:
@@ -477,7 +479,7 @@ def test_window_explains_missing_github_label_and_the_next_action(tmp_path: Path
     ("state", "reason", "expected"),
     [
         ({}, "source synchronization incomplete", "rerun stagemesh init"),
-        ({}, "source closed", "reopen it only if the work is still required"),
+        ({}, "source closed", "GitHub issue is closed"),
         ({"eligibility_reason": "has excluded label(s): wontfix"}, "source no longer eligible", "remove the excluded label"),
         ({"eligibility_reason": "blocked by label: stagemesh:deferred"}, "source no longer eligible", "remove the blocking label"),
         ({"eligibility_reason": "source objective root"}, "source no longer eligible", "create or select executable child issues"),
@@ -495,7 +497,7 @@ def test_source_refusal_guidance_covers_each_admission_condition(
     assert expected in rw._actionable_source_reason(state, reason)
 
 
-def test_window_with_different_ineligible_causes_points_to_each_listed_action(tmp_path: Path) -> None:
+def test_closed_source_does_not_distract_from_an_actionable_issue(tmp_path: Path) -> None:
     store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["9", "10"])
     states = {
         "9": {"state": "OPEN", "eligible": False, "eligibility_reason": "missing required label(s): stagemesh:ready"},
@@ -524,7 +526,39 @@ def test_window_with_different_ineligible_causes_points_to_each_listed_action(tm
     assert report.ok and rig.runs == []
     assert "9 (GitHub issue is open but missing required label" in rendered
     assert "10 (GitHub issue is closed" in rendered
-    assert report.next_command == "review the left-alone reasons above and complete each listed next action"
+    assert report.next_command.startswith("add stagemesh:ready")
+    assert "reopen" not in rendered
+
+
+def test_closed_spec_does_not_mask_source_contract_block(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["137", "205"])
+    states = {
+        "137": {"state": "CLOSED", "eligible": False},
+        "205": {
+            "state": "OPEN",
+            "eligible": False,
+            "objective": "StageMesh status: BLOCKED - implementation authorization is required.\nOther details.",
+            "eligibility_reason": "source contract declares BLOCKED",
+        },
+    }
+    for task_id, state in states.items():
+        with store.conn:
+            store.conn.execute(
+                "UPDATE tasks SET source='github', source_id=? WHERE id=?",
+                (task_id, task_id),
+            )
+        store.cache_source("github", task_id, state, str(state["state"]))
+
+    report = rw.run_window(
+        store, project, config, options, hooks, base_ref="refs/heads/main", **kwargs,
+    )
+
+    assert not rig.runs
+    assert report.not_selected["137"] == "GitHub issue is closed"
+    assert "implementation authorization is required" in report.not_selected["205"]
+    assert "Other details" not in report.not_selected["205"]
+    assert "205 are held by their GitHub issue contracts" in report.next_command
+    assert "reopen" not in rw.format_window_report(report)
 
 
 def _overlapping_prefix(project: Path, *, files: bool = False) -> None:
@@ -1452,6 +1486,69 @@ def test_cli_plan_is_read_only_and_shows_the_selection(tmp_path: Path, capsys: p
     again = Store_open(project)
     assert last_window(again) is None  # planning started nothing and journaled nothing
     again.close()
+
+
+@pytest.mark.parametrize("blocker", [None, "dirty", "active", "diverged", "unavailable"])
+def test_pr_window_refresh_uses_live_tip_or_preserves_the_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str | None,
+) -> None:
+    store, project = make_store(tmp_path, ["1"])
+    facts = GitFacts(project)
+    ref = facts.git.run("symbolic-ref", "HEAD").stdout.strip()
+    old = facts.git.head()
+    tree = facts.tree(old)
+    assert tree
+    ancestor = () if blocker == "diverged" else ("-p", old)
+    remote = facts.git.run("commit-tree", tree, *ancestor, "-m", "remote update").stdout.strip()
+    tracked = f"refs/remotes/origin/{ref.removeprefix('refs/heads/')}"
+    facts.git.run("update-ref", tracked, old)
+    (project / ".stagemesh" / "runtime-file").write_text("retain", encoding="utf-8")
+
+    # The CI fixture models one independent upstream advance without a network dependency.
+    def upstream(_project, _ref, *, plan):
+        if blocker == "unavailable":
+            return None
+        if not plan:
+            facts.git.run("update-ref", tracked, remote)
+        return remote
+
+    monkeypatch.setattr(rw, "_remote_baseline", upstream)
+    if blocker == "dirty":
+        (project / "keep.txt").write_text("unsaved work", encoding="utf-8")
+    if blocker == "active":
+        store.start_execution(task_id="1", claim_id=None, kind=ExecutionKind.VALIDATION)
+    preview = rw.check_pr_window_baseline(store, project, ref, plan=True)
+    assert not preview.ok
+    assert facts.git.head() == facts.resolve(tracked) == old
+
+    result = rw.check_pr_window_baseline(store, project, ref, plan=False)
+
+    assert result.ok == (blocker is None)
+    assert facts.git.head() == (remote if result.ok else old)
+    if blocker == "dirty":
+        assert (project / "keep.txt").read_text(encoding="utf-8") == "unsaved work"
+    assert (project / ".stagemesh" / "runtime-file").read_text(encoding="utf-8") == "retain"
+    if result.ok:
+        assert result.revision == remote
+        assert "fast-forwarded" in result.detail
+
+
+def test_cli_pr_window_checks_remote_before_source_sync(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, project = make_store(tmp_path, ["1"])
+    store.close()
+    monkeypatch.setattr(rw, "check_runtime", lambda project: FRESH)
+    monkeypatch.setattr(rw, "_remote_baseline", lambda *args, **kwargs: None)
+
+    def unexpected_sync(*args, **kwargs):
+        pytest.fail("source synchronization ran on an unverified baseline")
+
+    monkeypatch.setattr(cli_module, "_sync_all_sources", unexpected_sync)
+    code = cli_module.main(["--project", str(project), "run-window", "--plan", "--tasks", "1", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 2 and data["would_run"] == []
+    assert any(c["name"] == "repo" and not c["ok"] and "live origin" in c["detail"] for c in data["preflight"])
 
 
 def Store_open(project: Path):
