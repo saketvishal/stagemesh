@@ -1331,7 +1331,7 @@ def run_window(
 
         try:
             refresh_expired_quota_checks(
-                store, project, adapters_from_config(config), deadline=deadline,
+                store, project, adapters_from_config(config, unattended=True), deadline=deadline,
                 should_stop=control.blocks_admission, clock=clock,
             )
             refreshed = provider_check(store, config, strict_live=options.strict_live)

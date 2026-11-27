@@ -1191,7 +1191,12 @@ def test_provider_refresh_can_block_after_initial_planning_advisory(
     def check(_store, _config, *, strict_live):
         return next(outcomes)
 
+    def adapters(_config, *, unattended):
+        assert unattended is True
+        return []
+
     monkeypatch.setattr(rw, "provider_pool_check", check)
+    monkeypatch.setattr("stagemesh.providers.adapters_from_config", adapters)
     monkeypatch.setattr("stagemesh.provider_acceptance.refresh_expired_quota_checks", lambda *args, **kwargs: None)
     kwargs["provider_check"] = check
 
