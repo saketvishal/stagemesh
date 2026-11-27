@@ -1,8 +1,9 @@
 # Versioning and stable installs
 
 StageMesh uses annotated Git tags, published GitHub releases, and immutable PyPI
-files as reinstallable package points. Version 0.6.52 checks the live Git baseline
-and verifies the named planning roles before unattended task execution. See the
+files as reinstallable package points. Version 0.6.53 selects independent planning providers from
+the authorized review pool and recovers stale governed plans. See the
+[0.6.53 release notes](releases/0.6.53.md),
 [0.6.52 release notes](releases/0.6.52.md),
 [0.6.51 release notes](releases/0.6.51.md),
 [0.6.50 release notes](releases/0.6.50.md),
@@ -50,14 +51,14 @@ and verifies the named planning roles before unattended task execution. See the
 [0.6.0 release notes](releases/0.6.0.md), and [PyPI publishing](pypi-publishing.md).
 
 A version bump or an unpublished draft does not establish a published release.
-After the `v0.6.52` trusted-publishing workflow succeeds, install the exact public
+After the `v0.6.53` trusted-publishing workflow succeeds, install the exact public
 version in a fresh environment:
 
 ```powershell
-python -m pip install --no-cache-dir stagemesh==0.6.52
+python -m pip install --no-cache-dir stagemesh==0.6.53
 ```
 
-The preceding `0.6.51` release remains available for rollback. The older
+The preceding `0.6.52` release remains available for rollback. The older
 0.5.0 GitHub release can still be installed by pinning its annotated tag:
 
 ```powershell
@@ -65,6 +66,8 @@ python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.
 ```
 
 Current lines:
+
+- `0.6.53`: dynamic governed planning, stale-plan recovery, and matching preview and live staging selection.
 
 - `0.6.52`: live PR window baseline refresh, same-run orphan recovery, and exact planning-role preflight.
 - `0.6.51`: verified external-merge reconciliation and automatic GitHub source completion for StageMesh-published PRs.
