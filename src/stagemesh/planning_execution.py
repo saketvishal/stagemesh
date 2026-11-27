@@ -6,11 +6,12 @@ planning artifacts in the real project.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from .domain import ExecutionKind, ExecutionStatus
 from .efficiency import CallRecorder
 from .execution import (
     PROVIDER_TIMEOUT,
+    classify_failure,
     communicate_bounded,
     popen_session_kwargs,
     provider_timeout_seconds,
@@ -28,6 +30,7 @@ from .execution import (
 from .execution_ownership import RESEARCH_PROCESS_TREE
 from .persistence import Store
 from .process_identity import owner_execution_fields, popen_identity
+from .provider_pool import REVIEW, ProviderPool, default_pools, describe_verdicts
 from .providers import (
     RuntimeCommandAdapter,
     _authorization_refusal,
@@ -43,6 +46,7 @@ from .queue_control import OperatorStopRequested
 from .research_context import source_snapshot
 from .review_identity import command_snapshot, valid_command_snapshot
 from .spec_planning import (
+    BOUNDARY_PICKUP,
     CHALLENGE_FINDING_KINDS,
     MAX_AUTOMATIC_PLANNING_REVISIONS,
     MAX_CANONICAL_CHARS,
@@ -54,7 +58,9 @@ from .spec_planning import (
     PlanningChallengeRefreshRefusal,
     PlanningRevisionRefusal,
     PlanningSpecError,
+    _validated_planning_history,
     automatic_planning_revision_count,
+    check_accountable_approval,
     fit_provider_planning_challenge,
     fit_provider_planning_spec,
     freeze_planning_challenge,
@@ -83,9 +89,164 @@ _PLANNER_PATH_PROTOCOL = (
 
 
 class PlanningExecutionError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, failure_reason: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.failure_reason = failure_reason
+
+
+def _review_identity(adapter: RuntimeCommandAdapter) -> dict[str, Any]:
+    return command_snapshot(adapter.name, adapter.command_for("review"), adapter.all_commands())
+
+
+def _independent(provider: RuntimeCommandAdapter, other: dict[str, Any]) -> bool:
+    return provider.name.casefold() != str(other["provider"]).casefold() and not _identities_overlap(
+        other, _review_identity(provider)
+    )
+
+
+def governed_planning_pool(
+    config: StageMeshConfig, *, unattended: bool | None = None, live_acceptance: str | None = None,
+) -> ProviderPool:
+    """Use the same authorized, capable REVIEW pool and health policy for both planning roles."""
+    adapters = adapters_from_config(config, unattended=unattended)
+    priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}
+    pools = default_pools(
+        [adapter.name for adapter in adapters], config.stage_routes, config.provider_pools,
+        config.single_agent_provider, config.routing_mode,
+        capable={REVIEW: {adapter.name for adapter in adapters if "review" in adapter.capabilities}},
+        priorities=priorities,
+    )
+    return ProviderPool(
+        adapters, pools, cooldown_seconds=config.provider_failure_cooldown_seconds,
+        require_live_acceptance=live_acceptance is not None, block_unproven=live_acceptance == "required",
+        live_acceptance_ttl_seconds=config.live_acceptance_ttl_seconds,
+    )
+
+
+def _planning_candidates(
+    store: Store, pool: ProviderPool, task_id: str | None, preferred: str | None,
+    *, independent_of: dict[str, Any] | None = None, require_pair: bool = False,
+) -> list[RuntimeCommandAdapter]:
+    verdicts = pool.evaluate(store, REVIEW, task_id)
+    eligible = [pool.adapters[v.provider] for v in verdicts if v.eligible]
+    ordered = sorted(eligible, key=lambda adapter: adapter.name != preferred)
+    if independent_of is not None:
+        ordered = [adapter for adapter in ordered if _independent(adapter, independent_of)]
+    if require_pair:
+        identities = [_review_identity(adapter) for adapter in eligible]
+        ordered = [adapter for adapter in ordered if any(_independent(adapter, identity) for identity in identities)]
+    if not ordered:
+        raise PlanningExecutionError(
+            "planning_roles_unavailable",
+            "governed planning needs eligible, independent REVIEW providers. "
+            f"REVIEW pool: {describe_verdicts(verdicts)}",
+        )
+    return ordered
+
+
+def governed_planning_error(
+    store: Store, config: StageMeshConfig, *, task_id: str | None = None,
+    pool: ProviderPool | None = None, strict_live: bool = False,
+    planner: dict[str, Any] | None = None,
+) -> PlanningExecutionError | None:
+    """Check routing without invoking a provider."""
+    try:
+        if pool is None:
+            pool = governed_planning_pool(
+                config, unattended=True, live_acceptance="required" if strict_live else "skip_failed",
+            )
+        preferred = config.planner_provider if planner is None else config.challenger_provider
+        _planning_candidates(
+            store, pool, task_id, preferred, independent_of=planner, require_pair=planner is None,
+        )
+    except PlanningExecutionError as exc:
+        return exc
+    return None
+
+
+def governed_pickup_error(
+    store: Store, project: Path, task_id: str, config: StageMeshConfig, pool: ProviderPool,
+    baseline_sha: str | None,
+) -> PlanningExecutionError | None:
+    """Only require live providers for planning work that remains to be done."""
+    contract = store.task_contract(task_id)
+    contract_hash = str(contract["digest"]) if contract is not None else None
+    approved = check_accountable_approval(
+        store, project, task_id, BOUNDARY_PICKUP, contract_hash=contract_hash, baseline_sha=baseline_sha,
+        record_refusal=False,
+    )
+    if approved is not None and approved.allowed:
+        return None
+
+    planner = None
+    spec, _ = load_planning_artifacts(project, task_id)
+    if spec is not None and spec.get("baseline_sha") == baseline_sha and spec.get("contract_hash") == contract_hash:
+        try:
+            plan_digest = freeze_planning_spec(spec).digest
+            planner = _trusted_receipt(store, PLANNER_RECEIPT, task_id, plan_digest)
+            challenge = load_planning_challenge(project, task_id)
+            if planner is not None and challenge is not None:
+                frozen = freeze_planning_challenge(challenge)
+                receipt = _trusted_receipt(store, CHALLENGER_RECEIPT, task_id, frozen.digest)
+                if receipt is not None and receipt.get("planning_spec_hash") == plan_digest:
+                    if (
+                        frozen.challenge.verdict != "revise"
+                        or frozen.challenge.required_decisions
+                        or automatic_planning_revision_count(store, task_id, plan_digest) >= MAX_AUTOMATIC_PLANNING_REVISIONS
+                    ):
+                        return None
+                    planner = None  # an automatic revision needs a new independent pair
+        except PlanningSpecError:
+            return None  # the planning gate will give the specific artifact error
+    return governed_planning_error(store, config, task_id=task_id, pool=pool, planner=planner)
+
+
+def _retire_stale_governed_plan(
+    store: Store, project: Path, task_id: str, payload: dict[str, Any],
+    baseline_sha: str, contract_hash: str,
+) -> bool:
+    """Archive the previous baseline's exact artifacts before making any of them inactive."""
+    try:
+        frozen = freeze_planning_spec(payload)
+    except PlanningSpecError:
+        return False  # existing validation reports the malformed artifact
+    if (frozen.spec.baseline_sha, frozen.spec.contract_hash) == (baseline_sha, contract_hash):
+        return False
+    receipt = _trusted_receipt(store, PLANNER_RECEIPT, task_id, frozen.digest)
+    if receipt is None or not _receipt_matches(
+        receipt, provider=str(receipt["provider"]), baseline_sha=frozen.spec.baseline_sha,
+        contract_hash=frozen.spec.contract_hash,
+    ):
+        return False  # never retire an unverified operator-authored or damaged plan
+    spec_path, approval_path = planning_artifact_paths(project, task_id)
+    challenge_path = planning_challenge_path(project, task_id)
+    paths = [path for path in (approval_path, challenge_path, spec_path) if path.exists()]
+    if any(not path.is_file() or path.is_symlink() for path in paths):
+        raise PlanningExecutionError("planning_history_unavailable", "invalid active planning artifact")
+    try:
+        history = _validated_planning_history(project, challenge_path, create=True)
+        for path in paths:
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            archive = history / f"{path.stem}.{digest}.stale.json"
+            if not archive.exists():
+                _write_new_bytes(archive, data)
+            if archive.is_symlink() or archive.read_bytes() != data:
+                raise OSError(f"planning archive does not match {path.name}")
+        store.add_audit_event("planning.stale_spec_archived", {
+            "task_id": task_id,
+            "artifact_digest": frozen.digest,
+            "old_baseline": frozen.spec.baseline_sha,
+            "new_baseline": baseline_sha,
+            "old_contract_digest": frozen.spec.contract_hash,
+            "new_contract_digest": contract_hash,
+        })
+        for path in paths:
+            path.unlink()  # the spec is last, so interrupted retirement is retryable
+    except (OSError, PlanningChallengeRefreshRefusal) as exc:
+        raise PlanningExecutionError("planning_history_unavailable", str(exc)) from exc
+    return True
 
 
 def ensure_executed_planning(
@@ -96,6 +257,8 @@ def ensure_executed_planning(
     contract_json: str,
     baseline_sha: str,
     config: StageMeshConfig,
+    *,
+    live_acceptance: str | None = None,
 ) -> None:
     """Serialize and produce configured planning evidence for one task."""
     entered = False
@@ -114,6 +277,8 @@ def ensure_executed_planning(
                 contract_json,
                 baseline_sha,
                 config,
+                governed_planning_pool(config, live_acceptance=live_acceptance)
+                if config.governance_profile == "governed-sdd" else None,
             )
     except (IntegrationLockTimeout, OSError) as exc:
         if entered:
@@ -132,8 +297,9 @@ def _ensure_executed_planning_owned(
     contract_json: str,
     baseline_sha: str,
     config: StageMeshConfig,
+    pool: ProviderPool | None = None,
 ) -> None:
-    """Produce missing configured planning artifacts; never overwrite manual or stale evidence."""
+    """Produce missing evidence and preserve a governed plan when its bindings expire."""
     try:
         reconcile_automatic_planning_revision(store, project, task_id)
         reconcile_planning_challenge_retirement(store, project, task_id)
@@ -145,22 +311,27 @@ def _ensure_executed_planning_owned(
         raise PlanningExecutionError(
             "planning_spec_invalid", "existing planning spec is unreadable or malformed"
         )
-    if spec_payload is None and config.planner_provider is not None:
-        error = planning_role_error(config, adapters_from_config(config))
-        if error is not None:
-            raise error
-        adapter = _role_adapter(config, config.planner_provider)
+    if pool is not None and spec_payload is not None:
+        frozen = validate_planning_spec(spec_payload)[0]
+        stale = frozen is not None and (frozen.baseline_sha, frozen.contract_hash) != (baseline_sha, contract_hash)
+        if stale:
+            _planning_candidates(store, pool, task_id, config.planner_provider, require_pair=True)
+            if _retire_stale_governed_plan(store, project, task_id, spec_payload, baseline_sha, contract_hash):
+                spec_payload = None
+    if spec_payload is None and (pool is not None or config.planner_provider is not None):
+        if pool is None:
+            error = planning_role_error(config, adapters_from_config(config))
+            if error is not None:
+                raise error
+            providers = [_role_adapter(config, str(config.planner_provider))]
+        else:
+            providers = _planning_candidates(store, pool, task_id, config.planner_provider, require_pair=True)
         task = store.get_task(task_id)
-        planned, execution = _run_role(
-            store,
-            project,
-            task_id,
-            baseline_sha,
-            adapter,
-            "planner",
+        planned, execution = _run_planning_candidates(
+            store, project, task_id, baseline_sha, providers, "planner",
             _planner_prompt(task_id, str(task["title"]), contract_json),
-            lambda payload: _freeze_planner(payload, contract_hash, baseline_sha, project),
-            protocol_role="planner",
+            lambda _adapter, payload: _freeze_planner(payload, contract_hash, baseline_sha, project),
+            protocol_role="planner", pool=pool,
         )
         frozen, normalized = planned
         _record_receipt(
@@ -176,32 +347,17 @@ def _ensure_executed_planning_owned(
         spec_payload = normalized
 
     planner: dict[str, Any] | None = None
-    if config.planner_provider is not None and spec_payload is not None:
+    if (pool is not None or config.planner_provider is not None) and spec_payload is not None:
         try:
             frozen_spec = freeze_planning_spec(spec_payload)
         except PlanningSpecError as exc:
             raise PlanningExecutionError("planning_spec_invalid", str(exc)) from exc
-        planner = _trusted_receipt(store, PLANNER_RECEIPT, task_id, frozen_spec.digest)
-        current_planner = _configured_adapter(config, config.planner_provider)
-        if not _receipt_matches(
-            planner,
-            provider=config.planner_provider,
-            baseline_sha=baseline_sha,
-            contract_hash=contract_hash,
-        ) or not _identities_overlap(
-            planner or {},
-            command_snapshot(
-                current_planner.name,
-                current_planner.command_for("review"),
-                current_planner.all_commands(),
-            ),
-        ):
-            raise PlanningExecutionError(
-                "planner_execution_unverified",
-                "configured planner requires a matching successful execution receipt",
-            )
+        planner = _verified_planning_receipt(
+            store, config, pool, PLANNER_RECEIPT, task_id, frozen_spec.digest,
+            config.planner_provider, baseline_sha, contract_hash,
+        )
 
-    if not (config.require_plan_challenge and config.challenger_provider):
+    if pool is None and not (config.require_plan_challenge and config.challenger_provider):
         return
     challenge_path = planning_challenge_path(project, task_id)
     existing_challenge = load_planning_challenge(project, task_id)
@@ -232,28 +388,17 @@ def _ensure_executed_planning_owned(
             frozen_existing = freeze_planning_challenge(existing_challenge)
         except PlanningSpecError as exc:
             raise PlanningExecutionError("planning_challenge_invalid", str(exc)) from exc
-        challenger = _trusted_receipt(
-            store, CHALLENGER_RECEIPT, task_id, frozen_existing.digest
+        challenger = _verified_planning_receipt(
+            store, config, pool, CHALLENGER_RECEIPT, task_id, frozen_existing.digest,
+            config.challenger_provider, baseline_sha, contract_hash, spec_hash=frozen_spec.digest,
         )
-        current_challenger = _configured_adapter(config, config.challenger_provider)
-        if not _receipt_matches(
-            challenger,
-            provider=config.challenger_provider,
-            baseline_sha=baseline_sha,
-            contract_hash=contract_hash,
-            planning_spec_hash=frozen_spec.digest,
-        ) or not _identities_overlap(
-            challenger or {},
-            command_snapshot(
-                current_challenger.name,
-                current_challenger.command_for("review"),
-                current_challenger.all_commands(),
-            ),
+        if pool is not None and (
+            frozen_existing.challenge.planner_provider != planner["provider"]
+            or frozen_existing.challenge.challenger_provider != challenger["provider"]
+            or planner["provider"] == challenger["provider"]
+            or _identities_overlap(planner, challenger)
         ):
-            raise PlanningExecutionError(
-                "challenger_execution_unverified",
-                "configured challenger requires a matching successful execution receipt",
-            )
+            raise PlanningExecutionError("planning_roles_not_independent", "planning receipts are not independent")
         revision_count = automatic_planning_revision_count(
             store, task_id, frozen_spec.digest
         )
@@ -262,26 +407,21 @@ def _ensure_executed_planning_owned(
             and not frozen_existing.challenge.required_decisions
             and revision_count < MAX_AUTOMATIC_PLANNING_REVISIONS
         ):
-            adapter = _role_adapter(config, config.planner_provider)
+            providers = (
+                _planning_candidates(
+                    store, pool, task_id, str(planner["provider"]), independent_of=challenger, require_pair=True,
+                )
+                if pool is not None else [_role_adapter(config, str(config.planner_provider))]
+            )
             task = store.get_task(task_id)
-            revised, execution = _run_role(
-                store,
-                project,
-                task_id,
-                baseline_sha,
-                adapter,
-                "planner_revision",
+            revised, execution = _run_planning_candidates(
+                store, project, task_id, baseline_sha, providers, "planner_revision",
                 _planner_revision_prompt(
-                    task_id,
-                    str(task["title"]),
-                    frozen_spec.canonical_json,
-                    frozen_existing.canonical_json,
-                    contract_json,
+                    task_id, str(task["title"]), frozen_spec.canonical_json,
+                    frozen_existing.canonical_json, contract_json,
                 ),
-                lambda payload: _freeze_planner(
-                    payload, contract_hash, baseline_sha, project
-                ),
-                protocol_role="planner",
+                lambda _adapter, payload: _freeze_planner(payload, contract_hash, baseline_sha, project),
+                protocol_role="planner", pool=pool,
             )
             revised_frozen, revised_normalized = revised
             _record_receipt(
@@ -312,31 +452,27 @@ def _ensure_executed_planning_owned(
                 contract_json,
                 baseline_sha,
                 config,
+                pool,
             )
         return
-    adapter = _role_adapter(config, config.challenger_provider)
-    if _identities_overlap(planner, command_snapshot(adapter.name, adapter.command_for("review"), adapter.all_commands())):
+    providers = (
+        _planning_candidates(store, pool, task_id, config.challenger_provider, independent_of=planner)
+        if pool is not None else [_role_adapter(config, str(config.challenger_provider))]
+    )
+    if _identities_overlap(planner, _review_identity(providers[0])):
         raise PlanningExecutionError(
-            "planning_roles_not_independent",
-            "planner and challenger command identities must be different",
+            "planning_roles_not_independent", "planner and challenger command identities must be different",
         )
-    frozen_challenge, execution = _run_role(
-        store,
-        project,
-        task_id,
-        baseline_sha,
-        adapter,
-        "challenger",
+    frozen_challenge, execution = _run_planning_candidates(
+        store, project, task_id, baseline_sha, providers, "challenger",
         _challenger_prompt(
-            task_id,
-            frozen_spec.canonical_json,
-            contract_json,
+            task_id, frozen_spec.canonical_json, contract_json,
             automatic_planning_revision_count(store, task_id, frozen_spec.digest),
         ),
-        lambda payload: _freeze_challenge(
+        lambda adapter, payload: _freeze_challenge(
             payload, frozen_spec.digest, str(planner["provider"]), adapter.name
         ),
-        protocol_role="challenger",
+        protocol_role="challenger", pool=pool,
     )
     _record_receipt(
         store,
@@ -362,6 +498,7 @@ def _ensure_executed_planning_owned(
             contract_json,
             baseline_sha,
             config,
+            pool,
         )
 
 
@@ -382,6 +519,55 @@ def planning_execution_receipts(store: Store, task_id: str) -> dict[str, dict[st
             )
         result[role] = receipt
     return result
+
+
+def _verified_planning_receipt(
+    store: Store, config: StageMeshConfig, pool: ProviderPool | None, event: str, task_id: str,
+    artifact_digest: str, preference: str | None, baseline_sha: str, contract_hash: str,
+    *, spec_hash: str | None = None,
+) -> dict[str, Any]:
+    receipt = _trusted_receipt(store, event, task_id, artifact_digest)
+    provider = str(receipt["provider"]) if pool is not None and receipt is not None else str(preference)
+    matches = receipt is not None and _receipt_matches(
+        receipt, provider=provider, baseline_sha=baseline_sha, contract_hash=contract_hash, planning_spec_hash=spec_hash,
+    )
+    if matches and receipt is not None and (
+        pool is not None or _identities_overlap(receipt, _review_identity(_configured_adapter(config, provider)))
+    ):
+        return receipt
+    role = "planner" if event == PLANNER_RECEIPT else "challenger"
+    raise PlanningExecutionError(
+        f"{role}_execution_unverified", f"configured {role} requires a matching successful execution receipt",
+    )
+
+
+def _run_planning_candidates(
+    store: Store, project: Path, task_id: str, baseline_sha: str, adapters: Iterable[RuntimeCommandAdapter],
+    purpose: str, prompt: str, accept: Callable[[RuntimeCommandAdapter, dict[str, Any]], Any],
+    *, protocol_role: str, pool: ProviderPool | None,
+) -> tuple[Any, dict[str, Any]]:
+    last: PlanningExecutionError | None = None
+    for adapter in adapters:
+        if pool is not None:
+            available = _planning_candidates(
+                store, pool, task_id, adapter.name, require_pair=protocol_role == "planner",
+            )
+            if not any(current.name == adapter.name for current in available):
+                continue
+        try:
+            return _run_role(
+                store, project, task_id, baseline_sha, adapter, purpose, prompt,
+                lambda payload, adapter=adapter: accept(adapter, payload), protocol_role=protocol_role,
+            )
+        except PlanningExecutionError as exc:
+            if pool is None or exc.code != "planning_provider_unavailable":
+                raise
+            last = exc
+            pool.record_failure(store, REVIEW, task_id, adapter.name, exc.failure_reason or "transient_provider_failure")
+            store.add_audit_event("planning.provider_fallback", {
+                "task_id": task_id, "provider": adapter.name, "role": purpose, "reason": str(exc),
+            })
+    raise last or PlanningExecutionError("planning_roles_unavailable", "no eligible planning provider")
 
 
 def _role_adapter(config: StageMeshConfig, provider: str) -> RuntimeCommandAdapter:
@@ -551,6 +737,13 @@ def _run_role_once(
         cleanup_confirmed = True
         call.observe(stdout, stderr)
         if timed_out or proc.returncode != 0:
+            capacity, reason = classify_failure(proc.returncode or 1, stdout, stderr)
+            if capacity or timed_out:
+                raise PlanningExecutionError(
+                    "planning_provider_unavailable",
+                    f"{purpose} provider {adapter.name}: {PROVIDER_TIMEOUT if timed_out else reason}",
+                    failure_reason=PROVIDER_TIMEOUT if timed_out else reason,
+                )
             raise PlanningExecutionError(
                 f"{purpose}_failed", PROVIDER_TIMEOUT if timed_out else f"exit {proc.returncode}"
             )
@@ -763,6 +956,10 @@ def _challenger_prompt(
 
 
 def _write_new(path: Path, text: str) -> None:
+    _write_new_bytes(path, (text + "\n").encode("utf-8"))
+
+
+def _write_new_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent,
@@ -771,8 +968,8 @@ def _write_new(path: Path, text: str) -> None:
     )
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(text + "\n")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.link(temporary, path)

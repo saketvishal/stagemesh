@@ -54,6 +54,7 @@ from stagemesh.spec_planning import (
     validate_approval_artifact,
     validate_approval_authority,
 )
+from stagemesh.stage_dispatch import stage_dispatch_lock
 
 CONTRACT = "c" * 64
 BASELINE = "b" * 40
@@ -602,6 +603,16 @@ def project(tmp_path):
     synthetic = Project(tmp_path)
     yield synthetic
     synthetic.store.close()
+
+
+def test_approval_waits_for_governed_planning_to_release_task_lock(project) -> None:
+    with stage_dispatch_lock(project.store.db_path, project.task_id).hold("planning"):
+        with pytest.raises(PlanningApprovalRefusal) as raised:
+            project.approve()
+        assert raised.value.code == "stage_dispatch_active"
+        assert project.store.planning_approval_receipts(project.task_id) == []
+    assert project.approve()["artifact_written"] is True
+
 
 
 def test_receipt_event_name_matches_the_evaluator_constant() -> None:

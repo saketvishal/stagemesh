@@ -15,7 +15,13 @@ from .auto_plan import (
     refresh_stale_generated_contract,
 )
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
-from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
+from .config import (
+    AdverseReviewPolicy,
+    ConfigValidationError,
+    StageMeshConfig,
+    TaskSelectionConfig,
+    load_config,
+)
 from .contract_binding import bind_task_contract, contract_for_candidate
 from .contract_check import contract_section_sizes
 from .contract_feasibility import check_contract_feasibility
@@ -332,7 +338,10 @@ def _ensure_contract(
         )
 
 
-def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: bool | None) -> None:
+def _enforce_planning_gate(
+    store: Store, project: Path, task_id: str, enabled: bool | None,
+    *, runtime_config: StageMeshConfig | None = None, live_acceptance: str | None = None,
+) -> None:
     """Opt-in: refuse to start implementation without an approved, identity-current planning spec."""
     require_challenge = False
     accountable = False
@@ -396,7 +405,8 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             contract_hash,
             contract_json,
             baseline,
-            config,
+            runtime_config if runtime_config is not None else config,
+            live_acceptance=live_acceptance,
         )
     except PlanningExecutionError as exc:
         raise RunReadyRefusal(
@@ -1035,6 +1045,8 @@ def run_ready(
     worktree_root_path: Path | None = None,
     no_auto_retry: frozenset[str] | set[str] = frozenset(),
     planning_gate: bool | None = None,
+    planning_runtime_config: StageMeshConfig | None = None,
+    planning_live_acceptance: str | None = None,
     adverse_policy: AdverseReviewPolicy | None = None,
     adverse_override: dict[str, str] | None = None,
 ) -> RunSummary:
@@ -1093,7 +1105,10 @@ def run_ready(
                 task_id=selected,
             )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
-        _enforce_planning_gate(store, project, selected, planning_gate)
+        _enforce_planning_gate(
+            store, project, selected, planning_gate,
+            runtime_config=planning_runtime_config, live_acceptance=planning_live_acceptance,
+        )
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
                 "active_execution", f"task {selected} has a live or unknown execution; not recovering it", task_id=selected

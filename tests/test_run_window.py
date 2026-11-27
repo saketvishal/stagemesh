@@ -1134,7 +1134,7 @@ def test_real_run_window_preflight_requires_project_provider_authorization(tmp_p
 
 
 @pytest.mark.parametrize("role", ["planner", "challenger"])
-def test_preflight_flags_assigned_planning_role_without_review_even_when_pools_are_ready(tmp_path: Path, role: str) -> None:
+def test_governed_window_with_no_independent_pair_starts_no_task(tmp_path: Path, role: str) -> None:
     store, project, rig, hooks, options, _config, kwargs = window(tmp_path, ["1"])
     path = project / ".stagemesh" / "config.json"
     providers = {
@@ -1163,16 +1163,10 @@ def test_preflight_flags_assigned_planning_role_without_review_even_when_pools_a
     report = rw.run_window(
         store, project, cli_module.load_config(project), options, hooks, base_ref="refs/heads/main", **kwargs,
     )
-    assert not report.refused and rig.runs == ["1"]
-    check = next(check for check in report.preflight if check.name == "planning_roles")
-    assert not check.ok and not check.fatal
-    assert f"planning {role} {role} has no configured REVIEW command" in check.detail
-    refused = rw.WindowReport("fixture", options, started_at=1.0, preflight=[check], waves=[
-        WaveReport(tasks=[TaskRecord(
-            "1", outcome="open", stop_reason="REFUSED:planning_execution", reason=check.detail, resumable=True,
-        )]),
-    ])
-    assert "configure distinct authorized REVIEW commands" in rw.next_command(refused)
+    assert rig.runs == []
+    assert store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+    assert "eligible, independent REVIEW providers" in report.not_selected["1"]
+    assert "configure distinct authorized REVIEW commands" in report.next_command
 
     providers[role]["capabilities"] = ["REVIEW"]
     path.write_text(json.dumps(settings), encoding="utf-8")

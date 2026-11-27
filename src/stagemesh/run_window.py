@@ -83,7 +83,10 @@ from .survivor_wave import (
     ordered_candidate_records,
     prepare_staging_ref,
     run_wave,
+    should_advance_baseline,
+    should_advance_baseline_to,
     skip_reason,
+    staging_target,
 )
 from .task_selection import contract_state
 from .window_journal import record_finished, record_refused, record_started, record_task_context
@@ -411,6 +414,7 @@ def select_tasks(
     store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None,
     project: Path | None = None, compatible_with: list[str] | None = None, required_label: str | None = None,
     materialize_contracts: bool = False,
+    planning_block: Callable[[str], str | None] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Up to `limit` runnable tasks (oldest first) and why the others were left alone.
 
@@ -432,6 +436,9 @@ def select_tasks(
     contracts = {task_id: load_wave_contract(store, project, task_id) for task_id in (compatible_with or [])}
 
     def admit(task_id: str) -> bool:
+        if planning_block is not None and (reason := planning_block(task_id)) is not None:
+            skipped[task_id] = reason
+            return False
         if materialize_contracts:
             state = contract_state(store, project, task_id, auto_plan=True)
             if state == "needs_auto_plan":
@@ -612,10 +619,32 @@ def continuation(
 # --- preflight ------------------------------------------------------------------------------------------------------------------
 
 
+_PLANNING_PROVIDER_FIX = "configure distinct authorized REVIEW commands in .stagemesh/config.json before requesting new planning"
+
+
+def _governed_window_planning_block(
+    store: Store, project: Path, config: StageMeshConfig, options: WindowOptions,
+    planned_baseline: Callable[[str], str | None],
+) -> Callable[[str], str | None] | None:
+    if config.governance_profile != "governed-sdd":
+        return None
+    from .planning_execution import governed_pickup_error, governed_planning_pool
+
+    pool = governed_planning_pool(
+        config, unattended=True, live_acceptance="required" if options.strict_live else "skip_failed",
+    )
+
+    def blocked(task_id: str) -> str | None:
+        error = governed_pickup_error(store, project, task_id, config, pool, planned_baseline(task_id))
+        return f"{error}; next: {_PLANNING_PROVIDER_FIX}" if error is not None else None
+
+    return blocked
+
+
 def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: bool) -> Check:
     """Can the configured providers implement a task AND review it independently? (cooldowns are reported, not fatal on their own)."""
     from . import provider_authorization
-    from .planning_execution import planning_role_error
+    from .planning_execution import governed_planning_error, planning_role_error
     from .provider_pool import IMPLEMENT, REVIEW, ProviderPool, default_pools
     from .providers import adapters_from_config
 
@@ -633,7 +662,6 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
                 os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
             else:
                 os.environ[provider_authorization.UNATTENDED_ENV] = previous
-        planning_error = planning_role_error(config, adapters)
         stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
         capable = {stage: {a.name for a in adapters if cap in a.capabilities} for stage, cap in stage_caps.items()}
         priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}
@@ -659,6 +687,10 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
             live_acceptance_ttl_seconds=config.live_acceptance_ttl_seconds,
         )
         ok, message, impl, review = pool.preflight(store)
+        planning_error = (
+            governed_planning_error(store, config, pool=pool)
+            if config.governance_profile == "governed-sdd" else planning_role_error(config, adapters)
+        )
     except Exception as exc:  # noqa: BLE001 - a broken provider setup is a refusal with its reason, not a traceback
         return Check("providers", False, f"provider setup is invalid: {type(exc).__name__}: {exc}", fix="stagemesh config")
     if not ok:
@@ -667,7 +699,7 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
         # Accountably approved pickup can use its frozen receipts without either planning provider.
         return Check(
             "planning_roles", False, str(planning_error), fatal=False,
-            fix="configure distinct authorized REVIEW commands in .stagemesh/config.json before requesting new planning",
+            fix=_PLANNING_PROVIDER_FIX,
         )
     cooling = [v.provider for v in impl + review if not v.eligible and "cooldown" in v.reason]
     detail = (
@@ -1511,9 +1543,17 @@ def run_window(
             room = options.max_tasks - len(attempted) + len(resume)
             # Fill the bounded wave with compatible work, not merely the first
             # N queue entries that the wave would then have to serialize.
+            def planned_baseline(task_id: str) -> str | None:
+                return (
+                    hooks.target_sha()
+                    if options.advance_baselines and should_advance_baseline(store, task_id, hooks)
+                    else store.task_baseline(task_id)
+                )
+
+            planning_block = _governed_window_planning_block(store, project, config, options, planned_baseline)
             continuing, deferred = select_tasks(
                 store, attempted=set(), limit=room, only=list(resume), fingerprint=fingerprint,
-                project=project, compatible_with=[], required_label=options.required_label, materialize_contracts=True,
+                project=project, compatible_with=[], required_label=options.required_label, materialize_contracts=True, planning_block=planning_block,
             )
             report.not_selected.update(deferred)
 
@@ -1547,6 +1587,7 @@ def run_window(
                     compatible_with=continuing,
                     required_label=options.required_label,
                     materialize_contracts=True,
+                    planning_block=planning_block,
                 )
                 if len(attempted) < options.max_tasks and room - len(continuing) > 0
                 else ([], {})
@@ -1578,7 +1619,7 @@ def run_window(
                 report.not_selected.pop(task_id, None)
             before = {task_id: progress_state(store, task_id) for task_id in batch}
 
-            def admit_ready(*, fresh=fresh, batch=batch, before=before) -> list[str]:
+            def admit_ready(*, fresh=fresh, batch=batch, before=before, planning_block=planning_block) -> list[str]:
                 try:
                     refresh(store)
                 except ScopeError as exc:
@@ -1591,6 +1632,7 @@ def run_window(
                     store, attempted=attempted | set(resume) | set(fresh), limit=remaining,
                     only=options.tasks, fingerprint=fingerprint, project=project, required_label=options.required_label,
                     materialize_contracts=True,
+                    planning_block=planning_block,
                 )
                 report.not_selected.update(reasons)
                 if options.auto_merge_ff:
@@ -2052,10 +2094,30 @@ def format_window_report(report: WindowReport) -> str:
     return "\n".join(lines)
 
 
-def planned_selection(store: Store, options: WindowOptions, project: Path | None = None) -> tuple[list[str], dict[str, str]]:
-    """What a window would pick right now (`run-window --plan`): the same selection, nothing started."""
+def planned_selection(
+    store: Store, options: WindowOptions, project: Path | None = None,
+    *, config: StageMeshConfig | None = None, base_ref: str | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """What a window would pick right now ('run-window --plan'): the same selection, nothing started."""
     fingerprint = None if project is None else runtime_fingerprint(project)
-    return select_tasks(store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint, project=project, required_label=options.required_label)
+    planning_block = None
+    if project is not None and config is not None and config.governance_profile == "governed-sdd":
+        git = GitFacts(project)
+        target = (
+            staging_target(project, base_ref or "HEAD")[0]
+            if options.integration_mode == INTEGRATION_PR else git.resolve(base_ref or "HEAD")
+        )
+
+        def planned_baseline(task_id: str) -> str | None:
+            if options.advance_baselines and should_advance_baseline_to(store, task_id, target, git.is_ancestor):
+                return target
+            return store.task_baseline(task_id)
+
+        planning_block = _governed_window_planning_block(store, project, config, options, planned_baseline)
+    return select_tasks(
+        store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint,
+        project=project, required_label=options.required_label, planning_block=planning_block,
+    )
 
 
 __all__ = [
