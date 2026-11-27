@@ -408,7 +408,9 @@ def _ensure_executed_planning_owned(
             and revision_count < MAX_AUTOMATIC_PLANNING_REVISIONS
         ):
             providers = (
-                _planning_candidates(store, pool, task_id, str(planner["provider"]), independent_of=challenger)
+                _planning_candidates(
+                    store, pool, task_id, str(planner["provider"]), independent_of=challenger, require_pair=True,
+                )
                 if pool is not None else [_role_adapter(config, str(config.planner_provider))]
             )
             task = store.get_task(task_id)
@@ -546,6 +548,12 @@ def _run_planning_candidates(
 ) -> tuple[Any, dict[str, Any]]:
     last: PlanningExecutionError | None = None
     for adapter in adapters:
+        if pool is not None:
+            available = _planning_candidates(
+                store, pool, task_id, adapter.name, require_pair=protocol_role == "planner",
+            )
+            if not any(current.name == adapter.name for current in available):
+                continue
         try:
             return _run_role(
                 store, project, task_id, baseline_sha, adapter, purpose, prompt,

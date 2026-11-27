@@ -1757,6 +1757,28 @@ def record_planning_approval(
             "no approval_authority is configured under planning_gate; accountable approval is not enabled",
             NEXT_REPAIR_APPROVAL_AUTHORITY,
         )
+    entered = False
+    try:
+        database = connected_dispatch_database(store.conn)
+        admission = (
+            stage_dispatch_lock(database, task_id).hold(f"approve-planning:{task_id}")
+            if database is not None else nullcontext()
+        )
+        with admission:
+            entered = True
+            return _record_planning_approval_owned(store, project, task_id, authority, require_challenge)
+    except (IntegrationLockTimeout, OSError) as exc:
+        if entered:
+            raise
+        raise PlanningApprovalRefusal(
+            "stage_dispatch_active",
+            f"task {task_id} is entering or running a stage; approve after it finishes",
+        ) from exc
+
+
+def _record_planning_approval_owned(
+    store: Store, project: Path, task_id: str, authority: ApprovalAuthority, require_challenge: bool,
+) -> dict[str, Any]:
     contract = store.task_contract(task_id)
     baseline = store.task_baseline(task_id)
     if contract is None or baseline is None:

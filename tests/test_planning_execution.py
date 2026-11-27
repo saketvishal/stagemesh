@@ -22,7 +22,7 @@ from stagemesh.planning_execution import (
     planning_execution_receipts,
 )
 from stagemesh.recovery import task_doctor
-from stagemesh.run_window import WindowOptions, run_window
+from stagemesh.run_window import WindowOptions, planned_selection, run_window
 from stagemesh.runtime_freshness import RuntimeFreshness
 from stagemesh.spec_planning import (
     CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH,
@@ -43,7 +43,7 @@ from stagemesh.spec_planning import (
     publish_automatic_planning_revision,
     retire_planning_challenge,
 )
-from stagemesh.survivor_wave import INTEGRATION_LOCAL, RunResult, WaveHooks
+from stagemesh.survivor_wave import INTEGRATION_LOCAL, STAGING_REF, RunResult, WaveHooks
 
 PROVIDER = r'''
 import json, pathlib, sys
@@ -1358,5 +1358,80 @@ def test_governed_challenge_falls_back_after_an_authentication_failure(tmp_path:
     try:
         assert len(list(store.task_audit_events("planning.provider_fallback", "T-1"))) == 1
         assert store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("available_pair_after_failure", [False, True])
+def test_governed_planner_fallback_preserves_independent_pair(
+    tmp_path: Path, available_pair_after_failure: bool,
+) -> None:
+    script = _script(tmp_path)
+    settings = _governed_config(script, challenger_mode="planner")
+    settings["providers"]["planner"] = shlex.join([sys.executable, str(script), "authentication-failed"])
+    if available_pair_after_failure:
+        settings["providers"]["fallback"] = shlex.join([sys.executable, str(script), "challenger"])
+    else:
+        del settings["providers"]["fallback"]
+        settings["authorization"]["unattended_providers"].remove("fallback")
+    project = _project(tmp_path, ["T-1"], config=settings)
+
+    _, result = _run(project)
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        actors = [row[0] for row in store.conn.execute("SELECT actor FROM executions ORDER BY rowid")]
+        if available_pair_after_failure:
+            assert result["detail"]["next_action"] == "obtain_planning_approval", result
+            assert actors == ["planner", "challenger", "fallback"]
+            challenge = load_planning_challenge(project, "T-1")
+            assert challenge["planner_provider"] == "challenger"
+            assert challenge["challenger_provider"] == "fallback"
+        else:
+            assert result["detail"]["next_action"] == "planning_roles_unavailable", result
+            assert actors == ["planner"]
+            assert load_planning_artifacts(project, "T-1")[0] is None
+    finally:
+        store.close()
+
+
+def test_governed_window_preview_uses_retained_staging_baseline(tmp_path: Path) -> None:
+    script = _script(tmp_path)
+    settings = _governed_config(script)
+    project = _project(tmp_path, ["T-1"], config=settings)
+    _, initial = _run(project)
+    assert initial["detail"]["next_action"] == "obtain_planning_approval", initial
+
+    git = GitWorkspace(project)
+    main = git.head()
+    branch = git.run("symbolic-ref", "--short", "HEAD").stdout.strip()
+    git.run("checkout", "--detach", main)
+    (project / "README.md").write_text("staged work\n", encoding="utf-8")
+    git.run("add", "README.md")
+    git.run("commit", "-m", "stage unrelated work")
+    staging = git.head()
+    git.run("update-ref", STAGING_REF, staging)
+    git.run("switch", branch)
+
+    for provider in ("challenger", "fallback"):
+        settings["providers"][provider] = {
+            "command": settings["providers"][provider], "capabilities": ["IMPLEMENT"],
+        }
+    (project / ".stagemesh" / "config.json").write_text(json.dumps(settings), encoding="utf-8")
+    config = load_config(project)
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        local, _ = planned_selection(
+            store, WindowOptions(tasks=["T-1"], integration_mode=INTEGRATION_LOCAL), project, config=config, base_ref=branch,
+        )
+        picked, skipped = planned_selection(
+            store, WindowOptions(tasks=["T-1"]), project, config=config, base_ref=branch,
+        )
+        assert local == ["T-1"] and picked == []
+        assert "independent REVIEW providers" in skipped["T-1"]
+        assert store.task_baseline("T-1") == main
+        assert git.run("rev-parse", STAGING_REF).stdout.strip() == staging
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 2
     finally:
         store.close()

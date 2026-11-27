@@ -2176,7 +2176,12 @@ def command_run_window(args: argparse.Namespace) -> int:
                 except Exception as exc:  # noqa: BLE001 -- a read-only policy probe must fail closed
                     policy_error = f"{type(exc).__name__}: {exc}"
                 checks.append(Check("hosted_landing_policy", policy_error is None, policy_error or f"{options.merge_policy} guarded exact-candidate landing policy"))
-            picked, skipped = planned_selection(store, options, project, config=config, base_ref=base_ref) if repository_ready else ([], {})
+            picked, skipped = [], {}
+            if repository_ready:
+                try:
+                    picked, skipped = planned_selection(store, options, project, config=config, base_ref=base_ref)
+                except RuntimeError as exc:
+                    checks.append(Check("staging", False, str(exc)))
             payload = {
                 "preflight": [c.to_dict() for c in checks],
                 "would_run": picked,
@@ -3634,7 +3639,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
                 no_auto_retry=held_for_retry,
-                planning_runtime_config=config,
+                planning_runtime_config=config if getattr(args, "providers", None) else None,
                 planning_live_acceptance=getattr(args, "live_acceptance", None),
             )
             if blocked_tasks and summary.stop_reason == "REFUSED:no_eligible_task":

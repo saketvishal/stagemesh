@@ -86,6 +86,7 @@ from .survivor_wave import (
     should_advance_baseline,
     should_advance_baseline_to,
     skip_reason,
+    staging_target,
 )
 from .task_selection import contract_state
 from .window_journal import record_finished, record_refused, record_started, record_task_context
@@ -2102,7 +2103,10 @@ def planned_selection(
     planning_block = None
     if project is not None and config is not None and config.governance_profile == "governed-sdd":
         git = GitFacts(project)
-        target = git.resolve(base_ref or "HEAD")
+        target = (
+            staging_target(project, base_ref or "HEAD")[0]
+            if options.integration_mode == INTEGRATION_PR else git.resolve(base_ref or "HEAD")
+        )
 
         def planned_baseline(task_id: str) -> str | None:
             if options.advance_baselines and should_advance_baseline_to(store, task_id, target, git.is_ancestor):

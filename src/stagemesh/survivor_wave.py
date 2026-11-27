@@ -1177,31 +1177,33 @@ def _is_ancestor(project: Path, older: str, newer: str) -> bool:
     return _git(project, "merge-base", "--is-ancestor", older, newer).returncode == 0
 
 
-def prepare_staging_ref(project: Path, base_ref: str, staging_ref: str = STAGING_REF) -> str:
-    """Make `staging_ref` a safe place to land wave work and return its tip. Only ever moves the wave's own ref.
-
-    Absent: created at the base tip. Already contained in the base (merged or stale): moved up to the base tip, which loses nothing.
-    Ahead of the base (earlier wave work still waiting on its PRs): kept, so this wave stacks on it. Diverged from the base: refused,
-    because moving it would drop commits that are not in the base; the operator decides.
-    """
+def staging_target(project: Path, base_ref: str, staging_ref: str = STAGING_REF) -> tuple[str, str | None]:
+    """Resolve the effective staging target and its current tip without moving a ref."""
     base = _rev(project, base_ref)
     if base is None:
         raise RuntimeError(f"integration base {base_ref} does not resolve")
     current = _rev(project, staging_ref)
     if current is None:
-        proc = _git(project, "update-ref", staging_ref, base, "0" * 40)
-    elif current == base or _is_ancestor(project, base, current):
-        return current
-    elif _is_ancestor(project, current, base):
-        proc = _git(project, "update-ref", staging_ref, base, current)
-    else:
-        raise RuntimeError(
-            f"{staging_ref} ({current[:7]}) has diverged from {base_ref} ({base[:7]}); not moving it because that would drop commits "
-            "that are not in the base. Merge or delete the old wave branch first."
-        )
+        return base, None
+    if current == base or _is_ancestor(project, base, current):
+        return current, current
+    if _is_ancestor(project, current, base):
+        return base, current
+    raise RuntimeError(
+        f"{staging_ref} ({current[:7]}) has diverged from {base_ref} ({base[:7]}); not moving it because that would drop commits "
+        "that are not in the base. Merge or delete the old wave branch first."
+    )
+
+
+def prepare_staging_ref(project: Path, base_ref: str, staging_ref: str = STAGING_REF) -> str:
+    """Create or fast-forward the wave's staging ref when its history can be preserved."""
+    target, current = staging_target(project, base_ref, staging_ref)
+    if target == current:
+        return target
+    proc = _git(project, "update-ref", staging_ref, target, current or "0" * 40)
     if proc.returncode != 0:
         raise RuntimeError(f"could not set {staging_ref}: {(proc.stderr or proc.stdout).strip()[-200:]}")
-    return _rev(project, staging_ref) or base
+    return _rev(project, staging_ref) or target
 
 
 def git_repo_state(store: Store, project: Path, base_ref: str, remote: str = "origin") -> Callable[[], RepoState]:
