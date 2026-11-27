@@ -1,13 +1,13 @@
 import json
+import shlex
 import sys
 from pathlib import Path
 
 import pytest
-from test_run_ready import _project, _run
+from test_run_ready import _project
 
 from stagemesh.cli import _configure_governance_profile, main
 from stagemesh.config import ConfigValidationError, load_config
-from stagemesh.persistence import Store
 
 AUTHORITY = {
     "version": 1,
@@ -219,11 +219,12 @@ def test_governed_init_canary_refuses_before_any_provider_call(
             (),
         ),
     )
+    aliased_command = shlex.join([sys.executable, "-c", "raise SystemExit(99)"])
     project = _project(
         tmp_path,
         ["T-1"],
         config={
-            "providers": {"planner": sys.executable, "challenger": sys.executable},
+            "providers": {"planner": aliased_command, "challenger": aliased_command},
             "authorization": {"unattended_providers": ["planner", "challenger"]},
         },
     )
@@ -246,21 +247,9 @@ def test_governed_init_canary_refuses_before_any_provider_call(
             "github:owner",
         ]
     )
-    capsys.readouterr()
+    captured = capsys.readouterr()
 
-    assert code == 0
-    config = load_config(project)
-    assert config.governance_profile == "governed-sdd"
-    assert config.merging.mode == "pr_only"
-    run_code, result = _run(project)
-    assert run_code != 0
-    assert result["stop_reason"] == "REFUSED:planning_execution"
-
-    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
-    try:
-        provider_calls = store.conn.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE event_type='provider.call'"
-        ).fetchone()[0]
-    finally:
-        store.close()
-    assert provider_calls == 0
+    assert code == 2
+    assert "planner and challenger command identities must be different" in captured.err
+    assert load_config(project).governance_profile != "governed-sdd"
+    assert not (project / ".stagemesh" / "stagemesh.sqlite3").exists()
