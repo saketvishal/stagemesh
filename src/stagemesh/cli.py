@@ -539,18 +539,20 @@ def _configure_governance_profile(
     current = load_config(project)
     authorized = set(current.authorized_providers or ())
     candidates = tuple(name for name in available_providers if name in authorized)
+    review_capable = {adapter.name for adapter in adapters_from_config(current) if "review" in adapter.capabilities}
+    eligible = tuple(name for name in candidates if name in review_capable)
     gate = data.get("planning_gate", {})
     if not isinstance(gate, dict):
         raise ConfigValidationError("planning_gate must be an object")
     selected_planner = planner_provider or _string_option(gate.get("planner_provider"))
     selected_challenger = challenger_provider or _string_option(gate.get("challenger_provider"))
     if selected_planner is None:
-        selected_planner = candidates[0] if candidates else None
+        selected_planner = eligible[0] if eligible else None
     if selected_challenger is None:
-        selected_challenger = next((name for name in candidates if name != selected_planner), None)
+        selected_challenger = next((name for name in eligible if name != selected_planner), None)
     if not selected_planner or not selected_challenger or selected_planner == selected_challenger:
         raise ConfigValidationError(
-            "governed-sdd setup needs two distinct installed and authorized providers; "
+            "governed-sdd setup needs two distinct installed and authorized REVIEW-capable providers; "
             "authorize them during init or pass --planner-provider and --challenger-provider"
         )
     unavailable = [
@@ -563,6 +565,9 @@ def _configure_governance_profile(
             "governance provider roles must use installed and authorized providers: "
             f"{', '.join(unavailable)}"
         )
+    missing_review = [name for name in (selected_planner, selected_challenger) if name not in review_capable]
+    if missing_review:
+        raise ConfigValidationError(f"governance provider roles require a configured REVIEW command: {', '.join(missing_review)}")
     authority = gate.get("approval_authority", {})
     if authority and not isinstance(authority, dict):
         raise ConfigValidationError("planning_gate.approval_authority must be an object")

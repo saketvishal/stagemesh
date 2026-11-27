@@ -1133,6 +1133,45 @@ def test_real_run_window_preflight_requires_project_provider_authorization(tmp_p
     assert ready.ok is True
 
 
+@pytest.mark.parametrize("role", ["planner", "challenger"])
+def test_preflight_refuses_assigned_planning_role_without_review_even_when_pools_are_ready(tmp_path: Path, role: str) -> None:
+    store, project, rig, hooks, options, _config, kwargs = window(tmp_path, ["1"])
+    path = project / ".stagemesh" / "config.json"
+    providers = {
+        name: {
+            "command": f'"{sys.executable}" -c "pass" {name}',
+            "capabilities": [stage],
+        }
+        for name, stage in (("coder", "IMPLEMENT"), ("planner", "REVIEW"), ("challenger", "REVIEW"))
+    }
+    providers[role]["capabilities"] = ["IMPLEMENT"]
+    settings = {
+        "governance_profile": "governed-sdd",
+        "providers": providers,
+        "authorization": {"unattended_providers": list(providers)},
+        "merging": {"mode": "pr_only"},
+        "routing": {"require_independent_review": True},
+        "planning_gate": {
+            "planner_provider": "planner", "challenger_provider": "challenger",
+            "approval_authority": {
+                "version": 1, "authority_id": "project-owner:fixture", "approver_id": "github:fixture",
+            },
+        },
+    }
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    kwargs["provider_check"] = rw.provider_pool_check
+    report = rw.run_window(
+        store, project, cli_module.load_config(project), options, hooks, base_ref="refs/heads/main", **kwargs,
+    )
+    assert report.refused and rig.runs == []
+    assert f"planning {role} {role} has no configured REVIEW command" in report.stop_reason
+    assert "configure an authorized REVIEW command" in report.next_command
+
+    providers[role]["capabilities"] = ["REVIEW"]
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    assert rw.provider_pool_check(store, cli_module.load_config(project), strict_live=False).ok
+
+
 def test_a_local_main_that_is_ahead_or_diverged_refuses_pr_mode(tmp_path: Path) -> None:
     for relation in ("ahead", "diverged"):
         store, project, rig, hooks, options, config, kwargs = window(tmp_path / relation, ["1"])

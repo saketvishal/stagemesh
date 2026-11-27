@@ -615,6 +615,7 @@ def continuation(
 def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: bool) -> Check:
     """Can the configured providers implement a task AND review it independently? (cooldowns are reported, not fatal on their own)."""
     from . import provider_authorization
+    from .planning_execution import planning_role_problem
     from .provider_pool import IMPLEMENT, REVIEW, ProviderPool, default_pools
     from .providers import adapters_from_config
 
@@ -632,6 +633,12 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
                 os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
             else:
                 os.environ[provider_authorization.UNATTENDED_ENV] = previous
+        planning_problem = planning_role_problem(config, adapters)
+        if planning_problem:
+            return Check(
+                "planning_roles", False, planning_problem,
+                fix="configure an authorized REVIEW command for the named planning role in .stagemesh/config.json",
+            )
         stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
         capable = {stage: {a.name for a in adapters if cap in a.capabilities} for stage, cap in stage_caps.items()}
         priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}

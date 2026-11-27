@@ -391,13 +391,35 @@ def _role_adapter(config: StageMeshConfig, provider: str) -> RuntimeCommandAdapt
 
 
 def _configured_adapter(config: StageMeshConfig, provider: str) -> RuntimeCommandAdapter:
-    adapter = next((item for item in adapters_from_config(config) if item.name == provider), None)
+    return _configured_planning_adapter(adapters_from_config(config), provider)
+
+
+def _configured_planning_adapter(adapters: list[RuntimeCommandAdapter], provider: str) -> RuntimeCommandAdapter:
+    adapter = next((item for item in adapters if item.name == provider), None)
     if adapter is None or "review" not in adapter.capabilities:
         raise PlanningExecutionError(
             "planning_provider_unavailable",
             f"planning provider {provider} has no configured review-capable command",
         )
     return adapter
+
+
+def planning_role_problem(config: StageMeshConfig, adapters: list[RuntimeCommandAdapter]) -> str | None:
+    """Check the exact assigned roles against unattended adapters without starting a provider."""
+    for role, provider in (("planner", config.planner_provider), ("challenger", config.challenger_provider)):
+        if provider is None:
+            continue
+        label = f"planning {role} {provider}"
+        try:
+            adapter = _configured_planning_adapter(adapters, provider)
+        except PlanningExecutionError:
+            return f"{label} has no configured REVIEW command"
+        if adapter.denied:
+            return f"{label} is not authorized for unattended use: {adapter.denied}"
+        capacity = adapter.check_stage_capacity("review")
+        if capacity != "AVAILABLE":
+            return f"{label} has an unavailable REVIEW command ({capacity})"
+    return None
 
 
 def _run_role(

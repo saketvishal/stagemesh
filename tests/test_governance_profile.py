@@ -87,8 +87,13 @@ def test_init_configures_governed_profile_from_authorized_installed_providers(
     (runtime / "config.json").write_text(
         json.dumps(
             {
-                "providers": {"codex": "codex", "claude": "claude", "offline": "offline"},
-                "authorization": {"unattended_providers": ["codex", "claude", "offline"]},
+                "providers": {
+                    "codex": "codex",
+                    "claude": "claude",
+                    "offline": "offline",
+                    "implementation-only": {"command": "worker", "capabilities": ["IMPLEMENT"]},
+                },
+                "authorization": {"unattended_providers": ["codex", "claude", "offline", "implementation-only"]},
             }
         ),
         encoding="utf-8",
@@ -101,7 +106,7 @@ def test_init_configures_governed_profile_from_authorized_installed_providers(
         challenger_provider=None,
         authority_id="project-owner:example",
         approver_id="github:owner",
-        available_providers=("claude", "codex"),
+        available_providers=("implementation-only", "claude", "codex"),
     )
 
     config = load_config(tmp_path)
@@ -118,6 +123,21 @@ def test_init_configures_governed_profile_from_authorized_installed_providers(
         approver_id=None,
         available_providers=("claude", "codex"),
     ) is False
+
+
+def test_init_refuses_an_implementation_only_challenger_without_writing(tmp_path: Path) -> None:
+    _write(tmp_path, providers={
+        "planner": "planner",
+        "challenger": {"command": "worker", "capabilities": ["IMPLEMENT"]},
+    })
+    config_path = tmp_path / ".stagemesh" / "config.json"
+    before = config_path.read_bytes()
+    with pytest.raises(ConfigValidationError, match="configured REVIEW command: challenger"):
+        _configure_governance_profile(
+            tmp_path, "governed-sdd", planner_provider=None, challenger_provider=None,
+            authority_id=None, approver_id=None, available_providers=("planner", "challenger"),
+        )
+    assert config_path.read_bytes() == before
 
 
 def test_init_never_infers_accountable_authority(tmp_path: Path) -> None:
