@@ -502,6 +502,14 @@ def _write_provider_authorization(project: Path, requested: tuple[str, ...]) -> 
     return names
 
 
+def _available_planning_providers(config: StageMeshConfig, candidates: tuple[str, ...]) -> tuple[str, ...]:
+    adapters = {adapter.name: adapter for adapter in adapters_from_config(config, unattended=True)}
+    return tuple(
+        name for name in candidates if name in adapters and "review" in adapters[name].capabilities
+        and not adapters[name].denied and adapters[name].check_stage_capacity("review") == "AVAILABLE"
+    )
+
+
 def _configure_governance_profile(
     project: Path,
     profile: str | None,
@@ -539,18 +547,19 @@ def _configure_governance_profile(
     current = load_config(project)
     authorized = set(current.authorized_providers or ())
     candidates = tuple(name for name in available_providers if name in authorized)
+    eligible = _available_planning_providers(current, candidates)
     gate = data.get("planning_gate", {})
     if not isinstance(gate, dict):
         raise ConfigValidationError("planning_gate must be an object")
     selected_planner = planner_provider or _string_option(gate.get("planner_provider"))
     selected_challenger = challenger_provider or _string_option(gate.get("challenger_provider"))
     if selected_planner is None:
-        selected_planner = candidates[0] if candidates else None
+        selected_planner = eligible[0] if eligible else None
     if selected_challenger is None:
-        selected_challenger = next((name for name in candidates if name != selected_planner), None)
+        selected_challenger = next((name for name in eligible if name != selected_planner), None)
     if not selected_planner or not selected_challenger or selected_planner == selected_challenger:
         raise ConfigValidationError(
-            "governed-sdd setup needs two distinct installed and authorized providers; "
+            "governed-sdd setup needs two distinct installed and authorized REVIEW-capable providers; "
             "authorize them during init or pass --planner-provider and --challenger-provider"
         )
     unavailable = [
@@ -563,6 +572,15 @@ def _configure_governance_profile(
             "governance provider roles must use installed and authorized providers: "
             f"{', '.join(unavailable)}"
         )
+    missing_review = [name for name in (selected_planner, selected_challenger) if name not in eligible]
+    if missing_review:
+        raise ConfigValidationError(f"governance provider roles require an available REVIEW command: {', '.join(missing_review)}")
+    from .planning_execution import planning_role_error
+
+    planned = replace(current, planner_provider=selected_planner, challenger_provider=selected_challenger)
+    error = planning_role_error(planned, adapters_from_config(current, unattended=True))
+    if error is not None:
+        raise ConfigValidationError(str(error))
     authority = gate.get("approval_authority", {})
     if authority and not isinstance(authority, dict):
         raise ConfigValidationError("planning_gate.approval_authority must be an object")
@@ -818,7 +836,16 @@ def _init_readiness(
         ),
     )
     from .baseline import resolve_integration_ref
+    from .planning_execution import planning_role_error
     from .run_window import INTEGRATION_PR, repository_preflight_checks
+
+    if config.planner_provider or config.challenger_provider:
+        planning_error = planning_role_error(config, adapters_from_config(config, unattended=True))
+        add(
+            "planning_roles", planning_error is None,
+            str(planning_error) if planning_error else "assigned planning REVIEW commands are available",
+            "configure distinct authorized REVIEW commands in .stagemesh/config.json and rerun stagemesh init",
+        )
     from .survivor_wave import git_repo_state
 
     base_ref = resolve_integration_ref(project, config.integration_ref) or "HEAD"
@@ -1951,7 +1978,7 @@ def _runtime_provider_selection(
 
 def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str | None, advance_ref: str, local: bool, no_pr: bool,
                 live_acceptance: str = LIVE_ACCEPTANCE_SKIP_FAILED, scope_id: str | None = None,
-                providers: tuple[str, ...] = ()):
+                providers: tuple[str, ...] = (), unattended: bool = False):
     """The real hooks (child `continue` runs, baseline advance, PR opening, repo census, per-task safety checks) for a wave or window."""
     from .autonomy.gitfacts import GitFacts
     from .recovery import advance_baseline as advance_task_baseline
@@ -1974,7 +2001,8 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
 
     return WaveHooks(
         run_task=subprocess_task_runner(
-            project, integration_ref=staging_ref, live_acceptance=live_acceptance, scope_id=scope_id, providers=providers
+            project, integration_ref=staging_ref, live_acceptance=live_acceptance, scope_id=scope_id, providers=providers,
+            unattended=unattended,
         ),
         advance_baseline=advance,
         open_pr=None if no_pr or local else git_gh_pr_opener(project, base=base_ref.removeprefix("refs/heads/")),
@@ -1987,6 +2015,7 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
         retarget=lambda ref: _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=ref, advance_ref=ref,
             local=local, no_pr=no_pr, live_acceptance=live_acceptance, scope_id=scope_id, providers=providers,
+            unattended=unattended,
         ),
     )
 
@@ -2116,7 +2145,7 @@ def command_run_window(args: argparse.Namespace) -> int:
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr,
             live_acceptance=LIVE_ACCEPTANCE_REQUIRED if options.strict_live else LIVE_ACCEPTANCE_SKIP_FAILED,
-            scope_id=options.scope_id, providers=options.providers,
+            scope_id=options.scope_id, providers=options.providers, unattended=True,
         )
         merger = None
         merger_error = None

@@ -1821,7 +1821,7 @@ def _write_capable_command(name: str, command: str) -> str:
     return write_capable_command(name, command)
 
 
-def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
+def adapters_from_config(config: StageMeshConfig, *, unattended: bool | None = None) -> list[RuntimeCommandAdapter]:
     commands = {}
     if not config.providers_explicit:  # compatibility for projects not yet initialized with a registry
         commands = {adapter.name: shlex.join(adapter.command) for adapter in approved_default_adapters()}
@@ -1855,16 +1855,18 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
                 )
             )
         resolved.append(adapter)
-    return _mark_authorization(resolved, config)
+    return _mark_authorization(resolved, config, unattended=unattended)
 
 
-def _mark_authorization(adapters: list[RuntimeCommandAdapter], config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
+def _mark_authorization(
+    adapters: list[RuntimeCommandAdapter], config: StageMeshConfig, *, unattended: bool | None = None,
+) -> list[RuntimeCommandAdapter]:
     from dataclasses import replace
 
     from . import provider_authorization
 
     allowed = None if config.authorized_providers is None else set(config.authorized_providers)
-    mode = provider_authorization.unattended()
+    mode = provider_authorization.unattended() if unattended is None else unattended
     marked = []
     for adapter in adapters:
         reasons = [
