@@ -643,17 +643,17 @@ def evaluate_planning_gate(
                 NEXT_REFRESH_CHALLENGE,
                 "planning challenge is stale: the planning spec changed",
             )
+        if challenge.verdict == "needs-human-decision" or challenge.required_decisions:
+            return PlanningGateDecision(
+                False,
+                NEXT_RESOLVE_CHALLENGE_DECISIONS,
+                "independent planning challenge requires a human decision",
+            )
         if challenge.verdict == "revise":
             return PlanningGateDecision(
                 False,
                 NEXT_REVISE_SPEC,
                 "independent planning challenge requires the spec to be revised",
-            )
-        if challenge.verdict == "needs-human-decision":
-            return PlanningGateDecision(
-                False,
-                NEXT_RESOLVE_CHALLENGE_DECISIONS,
-                "independent planning challenge requires a human decision",
             )
         challenge_digest = freeze_planning_challenge(challenge_payload).digest
     approved = (

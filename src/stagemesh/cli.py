@@ -836,14 +836,21 @@ def _init_readiness(
         ),
     )
     from .baseline import resolve_integration_ref
-    from .planning_execution import planning_role_error
+    from .planning_execution import governed_planning_error, planning_role_error
     from .run_window import INTEGRATION_PR, repository_preflight_checks
 
     if config.planner_provider or config.challenger_provider:
-        planning_error = planning_role_error(config, adapters_from_config(config, unattended=True))
+        if config.governance_profile == "governed-sdd":
+            planning_store = Store(db_path(project))
+            try:
+                planning_error = governed_planning_error(planning_store, config)
+            finally:
+                planning_store.close()
+        else:
+            planning_error = planning_role_error(config, adapters_from_config(config, unattended=True))
         add(
             "planning_roles", planning_error is None,
-            str(planning_error) if planning_error else "assigned planning REVIEW commands are available",
+            str(planning_error) if planning_error else "independent planning REVIEW commands are available",
             "configure distinct authorized REVIEW commands in .stagemesh/config.json and rerun stagemesh init",
         )
     from .survivor_wave import git_repo_state
@@ -2169,7 +2176,7 @@ def command_run_window(args: argparse.Namespace) -> int:
                 except Exception as exc:  # noqa: BLE001 -- a read-only policy probe must fail closed
                     policy_error = f"{type(exc).__name__}: {exc}"
                 checks.append(Check("hosted_landing_policy", policy_error is None, policy_error or f"{options.merge_policy} guarded exact-candidate landing policy"))
-            picked, skipped = planned_selection(store, options, project) if repository_ready else ([], {})
+            picked, skipped = planned_selection(store, options, project, config=config, base_ref=base_ref) if repository_ready else ([], {})
             payload = {
                 "preflight": [c.to_dict() for c in checks],
                 "would_run": picked,
@@ -3627,6 +3634,8 @@ def command_run_ready(args: argparse.Namespace) -> int:
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
                 no_auto_retry=held_for_retry,
+                planning_runtime_config=config,
+                planning_live_acceptance=getattr(args, "live_acceptance", None),
             )
             if blocked_tasks and summary.stop_reason == "REFUSED:no_eligible_task":
                 retryable = [item for item in blocked_tasks if can_auto_retry(store, str(item.task_id))]

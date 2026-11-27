@@ -167,6 +167,15 @@ def test_challenge_identity_is_deterministic_and_bounded():
             ),
             NEXT_RESOLVE_CHALLENGE_DECISIONS,
         ),
+        (
+            _challenge(
+                _spec(),
+                verdict="revise",
+                findings=[{"kind": "scope-risk", "summary": "Scope is uncertain"}],
+                required_decisions=["Choose the compatibility boundary"],
+            ),
+            NEXT_RESOLVE_CHALLENGE_DECISIONS,
+        ),
     ],
 )
 def test_challenge_gate_refuses_with_typed_next_action(challenge, action):

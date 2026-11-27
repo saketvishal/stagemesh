@@ -306,12 +306,17 @@ def should_advance_baseline(store: Store, task_id: str, hooks: WaveHooks) -> boo
     `advance-baseline` restarts IMPLEMENT on a fresh worktree. A task whose latest candidate already passed validation keeps that
     progress instead: integration refreshes such a candidate onto the new base by itself.
     """
+    return should_advance_baseline_to(store, task_id, hooks.target_sha(), hooks.is_ancestor)
+
+
+def should_advance_baseline_to(
+    store: Store, task_id: str, target: str | None, is_ancestor: Callable[[str, str], bool],
+) -> bool:
     task = store.get_task(task_id)
     baseline = store.task_baseline(task_id)
-    target = hooks.target_sha()
     if task is None or baseline is None or target is None or baseline == target:
         return False
-    if task["stage"] in (Stage.INTEGRATE, Stage.DONE) or not hooks.is_ancestor(baseline, target):
+    if task["stage"] in (Stage.INTEGRATE, Stage.DONE) or not is_ancestor(baseline, target):
         return False
     latest = store.latest_candidate(task_id)
     return latest is None or latest_evidence_status(store, task_id, str(latest["sha"]), EvidenceKind.VALIDATION) != "PASSED"

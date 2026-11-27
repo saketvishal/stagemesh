@@ -96,6 +96,18 @@ requires three identity-bound local artifacts under `.stagemesh/planning/`:
 3. `<task>.approval.json`, whose approval binds both the spec and accepted
    challenge digests.
 
+For `governed-sdd` projects, StageMesh selects both roles from the authorized
+REVIEW pool. Existing planner and challenger settings specify preferred providers.
+When a preferred provider is unavailable, StageMesh can use another eligible
+provider with an independent command identity. A task that needs fresh planning
+stays queued if no independent pair is available. A current plan with a proven
+planner can use an eligible independent challenger even if the original planner
+is unavailable.
+
+When the task baseline or contract changes, StageMesh saves the previous
+StageMesh-generated planning artifacts and their original execution receipts.
+New planning binds to the new task inputs and requires a new accountable approval.
+
 The bounded challenge verdict is `accept`, `revise`, or
 `needs-human-decision`. A missing, malformed or stale challenge, a revision
 request, an unresolved human decision, or an approval that does not bind the
@@ -110,7 +122,7 @@ cutover, or after the frozen planning spec changes, an operator may run
 The command refuses accepted or approved planning and any task with active work.
 For a non-accepting challenge it moves the exact old artifact into project-local
 history, records its digest and the operator's reason in the audit trail, and lets
-the next normal run invoke the configured independent challenger again. A challenge
+the next normal run invoke an eligible independent challenger again. A challenge
 already produced by the current protocol cannot be re-rolled: its decisions must be
 resolved or its planning inputs revised. StageMesh-launched provider processes are
 refused, and StageMesh never silently replaces a challenge.

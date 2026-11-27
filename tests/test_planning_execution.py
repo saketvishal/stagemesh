@@ -22,6 +22,8 @@ from stagemesh.planning_execution import (
     planning_execution_receipts,
 )
 from stagemesh.recovery import task_doctor
+from stagemesh.run_window import WindowOptions, run_window
+from stagemesh.runtime_freshness import RuntimeFreshness
 from stagemesh.spec_planning import (
     CONTRACT_AWARE_CHALLENGE_CUTOVER_EPOCH,
     MAX_AUTOMATIC_PLANNING_REVISIONS,
@@ -41,6 +43,7 @@ from stagemesh.spec_planning import (
     publish_automatic_planning_revision,
     retire_planning_challenge,
 )
+from stagemesh.survivor_wave import INTEGRATION_LOCAL, RunResult, WaveHooks
 
 PROVIDER = r'''
 import json, pathlib, sys
@@ -159,6 +162,9 @@ elif mode == "revise-twice-until-updated":
         "findings": [] if converged else [{"kind": "scope-risk", "summary": "Resolve the remaining blocker"}],
         "required_decisions": [],
     }))
+elif mode == "authentication-failed":
+    print("login required", file=sys.stderr)
+    raise SystemExit(1)
 elif mode == "human":
     print(json.dumps({
         "verdict": "needs-human-decision",
@@ -1255,3 +1261,102 @@ def test_config_rejects_untrusted_or_same_provider_role_combinations(tmp_path: P
         config_path.write_text(json.dumps(payload), encoding="utf-8")
         with pytest.raises(ConfigValidationError):
             load_config(tmp_path)
+
+
+def _governed_config(script: Path, *, challenger_mode: str = "challenger") -> dict:
+    settings = _config(script, challenger_mode=challenger_mode)
+    settings["governance_profile"] = "governed-sdd"
+    settings["merging"] = {"mode": "pr_only"}
+    settings["routing"] = {"require_independent_review": True}
+    settings["providers"]["fallback"] = shlex.join([sys.executable, str(script), "contract-aware"])
+    settings["authorization"]["unattended_providers"].append("fallback")
+    settings["planning_gate"]["approval_authority"] = {
+        "version": 1,
+        "authority_id": "project-owner:test",
+        "approver_id": "owner:test",
+    }
+    return settings
+
+
+def test_governed_planning_recovers_advanced_baseline_and_ineligible_preference(tmp_path: Path):
+    script = _script(tmp_path)
+    settings = _governed_config(script)
+    project = _project(tmp_path, ["T-1"], config=settings)
+    _, initial = _run(project)
+    assert initial["detail"]["next_action"] == "obtain_planning_approval", initial
+
+    old_spec, old_approval = load_planning_artifacts(project, "T-1")
+    old_challenge = load_planning_challenge(project, "T-1")
+    assert old_approval is None
+    assert old_challenge["challenger_provider"] == "challenger"
+
+    git = GitWorkspace(project)
+    (project / "README.md").write_text("new main\n", encoding="utf-8")
+    git.run("add", "README.md")
+    git.run("commit", "-m", "advance main")
+    baseline = git.head()
+    settings["providers"]["challenger"] = {
+        "command": settings["providers"]["challenger"],
+        "capabilities": ["IMPLEMENT"],
+    }
+    settings["providers"]["fallback"] = shlex.join([sys.executable, str(script), "challenger", "fallback"])
+    (project / ".stagemesh" / "config.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+
+    def advance(task_id: str) -> dict:
+        store.rebaseline_task(task_id, baseline)
+        return {}
+
+    def run_child(task_id: str, _max_steps: int) -> RunResult:
+        code, result = _run(project, "--task", task_id)
+        return RunResult(result["stop_reason"], result["message"], code)
+
+    try:
+        report = run_window(
+            store, project, load_config(project),
+            WindowOptions(tasks=["T-1"], max_tasks=1, open_prs=False, integration_mode=INTEGRATION_LOCAL),
+            WaveHooks(run_child, advance, target_sha=lambda: baseline, is_ancestor=lambda _old, _new: True),
+            base_ref="refs/heads/main", runtime=RuntimeFreshness(running_from="source"),
+            list_prs=lambda _project: [],
+        )
+    finally:
+        store.close()
+    assert report.tasks[0].baseline_advanced
+    assert report.tasks[0].stop_reason == "REFUSED:approval_missing", report.tasks[0].reason
+    assert "approve-planning --task T-1" in report.next_command
+    spec, approval = load_planning_artifacts(project, "T-1")
+    challenge = load_planning_challenge(project, "T-1")
+    assert approval is None and spec["baseline_sha"] == baseline
+    assert challenge["challenger_provider"] == "fallback"
+    assert challenge["planner_provider"] == "planner"
+    history = project / ".stagemesh" / "planning" / "history"
+    archived = [json.loads(path.read_text(encoding="utf-8")) for path in history.glob("*.stale.json")]
+    assert old_spec in archived and old_challenge in archived
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+        assert len(list(store.task_audit_events(PLANNER_RECEIPT, "T-1"))) == 2
+        assert len(list(store.task_audit_events(CHALLENGER_RECEIPT, "T-1"))) == 2
+    finally:
+        store.close()
+
+
+def test_governed_challenge_falls_back_after_an_authentication_failure(tmp_path: Path):
+    script = _script(tmp_path)
+    settings = _governed_config(script, challenger_mode="authentication-failed")
+    settings["providers"]["fallback"] = shlex.join([sys.executable, str(script), "challenger"])
+    project = _project(tmp_path, ["T-1"], config=settings)
+
+    _, result = _run(project)
+
+    assert result["detail"]["next_action"] == "obtain_planning_approval", result
+    challenge = load_planning_challenge(project, "T-1")
+    assert challenge["challenger_provider"] == "fallback"
+    assert challenge["planner_provider"] == "planner"
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert len(list(store.task_audit_events("planning.provider_fallback", "T-1"))) == 1
+        assert store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+    finally:
+        store.close()
