@@ -1037,7 +1037,7 @@ def test_distinct_names_with_the_same_command_are_not_independent(tmp_path: Path
 
     assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
     assert result["detail"]["next_action"] == "planning_roles_not_independent"
-    assert load_planning_artifacts(project, "T-1")[0] is not None
+    assert load_planning_artifacts(project, "T-1")[0] is None
     assert load_planning_challenge(project, "T-1") is None
 
 
