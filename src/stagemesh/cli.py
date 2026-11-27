@@ -502,6 +502,14 @@ def _write_provider_authorization(project: Path, requested: tuple[str, ...]) -> 
     return names
 
 
+def _available_planning_providers(config: StageMeshConfig, candidates: tuple[str, ...]) -> tuple[str, ...]:
+    adapters = {adapter.name: adapter for adapter in adapters_from_config(config)}
+    return tuple(
+        name for name in candidates if name in adapters and "review" in adapters[name].capabilities
+        and adapters[name].check_stage_capacity("review") == "AVAILABLE"
+    )
+
+
 def _configure_governance_profile(
     project: Path,
     profile: str | None,
@@ -539,8 +547,7 @@ def _configure_governance_profile(
     current = load_config(project)
     authorized = set(current.authorized_providers or ())
     candidates = tuple(name for name in available_providers if name in authorized)
-    review_capable = {adapter.name for adapter in adapters_from_config(current) if "review" in adapter.capabilities}
-    eligible = tuple(name for name in candidates if name in review_capable)
+    eligible = _available_planning_providers(current, candidates)
     gate = data.get("planning_gate", {})
     if not isinstance(gate, dict):
         raise ConfigValidationError("planning_gate must be an object")
@@ -565,9 +572,15 @@ def _configure_governance_profile(
             "governance provider roles must use installed and authorized providers: "
             f"{', '.join(unavailable)}"
         )
-    missing_review = [name for name in (selected_planner, selected_challenger) if name not in review_capable]
+    missing_review = [name for name in (selected_planner, selected_challenger) if name not in eligible]
     if missing_review:
-        raise ConfigValidationError(f"governance provider roles require a configured REVIEW command: {', '.join(missing_review)}")
+        raise ConfigValidationError(f"governance provider roles require an available REVIEW command: {', '.join(missing_review)}")
+    from .planning_execution import planning_role_error
+
+    planned = replace(current, planner_provider=selected_planner, challenger_provider=selected_challenger)
+    error = planning_role_error(planned, adapters_from_config(current))
+    if error is not None:
+        raise ConfigValidationError(str(error))
     authority = gate.get("approval_authority", {})
     if authority and not isinstance(authority, dict):
         raise ConfigValidationError("planning_gate.approval_authority must be an object")
@@ -823,7 +836,16 @@ def _init_readiness(
         ),
     )
     from .baseline import resolve_integration_ref
+    from .planning_execution import planning_role_error
     from .run_window import INTEGRATION_PR, repository_preflight_checks
+
+    if config.planner_provider or config.challenger_provider:
+        planning_error = planning_role_error(config, list(adapters.values()))
+        add(
+            "planning_roles", planning_error is None,
+            str(planning_error) if planning_error else "assigned planning REVIEW commands are available",
+            "configure distinct authorized REVIEW commands in .stagemesh/config.json and rerun stagemesh init",
+        )
     from .survivor_wave import git_repo_state
 
     base_ref = resolve_integration_ref(project, config.integration_ref) or "HEAD"

@@ -146,6 +146,9 @@ def _ensure_executed_planning_owned(
             "planning_spec_invalid", "existing planning spec is unreadable or malformed"
         )
     if spec_payload is None and config.planner_provider is not None:
+        error = planning_role_error(config, adapters_from_config(config))
+        if error is not None:
+            raise error
         adapter = _role_adapter(config, config.planner_provider)
         task = store.get_task(task_id)
         planned, execution = _run_role(
@@ -404,8 +407,11 @@ def _configured_planning_adapter(adapters: list[RuntimeCommandAdapter], provider
     return adapter
 
 
-def planning_role_problem(config: StageMeshConfig, adapters: list[RuntimeCommandAdapter]) -> str | None:
-    """Check the exact assigned roles against unattended adapters without starting a provider."""
+def planning_role_error(
+    config: StageMeshConfig, adapters: list[RuntimeCommandAdapter],
+) -> PlanningExecutionError | None:
+    """Check the roles required for fresh planning without starting either provider."""
+    identities = []
     for role, provider in (("planner", config.planner_provider), ("challenger", config.challenger_provider)):
         if provider is None:
             continue
@@ -413,12 +419,15 @@ def planning_role_problem(config: StageMeshConfig, adapters: list[RuntimeCommand
         try:
             adapter = _configured_planning_adapter(adapters, provider)
         except PlanningExecutionError:
-            return f"{label} has no configured REVIEW command"
+            return PlanningExecutionError("planning_provider_unavailable", f"{label} has no configured REVIEW command")
         if adapter.denied:
-            return f"{label} is not authorized for unattended use: {adapter.denied}"
+            return PlanningExecutionError("provider_not_authorized", f"{label} is not authorized: {adapter.denied}")
         capacity = adapter.check_stage_capacity("review")
         if capacity != "AVAILABLE":
-            return f"{label} has an unavailable REVIEW command ({capacity})"
+            return PlanningExecutionError("planning_provider_unavailable", f"{label} lacks an available REVIEW command ({capacity})")
+        identities.append(command_snapshot(adapter.name, adapter.command_for("review"), adapter.all_commands()))
+    if len(identities) == 2 and _identities_overlap(*identities):
+        return PlanningExecutionError("planning_roles_not_independent", "planner and challenger command identities must be different")
     return None
 
 

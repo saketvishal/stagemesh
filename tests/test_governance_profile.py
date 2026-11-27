@@ -80,7 +80,7 @@ def test_legacy_projects_remain_opt_in(tmp_path: Path) -> None:
 
 
 def test_init_configures_governed_profile_from_authorized_installed_providers(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = tmp_path / ".stagemesh"
     runtime.mkdir()
@@ -92,13 +92,22 @@ def test_init_configures_governed_profile_from_authorized_installed_providers(
                     "claude": "claude",
                     "offline": "offline",
                     "implementation-only": {"command": "worker", "capabilities": ["IMPLEMENT"]},
+                    "missing-review-command": {
+                        "command": "worker", "capabilities": ["REVIEW"], "review_command": "missing",
+                    },
                 },
-                "authorization": {"unattended_providers": ["codex", "claude", "offline", "implementation-only"]},
+                "authorization": {
+                    "unattended_providers": ["codex", "claude", "offline", "implementation-only", "missing-review-command"],
+                },
             }
         ),
         encoding="utf-8",
     )
 
+    monkeypatch.setattr(
+        "stagemesh.providers.RuntimeCommandAdapter.check_stage_capacity",
+        lambda adapter, _stage: "UNKNOWN" if adapter.name == "missing-review-command" else "AVAILABLE",
+    )
     changed = _configure_governance_profile(
         tmp_path,
         "governed-sdd",
@@ -106,7 +115,7 @@ def test_init_configures_governed_profile_from_authorized_installed_providers(
         challenger_provider=None,
         authority_id="project-owner:example",
         approver_id="github:owner",
-        available_providers=("implementation-only", "claude", "codex"),
+        available_providers=("implementation-only", "missing-review-command", "claude", "codex"),
     )
 
     config = load_config(tmp_path)
@@ -125,14 +134,17 @@ def test_init_configures_governed_profile_from_authorized_installed_providers(
     ) is False
 
 
-def test_init_refuses_an_implementation_only_challenger_without_writing(tmp_path: Path) -> None:
+def test_init_refuses_an_implementation_only_challenger_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("stagemesh.providers.RuntimeCommandAdapter.check_stage_capacity", lambda *_: "AVAILABLE")
     _write(tmp_path, providers={
         "planner": "planner",
         "challenger": {"command": "worker", "capabilities": ["IMPLEMENT"]},
     })
     config_path = tmp_path / ".stagemesh" / "config.json"
     before = config_path.read_bytes()
-    with pytest.raises(ConfigValidationError, match="configured REVIEW command: challenger"):
+    with pytest.raises(ConfigValidationError, match="available REVIEW command: challenger"):
         _configure_governance_profile(
             tmp_path, "governed-sdd", planner_provider=None, challenger_provider=None,
             authority_id=None, approver_id=None, available_providers=("planner", "challenger"),
@@ -140,7 +152,8 @@ def test_init_refuses_an_implementation_only_challenger_without_writing(tmp_path
     assert config_path.read_bytes() == before
 
 
-def test_init_never_infers_accountable_authority(tmp_path: Path) -> None:
+def test_init_never_infers_accountable_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("stagemesh.providers.RuntimeCommandAdapter.check_stage_capacity", lambda *_: "AVAILABLE")
     runtime = tmp_path / ".stagemesh"
     runtime.mkdir()
     (runtime / "config.json").write_text(

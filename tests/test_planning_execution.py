@@ -1041,6 +1041,27 @@ def test_distinct_names_with_the_same_command_are_not_independent(tmp_path: Path
     assert load_planning_challenge(project, "T-1") is None
 
 
+@pytest.mark.parametrize("aliased", [False, True])
+def test_fresh_planning_rejects_unusable_challenger_before_provider_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, aliased: bool,
+) -> None:
+    config = _config(_script(tmp_path))
+    config["providers"]["challenger"] = (
+        config["providers"]["planner"] if aliased
+        else {"command": config["providers"]["challenger"], "capabilities": ["IMPLEMENT"]}
+    )
+    project = _project(tmp_path, ["T-1"], config=config)
+
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("fresh planner started while its required challenger was unusable")
+
+    monkeypatch.setattr("stagemesh.planning_execution._run_role", unexpected_provider)
+    code, result = _run(project)
+    assert code != 0 and result["stop_reason"] == "REFUSED:planning_execution"
+    expected = "planning_roles_not_independent" if aliased else "planning_provider_unavailable"
+    assert result["detail"]["next_action"] == expected
+
+
 def test_explicit_provider_authorization_refusal_happens_before_launch(tmp_path: Path):
     config = _config(_script(tmp_path))
     config["authorization"]["unattended_providers"] = ["challenger"]

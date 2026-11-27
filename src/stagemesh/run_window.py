@@ -615,7 +615,7 @@ def continuation(
 def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: bool) -> Check:
     """Can the configured providers implement a task AND review it independently? (cooldowns are reported, not fatal on their own)."""
     from . import provider_authorization
-    from .planning_execution import planning_role_problem
+    from .planning_execution import planning_role_error
     from .provider_pool import IMPLEMENT, REVIEW, ProviderPool, default_pools
     from .providers import adapters_from_config
 
@@ -633,12 +633,7 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
                 os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
             else:
                 os.environ[provider_authorization.UNATTENDED_ENV] = previous
-        planning_problem = planning_role_problem(config, adapters)
-        if planning_problem:
-            return Check(
-                "planning_roles", False, planning_problem,
-                fix="configure an authorized REVIEW command for the named planning role in .stagemesh/config.json",
-            )
+        planning_error = planning_role_error(config, adapters)
         stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
         capable = {stage: {a.name for a in adapters if cap in a.capabilities} for stage, cap in stage_caps.items()}
         priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}
@@ -668,6 +663,12 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
         return Check("providers", False, f"provider setup is invalid: {type(exc).__name__}: {exc}", fix="stagemesh config")
     if not ok:
         return Check("providers", False, message, fix="stagemesh capacity")
+    if planning_error is not None:
+        # Accountably approved pickup can use its frozen receipts without either planning provider.
+        return Check(
+            "planning_roles", False, str(planning_error), fatal=False,
+            fix="configure distinct authorized REVIEW commands in .stagemesh/config.json before requesting new planning",
+        )
     cooling = [v.provider for v in impl + review if not v.eligible and "cooldown" in v.reason]
     detail = (
         "implementation and independent review are both available; "
@@ -1048,6 +1049,11 @@ def next_command(report: WindowReport, store: Store | None = None) -> str:
         return "review and approve each frozen plan: " + ", ".join(
             f"stagemesh approve-planning --task {task_id}" for task_id in approvals
         )
+    for check in report.preflight:
+        if check.name == "planning_roles" and any(
+            task.stop_reason == "REFUSED:planning_execution" and check.detail in task.reason for task in actionable
+        ):
+            return check.fix
     if any(t.resumable for t in actionable):
         return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
     attempted_external_evidence_blocks = [
