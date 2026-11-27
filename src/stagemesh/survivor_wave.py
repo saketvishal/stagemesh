@@ -1022,7 +1022,7 @@ def format_report(report: WaveReport) -> str:
 def subprocess_task_runner(
     project: Path, *, python: str | None = None, integration_ref: str | None = None,
     live_acceptance: str | None = None, scope_id: str | None = None,
-    providers: tuple[str, ...] = (),
+    providers: tuple[str, ...] = (), unattended: bool = False,
 ) -> Callable[[str, int], RunResult]:
     """Run `continue --task N --json` in a child process, so each task gets its own connection and process identity.
 
@@ -1041,9 +1041,12 @@ def subprocess_task_runner(
             argv += ["--live-acceptance", live_acceptance]
         if providers:
             argv += ["--providers", ",".join(providers)]
+        from .provider_authorization import UNATTENDED_ENV
         from .validation_slot import window_deadline_for_subprocess
 
         env = os.environ.copy()
+        if unattended:
+            env[UNATTENDED_ENV] = "1"
         window_deadline = window_deadline_for_subprocess()
         if window_deadline is not None:
             env["STAGEMESH_WINDOW_DEADLINE"] = repr(float(window_deadline))

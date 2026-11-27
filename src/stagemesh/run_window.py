@@ -1337,7 +1337,9 @@ def run_window(
             refreshed = provider_check(store, config, strict_live=options.strict_live)
         except Exception as exc:  # noqa: BLE001 - provider recheck failure is a typed preflight result
             refreshed = Check("providers", False, f"provider recheck unavailable: {type(exc).__name__}", fix="stagemesh capacity")
-        report.preflight = [refreshed if check.name == "providers" else check for check in report.preflight]
+        report.preflight = [
+            refreshed if check.name in {"providers", "planning_roles"} else check for check in report.preflight
+        ]
     failed = [check for check in report.preflight if not check.ok and check.fatal]
     if failed:
         report.refused = True

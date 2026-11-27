@@ -415,6 +415,26 @@ def test_child_runner_preserves_live_acceptance_policy(tmp_path: Path, monkeypat
     assert child_args.live_acceptance == mode
 
 
+def test_window_child_carries_unattended_authorization_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+    from stagemesh.provider_authorization import UNATTENDED_ENV
+
+    envs = []
+
+    def fake_run(argv, **kwargs):
+        envs.append(kwargs["env"])
+        return sp.CompletedProcess(argv, 0, json.dumps({"stop_reason": "DONE"}), "")
+
+    monkeypatch.delenv(UNATTENDED_ENV, raising=False)
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    survivor_wave.subprocess_task_runner(tmp_path, unattended=True)("1", 1)
+    survivor_wave.subprocess_task_runner(tmp_path)("1", 1)
+    assert envs[0][UNATTENDED_ENV] == "1"
+    assert UNATTENDED_ENV not in envs[1]
+
+
 def test_child_runner_preserves_run_scoped_provider_subset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess as sp
 

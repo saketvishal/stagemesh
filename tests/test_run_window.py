@@ -1179,6 +1179,29 @@ def test_preflight_flags_assigned_planning_role_without_review_even_when_pools_a
     assert rw.provider_pool_check(store, cli_module.load_config(project), strict_live=False).ok
 
 
+def test_provider_refresh_can_block_after_initial_planning_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
+    outcomes = iter([
+        rw.Check("planning_roles", False, "new planning unavailable", fatal=False),
+        rw.Check("providers", False, "implementation pool became unavailable", fix="stagemesh capacity"),
+    ])
+
+    def check(_store, _config, *, strict_live):
+        return next(outcomes)
+
+    monkeypatch.setattr(rw, "provider_pool_check", check)
+    monkeypatch.setattr("stagemesh.provider_acceptance.refresh_expired_quota_checks", lambda *args, **kwargs: None)
+    kwargs["provider_check"] = check
+
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", **kwargs)
+
+    assert report.refused and rig.runs == []
+    assert "implementation pool became unavailable" in report.stop_reason
+    assert report.next_command == "stagemesh capacity"
+
+
 def test_a_local_main_that_is_ahead_or_diverged_refuses_pr_mode(tmp_path: Path) -> None:
     for relation in ("ahead", "diverged"):
         store, project, rig, hooks, options, config, kwargs = window(tmp_path / relation, ["1"])
