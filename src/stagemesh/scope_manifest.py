@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import TypeGuard
 
 from .contracts import ChangeContract, ContractError, _matches
 from .git import GitError, GitWorkspace
@@ -100,7 +100,7 @@ def _tree_entry(git: GitWorkspace, revision: str, path: str) -> tuple[str, str] 
 
 def _operations(source: str) -> tuple[tuple[str, str], ...]:
     try:
-        content = json.loads(source, object_pairs_hook=_distinct_fields)
+        content: object = json.loads(source, object_pairs_hook=_distinct_fields)
     except ValueError as exc:
         raise ContractError("implementation manifest must contain valid JSON") from exc
     files = content.get("files") if isinstance(content, dict) and content.get("scope", "direct") == "direct" else None
@@ -111,14 +111,17 @@ def _operations(source: str) -> tuple[tuple[str, str], ...]:
     for entry in files:
         path = entry.get("path") if isinstance(entry, dict) else None
         operation = entry.get("operation") if isinstance(entry, dict) else None
-        if not _literal_path(path) or path.casefold() in seen or operation not in ("create", "modify", "delete"):
+        if (
+            not _literal_path(path) or path.casefold() in seen
+            or not isinstance(operation, str) or operation not in ("create", "modify", "delete")
+        ):
             raise ContractError("implementation manifest requires distinct literal paths with create, modify or delete operations")
         seen.add(path.casefold())
         paths[path] = operation
     return tuple(sorted(paths.items()))
 
 
-def _distinct_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def _distinct_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     fields = dict(pairs)
     if len(fields) != len(pairs):
         raise ValueError("duplicate manifest keys")
