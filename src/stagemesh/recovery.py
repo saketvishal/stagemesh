@@ -10,7 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
+import re
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from .capabilities import (
     capability_policy_snapshot,
     task_capability_summary,
 )
+from .concurrency import IntegrationLockTimeout
 from .config import AdverseReviewPolicy, ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
 from .contracts import (
@@ -66,12 +68,14 @@ from .spec_planning import (
     NEXT_RESOLVE_DECISIONS,
     NEXT_REVISE_SPEC,
     NEXT_WRITE_SPEC,
+    PROVIDER_PROCESS_ENV,
     evaluate_planning_gate,
     load_planning_artifacts,
     load_planning_challenge,
     planning_artifact_paths,
     planning_challenge_path,
 )
+from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .timing import format_task_summary, task_timing
 from .validation import Validator
 from .validation_services import (
@@ -226,20 +230,27 @@ def _contract_from_manifest(
         raise RecoveryRefusal("manifest_rebind_refused", str(exc)) from exc
 
 
-def _write_bound_contract(path: Path, canonical: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as temporary:
-        temporary.write(canonical + "\n")
-    try:
-        os.replace(temporary.name, path)
-    finally:
-        Path(temporary.name).unlink(missing_ok=True)
-
-
 def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool = False, reason: str | None = None,
                     force: bool = False, review_invariants: tuple[int, ...] = (), command_invariants: tuple[int, ...] = (),
                     plan: bool = False, from_manifest: str | None = None,
                     allow_workflow_modification: bool = False) -> dict[str, Any]:
+    if from_manifest is not None and (os.environ.get(PROVIDER_PROCESS_ENV) or not re.fullmatch(r"[\w-]+", task_id)):
+        raise RecoveryRefusal("manifest_operator_required", "manifest rebind requires an operator and a plain task ID")
+    database = connected_dispatch_database(store.conn) if from_manifest is not None and not plan else None
+    lock = stage_dispatch_lock(database, task_id).hold("manifest rebind") if database is not None else nullcontext()
+    try:
+        with lock:
+            return _rebind_contract(store, project, task_id, validate=validate, reason=reason, force=force,
+                                    review_invariants=review_invariants, command_invariants=command_invariants,
+                                    plan=plan, from_manifest=from_manifest,
+                                    allow_workflow_modification=allow_workflow_modification)
+    except IntegrationLockTimeout as exc:
+        raise RecoveryRefusal("active_dispatch", "the task has an active dispatch; retry the manifest rebind once it is idle") from exc
+
+
+def _rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool, reason: str | None,
+                     force: bool, review_invariants: tuple[int, ...], command_invariants: tuple[int, ...],
+                     plan: bool, from_manifest: str | None, allow_workflow_modification: bool) -> dict[str, Any]:
     """Re-read .stagemesh/contracts/<id>.json, canonicalize it and replace the task's frozen contract with it.
 
     The stored version is always this build's CONTRACT_VERSION: it is not read from the old row, so a hand-edited row
@@ -277,11 +288,10 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     if from_manifest is not None:
         contract = _contract_from_manifest(store, project, task, contract, from_manifest, allow_workflow_modification)
         reason = reason or f"operator bound the reviewed manifest {from_manifest}"
-    elif previous_contract and previous_contract.scope_manifest_ref and (
-        contract.scope_manifest_ref != previous_contract.scope_manifest_ref
-        or contract.scope_file_operations != previous_contract.scope_file_operations
-    ):
-        raise RecoveryRefusal("manifest_rebind_required", "use --from-manifest to revise a manifest-bound scope")
+    elif (contract.scope_manifest_ref or contract.scope_file_operations or (
+        previous_contract and previous_contract.scope_manifest_ref
+    )) and contract != previous_contract:
+        raise RecoveryRefusal("manifest_rebind_required", "use --from-manifest to introduce or revise a manifest binding")
     scope_revised = bool(
         previous_contract is not None
         and previous_contract.scope_mode is not None
@@ -365,30 +375,6 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
             "invariant_classification": classification, "candidate_sha": candidate_sha,
             "reason": reason.strip(), "operator": _operator(), "forced": bool(force),
         })
-    store.rebind_task_contract(
-        task_id,
-        CONTRACT_VERSION,
-        digest,
-        canonical,
-        candidate_sha if binding is not None else None,
-        capability_digest=str(capability_policy["digest"]),
-        capability_json=str(capability_policy["canonical_json"]),
-    )
-    changes = _resume_at_validate(store, task_id, task)
-    # Even an unchanged rebind must repair a stage that has no current validation.
-    if (
-        candidate_sha is not None
-        and store.get_task(task_id)["stage"] in (Stage.REVIEW, Stage.INTEGRATE)
-        and not store.has_bound_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED)
-    ):
-        store.advance_task(task_id, Stage.VALIDATE)
-        record_audit(store, "task.advance", {
-            "task_id": task_id,
-            "stage": Stage.VALIDATE,
-            "candidate_sha": candidate_sha,
-            "reason": "operator rebind: current candidate and contract require passed validation",
-        })
-        changes["stage_reset"] = True
     payload: dict[str, Any] = {
         "task_id": task_id,
         "old_digest": old_digest,
@@ -407,12 +393,18 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         "operator": _operator(),
         "operator_action": "REBIND_CONTRACT",
         **({"manifest": from_manifest} if from_manifest is not None else {}),
-        **changes,
     }
-    record_audit(store, REBIND_EVENT, payload)
     if from_manifest is not None:
-        _write_bound_contract(path or project / ".stagemesh" / "contracts" / f"{task_id}.json", canonical)
-    if scope_revised and previous_contract is not None:
+        payload.update(unblocked=False, stage_reset=False)
+    store.rebind_task_contract(
+        task_id, CONTRACT_VERSION, digest, canonical, candidate_sha if binding is not None else None,
+        capability_digest=str(capability_policy["digest"]), capability_json=str(capability_policy["canonical_json"]),
+        audit_event=(REBIND_EVENT, redact_mapping(payload)) if from_manifest is not None else None,
+    )
+    if from_manifest is None:
+        payload.update(_resume_after_contract_rebind(store, task_id, task, candidate_sha, digest))
+        record_audit(store, REBIND_EVENT, payload)
+    if scope_revised and previous_contract is not None and from_manifest is None:
         record_audit(
             store,
             "task.scope_policy_revised",
@@ -435,6 +427,22 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     current = store.get_task(task_id)
     report["stage"], report["status"] = current["stage"], current["status"]
     return report
+
+
+def _resume_after_contract_rebind(store: Store, task_id: str, task: Any, candidate_sha: str | None, digest: str) -> dict[str, Any]:
+    changes = _resume_at_validate(store, task_id, task)
+    if (
+        candidate_sha is not None
+        and store.get_task(task_id)["stage"] in (Stage.REVIEW, Stage.INTEGRATE)
+        and not store.has_bound_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED)
+    ):
+        store.advance_task(task_id, Stage.VALIDATE)
+        record_audit(store, "task.advance", {
+            "task_id": task_id, "stage": Stage.VALIDATE, "candidate_sha": candidate_sha,
+            "reason": "operator rebind: current candidate and contract require passed validation",
+        })
+        changes["stage_reset"] = True
+    return changes
 
 
 # --- rebaseline-task -------------------------------------------------------------------------------------------------------------

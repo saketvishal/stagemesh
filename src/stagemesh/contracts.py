@@ -336,6 +336,8 @@ def bind_contract(
     candidate_sha: str | None = None,
 ) -> BoundChangeContract:
     contract = load_contract(project, task_id)
+    if contract.scope_manifest_ref or contract.scope_file_operations:
+        raise ContractError("use rebind-contract --from-manifest to create a manifest binding")
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     return BoundChangeContract(contract, CONTRACT_VERSION, digest, canonical_json, baseline_sha, candidate_sha)
@@ -1070,7 +1072,12 @@ def _file_operation_findings(
         return [{"severity": "error", "code": "scope_operation_unverified", "message": "manifest validation needs a frozen baseline"}]
     git = GitWorkspace(project)
     try:
+        from .scope_manifest import validate_manifest_binding
+
+        validate_manifest_binding(project, baseline, contract)
         diff = git.run("diff", "--name-status", "--no-renames", "-z", baseline, candidate, encoding="utf-8").stdout
+    except ContractError as exc:
+        return [{"severity": "error", "code": "manifest_scope_stale", "message": str(exc)}]
     except (GitError, OSError, UnicodeDecodeError):
         return [{"severity": "error", "code": "scope_operation_unverified", "message": "manifest operations could not be read from Git"}]
     tokens = diff.split("\0")[:-1]

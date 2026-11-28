@@ -55,6 +55,7 @@ from .spec_planning import (
     PLANNING_CHALLENGE_REVIEW_PROTOCOL_VERSION,
     TRUNCATED_TEXT_SUFFIX,
     PlanningBudgetError,
+    PlanningChallenge,
     PlanningChallengeRefreshRefusal,
     PlanningRevisionRefusal,
     PlanningSpecError,
@@ -196,7 +197,7 @@ def governed_pickup_error(
                         and frozen.challenge.planning_spec_hash == plan_digest
                         and _receipt_matches(planner, provider=str(planner["provider"]), baseline_sha=baseline_sha, contract_hash=contract_hash)
                         and _receipt_matches(receipt, provider=str(receipt["provider"]), baseline_sha=baseline_sha, contract_hash=contract_hash)
-                        and not _identities_overlap(planner, receipt)
+                        and _independent_challenge_roles(frozen.challenge, planner, receipt)
                     ):
                         return PlanningExecutionError(
                             "planning_decision_required",
@@ -404,12 +405,7 @@ def _ensure_executed_planning_owned(
             store, config, pool, CHALLENGER_RECEIPT, task_id, frozen_existing.digest,
             config.challenger_provider, baseline_sha, contract_hash, spec_hash=frozen_spec.digest,
         )
-        if pool is not None and (
-            frozen_existing.challenge.planner_provider != planner["provider"]
-            or frozen_existing.challenge.challenger_provider != challenger["provider"]
-            or planner["provider"] == challenger["provider"]
-            or _identities_overlap(planner, challenger)
-        ):
+        if pool is not None and not _independent_challenge_roles(frozen_existing.challenge, planner, challenger):
             raise PlanningExecutionError("planning_roles_not_independent", "planning receipts are not independent")
         revision_count = automatic_planning_revision_count(
             store, task_id, frozen_spec.digest
@@ -1142,6 +1138,17 @@ def _record_receipt(
             "provider_invoked": True,
             "review_protocol_version": review_protocol_version,
         },
+    )
+
+
+def _independent_challenge_roles(
+    challenge: PlanningChallenge, planner: dict[str, Any], challenger: dict[str, Any],
+) -> bool:
+    return (
+        challenge.planner_provider == planner["provider"]
+        and challenge.challenger_provider == challenger["provider"]
+        and planner["provider"] != challenger["provider"]
+        and not _identities_overlap(planner, challenger)
     )
 
 

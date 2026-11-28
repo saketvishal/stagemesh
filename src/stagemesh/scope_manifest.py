@@ -6,10 +6,10 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 from .contracts import ChangeContract, ContractError, _matches
-from .git import GitWorkspace
+from .git import GitError, GitWorkspace
 
 
 def manifest_contract(
@@ -21,25 +21,8 @@ def manifest_contract(
     scope_owner: str,
     allow_workflow_modification: bool,
 ) -> ChangeContract:
-    revision, _, path = reference.partition(":")
-    if not re.fullmatch(r"[0-9a-f]{40}", revision) or not _literal_path(path) or Path(path).name != "implementation-files.json":
-        raise ContractError("manifest reference must be FULL_COMMIT:path/to/implementation-files.json")
-    git = GitWorkspace(project)
-    if git.run("merge-base", "--is-ancestor", revision, baseline, check=False).returncode:
-        raise ContractError("the approved manifest commit must be an ancestor of the frozen task baseline")
-    blob = git.run("cat-file", "blob", f"{revision}:{path}", encoding="utf-8", check=False)
-    current = git.run("cat-file", "blob", f"{baseline}:{path}", encoding="utf-8", check=False)
-    if blob.returncode or current.returncode or blob.stdout != current.stdout:
-        raise ContractError("the approved implementation manifest is missing or has changed at the task baseline")
-    if len(blob.stdout) > 64_000:
-        raise ContractError("implementation manifest exceeds the scope input limit")
-    entries = _operations(blob.stdout)
-    for target, operation in entries:
-        existing = git.run("cat-file", "-t", f"{baseline}:{target}", check=False)
-        if (operation == "create" and existing.returncode == 0) or (
-            operation != "create" and (existing.returncode != 0 or existing.stdout.strip() != "blob")
-        ):
-            raise ContractError(f"manifest operation {operation} conflicts with the task baseline for {target}")
+    entries = _read_scope(project, baseline, reference)
+    _, _, path = reference.partition(":")
     paths = tuple(target for target, _ in entries)
     if path.casefold() in {target.casefold() for target in paths} or any(_matches(target, contract.exclusions) for target in paths):
         raise ContractError("manifest requests an excluded file or the governing manifest itself")
@@ -49,9 +32,11 @@ def manifest_contract(
         raise ContractError("the contract has separate write authority that must be reconciled before importing a manifest")
     forbidden = contract.forbidden_files
     workflows = [(target, operation) for target, operation in entries if _matches(target, (".github/**",))]
-    if allow_workflow_modification and workflows and all(
-        re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", target) and operation == "modify" for target, operation in workflows
-    ):
+    if workflows:
+        if not allow_workflow_modification or any(
+            not re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", target) or operation != "modify" for target, operation in workflows
+        ):
+            raise ContractError("manifest scope requires explicit permission for modifications to existing GitHub workflows only")
         forbidden = tuple(rule for rule in forbidden if rule != ".github/**")
     revised = replace(
         contract,
@@ -69,9 +54,53 @@ def manifest_contract(
     return revised
 
 
+def validate_manifest_binding(project: Path, baseline: str, contract: ChangeContract) -> None:
+    if contract.scope_manifest_ref and _read_scope(project, baseline, contract.scope_manifest_ref) != contract.scope_file_operations:
+        raise ContractError("frozen file operations disagree with the approved manifest; rebind the task")
+
+
+def _read_scope(project: Path, baseline: str, reference: str) -> tuple[tuple[str, str], ...]:
+    revision, _, path = reference.partition(":")
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", revision) or not _literal_path(path):
+        raise ContractError("manifest reference must be FULL_COMMIT:path/to/manifest.json")
+    git = GitWorkspace(project)
+    try:
+        return _scope_at_baseline(git, revision, baseline, path)
+    except (GitError, OSError, UnicodeDecodeError) as exc:
+        raise ContractError("Git could not read the approved scope manifest and frozen baseline") from exc
+
+
+def _scope_at_baseline(git: GitWorkspace, revision: str, baseline: str, path: str) -> tuple[tuple[str, str], ...]:
+    if git.run("merge-base", "--is-ancestor", revision, baseline, check=False).returncode:
+        raise ContractError("the approved manifest commit must be an ancestor of the frozen task baseline")
+    approved = _tree_entry(git, revision, path)
+    if approved is None or approved[0] not in ("100644", "100755") or _tree_entry(git, baseline, path) != approved:
+        raise ContractError("the approved scope manifest is missing or has changed at the task baseline")
+    size = int(git.run("cat-file", "-s", approved[1]).stdout.strip())
+    if size > 64_000:
+        raise ContractError("scope manifest exceeds the scope input limit")
+    entries = _operations(git.run("cat-file", "blob", approved[1], encoding="utf-8").stdout)
+    for target, operation in entries:
+        existing = _tree_entry(git, baseline, target)
+        if (operation == "create" and existing is not None) or (
+            operation != "create" and (existing is None or existing[0] not in ("100644", "100755"))
+        ):
+            raise ContractError(f"manifest operation {operation} conflicts with the task baseline for {target}")
+    return entries
+
+
+def _tree_entry(git: GitWorkspace, revision: str, path: str) -> tuple[str, str] | None:
+    line = git.run("--literal-pathspecs", "ls-tree", "-z", revision, "--", path, encoding="utf-8").stdout.rstrip("\0")
+    if not line:
+        return None
+    metadata, _, name = line.partition("\t")
+    mode, _, oid = metadata.split()
+    return (mode, oid) if name == path else None
+
+
 def _operations(source: str) -> tuple[tuple[str, str], ...]:
     try:
-        content = json.loads(source)
+        content = json.loads(source, object_pairs_hook=_distinct_fields)
     except ValueError as exc:
         raise ContractError("implementation manifest must contain valid JSON") from exc
     files = content.get("files") if isinstance(content, dict) and content.get("scope", "direct") == "direct" else None
@@ -87,6 +116,13 @@ def _operations(source: str) -> tuple[tuple[str, str], ...]:
         seen.add(path.casefold())
         paths[path] = operation
     return tuple(sorted(paths.items()))
+
+
+def _distinct_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("duplicate manifest keys")
+    return fields
 
 
 def _literal_path(path: object) -> TypeGuard[str]:

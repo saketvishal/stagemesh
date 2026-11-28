@@ -112,14 +112,16 @@ An infrastructure task that edits a normally forbidden workflow needs a project-
 contract naming that workflow and its other approved files. Keep the default profile protection for
 other tasks. Rebind any stale contract through the audited rebind command before starting the window.
 
-For an existing planning task with a reviewed `implementation-files.json`, apply the file list with
-`stagemesh rebind-contract --task ID --from-manifest COMMIT:PATH`. Supply the full merge SHA and
-the repository-relative path. The merge must be in the frozen task baseline and the GitHub issue's
-literal allowlist must match the manifest. Use `--plan` to preview before writing. For a reviewed
+For an existing planning task with a reviewed JSON file manifest, apply the file list with
+`stagemesh rebind-contract --task ID --from-manifest COMMIT:PATH`. Supply the full commit ID and
+the repository-relative path. Use a `files` array of objects with `path` and `operation` fields.
+The pinned commit must be in the frozen task baseline. For tasks sourced from GitHub, the issue's
+literal allowlist must match the manifest. Use `--plan` to preview the ledger update. For a reviewed
 manifest that modifies an existing GitHub Actions workflow, explicitly pass
 `--allow-workflow-modification`. The strict contract grants only the named paths and operations and
-retains its validation commands. The binding records the manifest pin and cannot overwrite passed
-candidate evidence. Spec approval, task eligibility, and implementation review still apply.
+retains its validation commands. The ledger records the new binding and its audit event together.
+StageMesh verifies the pin again at admission and candidate validation. Spec approval, task
+eligibility, and implementation review still apply.
 
 An independently confirmed unanswered planning decision holds its exact plan before a later window
 claims it. The report keeps the question and the task's next action visible, and the window can

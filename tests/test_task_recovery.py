@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -23,7 +24,7 @@ import stagemesh.cli as cli_module
 from stagemesh.audit import record_audit
 from stagemesh.autonomy.provenance import claim_workspace, load_ownership
 from stagemesh.baseline import analyze_baseline
-from stagemesh.contract_binding import bind_task_contract, contract_for_candidate
+from stagemesh.contract_binding import ContractRejected, bind_task_contract, contract_for_candidate
 from stagemesh.contracts import CONTRACT_VERSION, ContractError, changed_files, evaluate_contract
 from stagemesh.coordinator import Coordinator, TargetSelection
 from stagemesh.diagnosis import STALE_BASELINE, TOOL_FAILURE_EVENT, VALIDATION_GATE, diagnose
@@ -108,7 +109,7 @@ def frozen_task_with_candidate(tmp_path: Path, contract: dict | None = None):
 
 def test_rebind_from_manifest_preserves_gates_and_enforces_operations(tmp_path: Path) -> None:
     workflow = ".github/workflows/quality.yml"
-    manifest_path = "docs/implementation-files.json"
+    manifest_path = "docs/change-scope.json"
     docs = "docs/a.md"
     project, store = _setup(tmp_path, {**DOCS_CONTRACT, "allowed_files": ["github/workflows/quality.yml", docs],
                                       "forbidden_files": [".github/**", ".stagemesh/**"]})
@@ -120,13 +121,17 @@ def test_rebind_from_manifest_preserves_gates_and_enforces_operations(tmp_path: 
         {"path": workflow, "operation": "modify"}, {"path": docs, "operation": "delete"},
         {"path": "docs/new.md", "operation": "create"},
     ]}), encoding="utf-8")
+    deletion_manifest = "docs/workflow-deletion.json"
+    (project / deletion_manifest).write_text(json.dumps({"files": [
+        {"path": workflow, "operation": "delete"},
+    ]}), encoding="utf-8")
     pin = git.commit_all("reviewed manifest and baseline workflow")
     baseline = store.set_task_baseline(TASK, pin)
     previous = bind_task_contract(store, project, TASK, baseline)
     ref = f"{pin}:{manifest_path}"
 
     code, out, err = cli(project, "rebind-contract", "--task", TASK, "--from-manifest", ref, "--plan", "--json")
-    assert code == 2 and "is protected or forbidden" in out, (out, err)
+    assert code == 2 and "requires explicit permission" in out, (out, err)
     opts = ("rebind-contract", "--task", TASK, "--from-manifest", ref, "--allow-workflow-modification", "--json")
     code, out, err = cli(project, *opts, "--plan")
     assert code == 0 and json.loads(out)["manifest"] == ref, (out, err)
@@ -137,8 +142,14 @@ def test_rebind_from_manifest_preserves_gates_and_enforces_operations(tmp_path: 
     assert bound.contract.gates == previous.contract.gates
     assert bound.contract.scope_mode == "STRICT" and bound.contract.max_changed_files == 3
     assert bound.contract.forbidden_files == (".stagemesh/**",)
-    assert json.loads((project / ".stagemesh" / "contracts" / f"{TASK}.json").read_text())["scope_manifest_ref"] == ref
+    assert bound.contract.scope_manifest_ref == ref
+    assert "scope_manifest_ref" not in json.loads((project / ".stagemesh" / "contracts" / f"{TASK}.json").read_text())
     assert events(store, "task.contract_rebound")[-1]["manifest"] == ref
+    with pytest.raises(RecoveryRefusal, match="requires explicit permission"):
+        rebind_contract(store, project, TASK, from_manifest=ref)
+    with pytest.raises(RecoveryRefusal, match="existing GitHub workflows only"):
+        rebind_contract(store, project, TASK, from_manifest=f"{pin}:{deletion_manifest}", allow_workflow_modification=True)
+    assert store.task_contract(TASK)["digest"] == bound.digest
 
     (project / workflow).write_text("name: Exact candidate Quality\n", encoding="utf-8")
     (project / docs).unlink()
@@ -149,6 +160,8 @@ def test_rebind_from_manifest_preserves_gates_and_enforces_operations(tmp_path: 
     wrong = git.commit_all("attempt unapproved workflow deletion")
     result = evaluate_contract(project, wrong, bound.contract, baseline_sha=pin, run_gates=False)
     assert any(item["code"] == "scope_operation_not_approved" and item["path"] == workflow for item in result.findings)
+    with pytest.raises(ContractRejected, match="conflicts with the task baseline"):
+        bind_task_contract(store, project, TASK, wrong)
 
 
 def test_rebind_from_manifest_refuses_drift_at_the_frozen_baseline(tmp_path: Path) -> None:
@@ -164,6 +177,39 @@ def test_rebind_from_manifest_refuses_drift_at_the_frozen_baseline(tmp_path: Pat
     with pytest.raises(RecoveryRefusal, match="has changed at the task baseline"):
         rebind_contract(store, project, TASK, from_manifest=f"{approved}:docs/implementation-files.json")
     assert store.task_contract(TASK)["digest"] == previous.digest
+
+
+def test_local_manifest_binding_is_atomic_and_cannot_be_forged_from_a_contract_file(tmp_path: Path, monkeypatch) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    manifest = project / "docs/approved-scope.json"
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "modify"}]}', encoding="utf-8")
+    pin = store.set_task_baseline(TASK, git.commit_all("record local manifest"))
+    ref = f"{pin}:docs/approved-scope.json"
+    write_contract(project, {**DOCS_CONTRACT, "allowed_files": ["docs/a.md"], "scope_mode": "STRICT",
+                             "scope_revision": 1, "scope_owner": "owner", "scope_manifest_ref": ref,
+                             "scope_file_operations": {"docs/a.md": "modify"}})
+    with pytest.raises(RecoveryRefusal, match="use --from-manifest"):
+        rebind_contract(store, project, TASK)
+    with pytest.raises(ContractRejected, match="use rebind-contract --from-manifest"):
+        bind_task_contract(store, project, TASK, pin)
+    write_contract(project, DOCS_CONTRACT)
+    previous = bind_task_contract(store, project, TASK, pin)
+    with monkeypatch.context() as env:
+        env.setenv("STAGEMESH_PROVIDER_PROCESS", "1")
+        with pytest.raises(RecoveryRefusal, match="requires an operator"):
+            rebind_contract(store, project, TASK, from_manifest=ref)
+    store.conn.execute("CREATE TRIGGER simulate_audit_failure BEFORE INSERT ON audit_events "
+                       "WHEN NEW.event_type='task.contract_rebound' BEGIN SELECT RAISE(ABORT, 'audit failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="audit failed"):
+        rebind_contract(store, project, TASK, from_manifest=ref)
+    assert store.task_contract(TASK)["digest"] == previous.digest
+    store.conn.execute("DROP TRIGGER simulate_audit_failure")
+    report = rebind_contract(store, project, TASK, from_manifest=ref)
+    assert store.task_contract(TASK)["digest"] == report["new_digest"]
+    assert events(store, "task.contract_rebound")[-1]["new_digest"] == report["new_digest"]
+    store.close()
 
 
 def test_rebind_repairs_a_hand_edited_contract_version_and_keeps_the_supported_version(tmp_path: Path) -> None:
