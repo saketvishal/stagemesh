@@ -104,6 +104,12 @@ Every implementation provider receives a built-in discipline prompt before it ed
 - Prove non-trivial logic with a focused test, assertion or runnable check.
 - Leave out-of-contract discoveries as deferred work instead of expanding the diff.
 
+For GitHub tasks, list approved literal edit targets under `## Allowed files`. StageMesh checks the
+list against existing contracts at preview and before coding, including paths that start with a dot.
+An infrastructure task that edits a normally forbidden workflow needs a project-owned explicit task
+contract naming that workflow and its other approved files. Keep the default profile protection for
+other tasks. Rebind any stale contract through the audited rebind command before starting the window.
+
 This discipline lives in `src/stagemesh/providers.py` so it applies to Codex, Claude, Grok, Agy and any configured command provider. It is covered by `tests/test_canary_regression.py`.
 
 StageMesh also selects [bundled agent skills](agent-skills.md) automatically from the task title, bound contract and remediation state.

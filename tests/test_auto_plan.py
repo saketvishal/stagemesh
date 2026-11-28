@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -10,10 +11,12 @@ import pytest
 
 import stagemesh.auto_plan as auto_plan_module
 import stagemesh.cli as cli_module
-from stagemesh.contracts import canonical_contract_json, parse_contract
+from stagemesh.contract_binding import ContractRejected, bind_task_contract
+from stagemesh.contracts import canonical_contract_json, parse_contract, scope_classification
 from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
+from stagemesh.task_selection import contract_state
 
 GATE = {"name": "project-acceptance-fake", "command": [sys.executable, "-c", "pass"], "timeout_seconds": 60}
 
@@ -110,9 +113,53 @@ Do not change provider selection, task source sync, GitHub sync, worktree cleanu
         "tests/test_parallel.py",
     ]
     assert "**" not in contract["allowed_files"]
+    assert contract["max_changed_files"] == 5
     assert contract["validation_escalation_reasons"] == [
         "auto-generated contract uses task-provided file scope; bounded project smoke required before merge-readiness checks"
     ]
+
+
+def test_github_workflow_scope_is_checked_before_planning_and_binding(tmp_path: Path, fake_gates: None) -> None:
+    project = _project(tmp_path)
+    paths = [
+        ".github/workflows/quality.yml",
+        "scripts/quality/gate-manifest.mjs",
+        "scripts/quality/evaluate-gate.mjs",
+        "scripts/quality/evaluate-gate.test.mjs",
+        "docs/operations/ci/exact-head-gate-evidence.md",
+    ]
+    objective = "## Scope\nRead `docs/governance.md`.\n\n## Allowed files\n" + "\n".join(
+        f"- `{path}`" for path in paths
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("CI quality gates", source="github", source_id="43")
+    store.cache_source("github", "43", {"objective": objective}, "OPEN")
+    payload = auto_plan_module.build_contract(store, project, "43", [GATE])
+    assert payload["allowed_files"] == paths and payload["max_changed_files"] == 5
+    assert "contract scope conflict: allowed edit target .github/workflows/quality.yml" in contract_state(store, project, "43", True)
+
+    file = project / ".stagemesh" / "contracts" / "43.json"
+    baseline = GitWorkspace(project).head()
+    stale = {**payload, "allowed_files": [paths[0][1:], *paths[1:]]}
+    stale_json = canonical_contract_json(parse_contract(stale))
+    store.bind_task_contract("43", baseline, 1, hashlib.sha256(stale_json.encode()).hexdigest(), stale_json)
+    issue_scope_error = "contract paths outside the issue's literal file scope: github/workflows/quality.yml"
+    assert issue_scope_error in contract_state(store, project, "43", True)
+    with pytest.raises(ContractRejected, match=issue_scope_error):
+        bind_task_contract(store, project, "43", baseline)
+
+    payload["forbidden_files"].remove(".github/**")  # An explicit task contract authorizes just the named workflow.
+    file.write_text(json.dumps(payload), encoding="utf-8")
+    explicit_json = canonical_contract_json(parse_contract(payload))
+    store.rebind_task_contract("43", 1, hashlib.sha256(explicit_json.encode()).hexdigest(), explicit_json, None)
+    assert contract_state(store, project, "43", True) == "valid"
+    bound = bind_task_contract(store, project, "43", baseline)
+    assert scope_classification(bound.contract, paths)["outside_allowed"] == []
+    assert scope_classification(bound.contract, [".github/workflows/release.yml"])["outside_allowed"] == [
+        ".github/workflows/release.yml"
+    ]
+    store.close()
 
 
 def test_existing_contract_is_reused_untouched(tmp_path: Path, fake_gates: None) -> None:

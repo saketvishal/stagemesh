@@ -20,6 +20,7 @@ from .audit import record_audit
 from .capabilities import capability_policy_snapshot
 from .contracts import (
     CONTRACT_VERSION,
+    ChangeContract,
     ContractError,
     _matches,
     canonical_contract_json,
@@ -232,14 +233,10 @@ def _scope_heading(line: str) -> bool:
     return heading == "scope" or any(part in heading for part in _SCOPE_HEADINGS)
 
 
-def _clean_scope_token(token: str) -> str:
-    return token.strip().strip(".,;:()[]{}\"'")
-
-
 def _looks_like_file_scope(token: str) -> bool:
     if not token or token == "**" or any(ch.isspace() for ch in token):
         return False
-    if token.startswith("-") or token.startswith("--"):
+    if token.startswith("-"):
         return False
     lowered = token.lower()
     if lowered.startswith(("stagemesh ", "python ", "git ", "uv ", "npm ")):
@@ -283,7 +280,7 @@ def _scope_within_profile(source: str, profile_scope: tuple[str, ...]) -> bool:
     return False
 
 
-def _task_suggested_allowed_files(objective: str) -> list[str]:
+def _task_suggested_allowed_files(objective: str, *, explicit_only: bool = False) -> list[str]:
     """Extract explicit file/glob bullets from a task-provided scope section.
 
     Auto-planning may fall back to a broad contract when the task has no scope, but if the source issue gives a concrete
@@ -297,7 +294,8 @@ def _task_suggested_allowed_files(objective: str) -> list[str]:
         if not stripped:
             continue
         if stripped.startswith("#"):
-            if _scope_heading(stripped):
+            heading = _heading_text(stripped)
+            if heading in {"allowed files", "allowed paths"} or (not explicit_only and _scope_heading(stripped)):
                 in_scope = True
                 continue
             if in_scope:
@@ -305,7 +303,7 @@ def _task_suggested_allowed_files(objective: str) -> list[str]:
         if not in_scope:
             continue
         for match in _PATH_TOKEN_RE.findall(stripped):
-            token = _clean_scope_token(match)
+            token = match.strip()
             if token == "**":
                 _safe_task_scope_token(token)  # raises: a source issue may narrow a profile, never widen it to the repository
             if _looks_like_file_scope(token):
@@ -316,9 +314,32 @@ def _task_suggested_allowed_files(objective: str) -> list[str]:
     return allowed
 
 
+def source_file_scope_problem(store: Store, task_id: str, contract: ChangeContract) -> str | None:
+    """An exact GitHub allowlist constrains the writable paths of an existing contract."""
+    task = store.get_task(task_id)
+    if task is None or task["source"] != "github":
+        return None
+    try:
+        _, body = task_text(store, task_id)
+        source_files = _task_suggested_allowed_files(body, explicit_only=True)
+    except AutoPlanError as exc:
+        return exc.message
+    if not source_files or any(any(char in path for char in "*?[") for path in source_files):
+        return None
+    writable = (*contract.allowed_files, *contract.allowed_generated_files, *contract.approved_scope_expansions)
+    outside = sorted({path for path in writable if path.replace("\\", "/") not in source_files})
+    if outside:
+        return (
+            f"contract paths outside the issue's literal file scope: {', '.join(outside)}; "
+            f"expected paths from: {', '.join(source_files)}; correct the contract and run `stagemesh rebind-contract --task {task_id}`"
+        )
+    return None
+
+
 def build_contract(store: Store, project: Path, task_id: str, gates: list[dict[str, Any]]) -> dict[str, Any]:
     objective = task_objective(store, task_id)
-    allowed_files = _task_suggested_allowed_files(objective) or ["**"]
+    _, body = task_text(store, task_id)
+    allowed_files = _task_suggested_allowed_files(body, explicit_only=True) or _task_suggested_allowed_files(body) or ["**"]
     no_scope = allowed_files == ["**"]
     return {
         "objective": objective,
@@ -337,11 +358,17 @@ def build_contract(store: Store, project: Path, task_id: str, gates: list[dict[s
         "allowed_files": allowed_files,
         "forbidden_files": list(FORBIDDEN_FILES),
         "required_tests": gates,
-        "max_changed_files": 60,
+        "max_changed_files": _literal_file_cap(allowed_files, 60),
         "max_diff_lines": 6000,
         "generated_by": GENERATED_BY,
         "source_task": task_id,
     }
+
+
+def _literal_file_cap(paths: list[str], cap: int) -> int:
+    if paths and all(not any(char in path for char in "*?[") for path in paths):
+        return min(len(paths), cap)
+    return cap
 
 
 def validate_generated(payload: dict[str, Any]) -> int:
@@ -478,7 +505,7 @@ def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str
         decision = resolve_type(profile, task_labels(store, task), title, body)
         objective = task_objective(store, task_id)
         payload = build_profile_contract(profile, decision, objective, task_id, GENERATED_BY)
-        source_scope = _task_suggested_allowed_files(objective)
+        source_scope = _task_suggested_allowed_files(body, explicit_only=True) or _task_suggested_allowed_files(body)
         if source_scope:
             profile_scope = tuple(str(path) for path in payload["allowed_files"])
             narrowed = [path for path in source_scope if _scope_within_profile(path, profile_scope)]
@@ -490,6 +517,7 @@ def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str
                     "correct the issue scope or select the matching project task type",
                 )
             payload["allowed_files"] = narrowed
+            payload["max_changed_files"] = _literal_file_cap(narrowed, payload["max_changed_files"])
             payload["validation_escalation_reasons"].append(
                 "source task provides a narrower explicit file scope than the project profile"
             )
@@ -525,9 +553,12 @@ def plannable(store: Store, project: Path, task_id: str) -> str | None:
         if planned is not None:
             validate_generated(planned[0])
             return None
+        gates = detect_gates(project)
+        if not gates:
+            return "no validation gate can be generated"
+        return contract_admission_problem(parse_contract(build_contract(store, project, task_id, gates)))
     except AutoPlanError as exc:
         return exc.message
-    return None if detect_gates(project) else "no validation gate can be generated"
 
 
 def create_contract(store: Store, project: Path, task_id: str, *, gate_detector=None) -> AutoPlanResult:

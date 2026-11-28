@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .auto_plan import cached_state as _cached_state
-from .auto_plan import plannable, task_labels, outside_label_selector
+from .auto_plan import outside_label_selector, plannable, source_file_scope_problem, task_labels
 from .config import TaskSelectionConfig
 from .contracts import (
     ContractError,
@@ -201,6 +201,9 @@ def contract_state(store: Store, project: Path, task_id: str, auto_plan: bool) -
         except (OSError, ValueError, ContractError):
             return "unplannable:contract file or frozen binding is invalid"
         problem = contract_admission_problem(contract)
+        if problem:
+            return f"unplannable:{problem}"
+        problem = source_file_scope_problem(store, task_id, contract)
         if problem:
             return f"unplannable:{problem}"
         if size > MAX_CANONICAL_CONTRACT_CHARS:
