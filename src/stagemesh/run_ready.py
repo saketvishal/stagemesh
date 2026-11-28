@@ -13,6 +13,7 @@ from .auto_plan import (
     create_contract,
     outside_label_selector,
     refresh_stale_generated_contract,
+    source_file_scope_problem,
 )
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import (
@@ -311,7 +312,7 @@ def _ensure_contract(
         plan_info["reused_existing"] = True
     try:
         contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
-        problem = contract_admission_problem(contract)
+        problem = contract_admission_problem(contract) or source_file_scope_problem(store, task_id, contract)
         if problem:
             raise ContractError(problem)
         size = len(canonical_contract_json(contract))

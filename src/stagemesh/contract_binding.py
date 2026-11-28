@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from .auto_plan import source_file_scope_problem
 from .capabilities import (
     CapabilityRegistryError,
     capability_policy_snapshot,
@@ -45,6 +46,7 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         problem = contract_admission_problem(bound.contract)
         if problem:
             raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
+        _require_source_scope(store, task_id, bound.contract)
         if store.latest_candidate(task_id) is None:
             _require_feasible(project, task_id, bound.contract)
         return bound
@@ -60,6 +62,7 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
     problem = contract_admission_problem(contract)
     if problem:
         raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
+    _require_source_scope(store, task_id, contract)
     _require_feasible(project, task_id, contract)
     try:
         capability_policy = capability_policy_snapshot(project, contract.capability_refs)
@@ -77,6 +80,12 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         capability_json=str(capability_policy["canonical_json"]),
     )
     return bound_contract_from_record(dict(store.task_contract(task_id)))
+
+
+def _require_source_scope(store: Store, task_id: str, contract: ChangeContract) -> None:
+    problem = source_file_scope_problem(store, task_id, contract)
+    if problem:
+        raise ContractRejected("contract_policy_conflict", problem)
 
 
 def _require_feasible(project: Path, task_id: str, contract: ChangeContract) -> None:
