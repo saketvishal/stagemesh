@@ -378,7 +378,7 @@ def test_refused_recovery_restores_the_failed_candidate_workspace_generation(
     def refuse(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise RecoveryRefusal("controlled_refusal", "controlled refusal after allocating recovery generation")
 
-    monkeypatch.setattr(coordinator_module, "advance_baseline", refuse)
+    monkeypatch.setattr(coordinator_module, "_advance_baseline_owned", refuse)
     coord.tick()
 
     assert task_workspace(rig.project, TASK) == failed_workspace
