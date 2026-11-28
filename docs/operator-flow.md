@@ -112,6 +112,24 @@ An infrastructure task that edits a normally forbidden workflow needs a project-
 contract naming that workflow and its other approved files. Keep the default profile protection for
 other tasks. Rebind any stale contract through the audited rebind command before starting the window.
 
+For an existing planning task with a reviewed JSON file manifest, apply the file list with
+`stagemesh rebind-contract --task ID --from-manifest COMMIT:PATH`. Supply the full commit ID and
+the repository-relative path. Use a `files` array of objects with `path` and `operation` fields.
+The pinned commit must be in the frozen task baseline. For tasks sourced from GitHub, the issue's
+literal allowlist must match the manifest. Use `--plan` to preview the ledger update. For a reviewed
+manifest that modifies an existing GitHub Actions workflow, explicitly pass
+`--allow-workflow-modification`. The strict contract grants only the named paths and operations and
+retains its validation commands. The ledger records the new binding and its audit event together.
+StageMesh verifies the pin again at admission and candidate validation. Spec approval, task
+eligibility, and implementation review still apply.
+When the integration baseline changes the manifest or its operation targets, the window holds that
+task. For a task with no candidate or workspace, a rebind can advance its baseline to a newer
+reviewed manifest commit reachable from the integration ref.
+
+An independently confirmed unanswered planning decision holds its exact plan before a later window
+claims it. The report keeps the question and the task's next action visible, and the window can
+select other work. A changed baseline or contract goes through fresh planning checks.
+
 This discipline lives in `src/stagemesh/providers.py` so it applies to Codex, Claude, Grok, Agy and any configured command provider. It is covered by `tests/test_canary_regression.py`.
 
 StageMesh also selects [bundled agent skills](agent-skills.md) automatically from the task title, bound contract and remediation state.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -23,8 +24,9 @@ import stagemesh.cli as cli_module
 from stagemesh.audit import record_audit
 from stagemesh.autonomy.provenance import claim_workspace, load_ownership
 from stagemesh.baseline import analyze_baseline
-from stagemesh.contract_binding import bind_task_contract, contract_for_candidate
-from stagemesh.contracts import CONTRACT_VERSION, ContractError, changed_files
+from stagemesh.config import load_config
+from stagemesh.contract_binding import ContractRejected, bind_task_contract, contract_for_candidate
+from stagemesh.contracts import CONTRACT_VERSION, ContractError, changed_files, evaluate_contract
 from stagemesh.coordinator import Coordinator, TargetSelection
 from stagemesh.diagnosis import STALE_BASELINE, TOOL_FAILURE_EVENT, VALIDATION_GATE, diagnose
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
@@ -40,8 +42,11 @@ from stagemesh.recovery import (
 )
 from stagemesh.remediation import finding_identity, remediation_context
 from stagemesh.run_ready import RunSummary, format_stop
+from stagemesh.run_window import WindowOptions, planned_selection
+from stagemesh.stage_dispatch import connected_dispatch_database, stage_dispatch_lock
+from stagemesh.survivor_wave import INTEGRATION_LOCAL
 from stagemesh.validation import Validator
-from stagemesh.workspaces import prepare_task_workspace
+from stagemesh.workspaces import prepare_task_workspace, task_workspace
 
 PY = sys.executable
 # a docs-only change plans a "docs-static" check, which must exist as a gate for the validation to be able to pass
@@ -104,6 +109,171 @@ def frozen_task_with_candidate(tmp_path: Path, contract: dict | None = None):
 
 
 # --- 1. rebind-contract ------------------------------------------------------------------------------------------------------------
+
+
+def test_rebind_from_manifest_preserves_gates_and_enforces_operations(tmp_path: Path) -> None:
+    workflow = ".github/workflows/quality.yml"
+    manifest_path = "docs/change-scope.json"
+    docs = "docs/a.md"
+    project, store = _setup(tmp_path, {**DOCS_CONTRACT, "allowed_files": ["github/workflows/quality.yml", docs],
+                                      "forbidden_files": [".github/**", ".stagemesh/**"]})
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    (project / workflow).parent.mkdir(parents=True)
+    (project / workflow).write_text("name: Quality\n", encoding="utf-8")
+    (project / manifest_path).write_text(json.dumps({"files": [
+        {"path": workflow, "operation": "modify"}, {"path": docs, "operation": "delete"},
+        {"path": "docs/new.md", "operation": "create"},
+    ]}), encoding="utf-8")
+    deletion_manifest = "docs/workflow-deletion.json"
+    (project / deletion_manifest).write_text(json.dumps({"files": [
+        {"path": workflow, "operation": "delete"},
+    ]}), encoding="utf-8")
+    pin = git.commit_all("reviewed manifest and baseline workflow")
+    baseline = store.set_task_baseline(TASK, pin)
+    previous = bind_task_contract(store, project, TASK, baseline)
+    ref = f"{pin}:{manifest_path}"
+
+    code, out, err = cli(project, "rebind-contract", "--task", TASK, "--from-manifest", ref, "--plan", "--json")
+    assert code == 2 and "requires explicit permission" in out, (out, err)
+    opts = ("rebind-contract", "--task", TASK, "--from-manifest", ref, "--allow-workflow-modification", "--json")
+    code, out, err = cli(project, *opts, "--plan")
+    assert code == 0 and json.loads(out)["manifest"] == ref, (out, err)
+    assert store.task_contract(TASK)["digest"] == previous.digest
+    code, out, err = cli(project, *opts)
+    assert code == 0 and json.loads(out)["manifest"] == ref, (out, err)
+    bound = bind_task_contract(store, project, TASK, baseline)
+    assert bound.contract.gates == previous.contract.gates
+    assert bound.contract.scope_mode == "STRICT" and bound.contract.max_changed_files == 3
+    assert bound.contract.forbidden_files == (".stagemesh/**",)
+    assert bound.contract.scope_manifest_ref == ref
+    assert "scope_manifest_ref" not in json.loads((project / ".stagemesh" / "contracts" / f"{TASK}.json").read_text())
+    assert events(store, "task.contract_rebound")[-1]["manifest"] == ref
+    with pytest.raises(RecoveryRefusal, match="requires explicit permission"):
+        rebind_contract(store, project, TASK, from_manifest=ref)
+    with pytest.raises(RecoveryRefusal, match="existing GitHub workflows only"):
+        rebind_contract(store, project, TASK, from_manifest=f"{pin}:{deletion_manifest}", allow_workflow_modification=True)
+    assert store.task_contract(TASK)["digest"] == bound.digest
+
+    (project / workflow).write_text("name: Exact candidate Quality\n", encoding="utf-8")
+    (project / docs).unlink()
+    (project / "docs/new.md").write_text("new doc\n", encoding="utf-8")
+    approved = git.commit_all("apply named operations")
+    assert evaluate_contract(project, approved, bound.contract, baseline_sha=pin, run_gates=False).passed
+    (project / workflow).unlink()
+    wrong = git.commit_all("attempt unapproved workflow deletion")
+    result = evaluate_contract(project, wrong, bound.contract, baseline_sha=pin, run_gates=False)
+    assert any(item["code"] == "scope_operation_not_approved" and item["path"] == workflow for item in result.findings)
+    with pytest.raises(ContractRejected, match="conflicts with the task baseline"):
+        bind_task_contract(store, project, TASK, wrong)
+
+
+def test_rebind_from_manifest_refuses_drift_at_the_frozen_baseline(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    manifest = project / "docs/implementation-files.json"
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "modify"}]}', encoding="utf-8")
+    approved = git.commit_all("reviewed file scope")
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "delete"}]}', encoding="utf-8")
+    baseline = store.set_task_baseline(TASK, git.commit_all("unapproved file scope change"))
+    previous = bind_task_contract(store, project, TASK, baseline)
+    with pytest.raises(RecoveryRefusal, match="has changed at the task baseline"):
+        rebind_contract(store, project, TASK, from_manifest=f"{approved}:docs/implementation-files.json")
+    assert store.task_contract(TASK)["digest"] == previous.digest
+
+
+def test_local_manifest_binding_is_atomic_and_cannot_be_forged_from_a_contract_file(tmp_path: Path, monkeypatch) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    manifest = project / "docs/approved-scope.json"
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "modify"}]}', encoding="utf-8")
+    pin = store.set_task_baseline(TASK, git.commit_all("record local manifest"))
+    ref = f"{pin}:docs/approved-scope.json"
+    write_contract(project, {**DOCS_CONTRACT, "allowed_files": ["docs/a.md"], "scope_mode": "STRICT",
+                             "scope_revision": 1, "scope_owner": "owner", "scope_manifest_ref": ref,
+                             "scope_file_operations": {"docs/a.md": "modify"}})
+    with pytest.raises(RecoveryRefusal, match="use --from-manifest"):
+        rebind_contract(store, project, TASK)
+    with pytest.raises(ContractRejected, match="use rebind-contract --from-manifest"):
+        bind_task_contract(store, project, TASK, pin)
+    write_contract(project, DOCS_CONTRACT)
+    previous = bind_task_contract(store, project, TASK, pin)
+    with monkeypatch.context() as env:
+        env.setenv("STAGEMESH_PROVIDER_PROCESS", "1")
+        with pytest.raises(RecoveryRefusal, match="requires an operator"):
+            rebind_contract(store, project, TASK, from_manifest=ref)
+    store.conn.execute("CREATE TRIGGER simulate_audit_failure BEFORE INSERT ON audit_events "
+                       "WHEN NEW.event_type='task.contract_rebound' BEGIN SELECT RAISE(ABORT, 'audit failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="audit failed"):
+        rebind_contract(store, project, TASK, from_manifest=ref)
+    assert store.task_contract(TASK)["digest"] == previous.digest
+    store.conn.execute("DROP TRIGGER simulate_audit_failure")
+    report = rebind_contract(store, project, TASK, from_manifest=ref)
+    assert store.task_contract(TASK)["digest"] == report["new_digest"]
+    assert events(store, "task.contract_rebound")[-1]["new_digest"] == report["new_digest"]
+    store.close()
+
+
+def test_window_holds_prospective_manifest_drift_and_rebind_can_move_the_baseline(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    path = "docs/approved-scope.json"
+    manifest = project / path
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "modify"}]}', encoding="utf-8")
+    original = store.set_task_baseline(TASK, git.commit_all("record first approved manifest"))
+    rebind_contract(store, project, TASK, from_manifest=f"{original}:{path}")
+
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "delete"}]}', encoding="utf-8")
+    updated = git.commit_all("record replacement manifest")
+    options = WindowOptions(tasks=[TASK], integration_mode=INTEGRATION_LOCAL)
+    selected, skipped = planned_selection(store, options, project, config=load_config(project))
+    assert not selected and "proposed baseline conflicts with frozen scope" in skipped[TASK]
+    with pytest.raises(RecoveryRefusal, match="rebind the reviewed scope before advancing"):
+        advance_baseline(store, project, TASK, updated, yes=True)
+    assert store.task_baseline(TASK) == original
+
+    # A candidate-free task left in IMPLEMENT by an older build can recover too.
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    report = rebind_contract(store, project, TASK, from_manifest=f"{updated}:{path}")
+    assert report["previous_baseline"] == original and report["manifest_baseline"] == updated
+    assert store.task_baseline(TASK) == store.task_contract(TASK)["baseline_sha"] == updated
+    selected, _ = planned_selection(store, options, project, config=load_config(project))
+    assert selected == [TASK]
+    store.close()
+
+
+def test_manifest_rebind_and_baseline_advance_share_stage_dispatch_lock(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    path = "docs/approved-scope.json"
+    (project / path).write_text('{"files": [{"path": "docs/a.md", "operation": "modify"}]}', encoding="utf-8")
+    original = store.set_task_baseline(TASK, git.commit_all("reviewed scope"))
+    rebind_contract(store, project, TASK, from_manifest=f"{original}:{path}")
+    digest = store.task_contract(TASK)["digest"]
+    (project / "docs/b.md").write_text("unrelated addition\n", encoding="utf-8")
+    advance_target = git.commit_all("unrelated integration")
+    (project / path).write_text('{"files": [{"path": "docs/a.md", "operation": "delete"}]}', encoding="utf-8")
+    updated = git.commit_all("reviewed replacement scope")
+
+    database = connected_dispatch_database(store.conn)
+    assert database is not None
+    with stage_dispatch_lock(database, TASK).hold("concurrent recovery"):
+        with pytest.raises(RecoveryRefusal, match="retry the baseline advance") as advance:
+            advance_baseline(store, project, TASK, advance_target, yes=True)
+        with pytest.raises(RecoveryRefusal, match="retry the manifest rebind") as rebind:
+            rebind_contract(store, project, TASK, from_manifest=f"{updated}:{path}")
+        assert advance.value.code == rebind.value.code == "active_dispatch"
+    assert store.task_baseline(TASK) == original
+    assert store.task_contract(TASK)["digest"] == digest
+    assert not task_workspace(project, TASK).exists()
+
+    rebind_contract(store, project, TASK, from_manifest=f"{updated}:{path}")
+    assert store.task_baseline(TASK) == store.task_contract(TASK)["baseline_sha"] == updated
+    store.close()
 
 
 def test_rebind_repairs_a_hand_edited_contract_version_and_keeps_the_supported_version(tmp_path: Path) -> None:

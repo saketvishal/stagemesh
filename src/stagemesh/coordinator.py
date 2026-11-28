@@ -60,7 +60,7 @@ from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import pool_exhaustion_evidence
 from .queue_control import OperatorStopRequested
-from .recovery import RecoveryRefusal, advance_baseline, rebaseline_task
+from .recovery import RecoveryRefusal, _advance_baseline_owned, rebaseline_task
 from .recovery_decision import (
     ENVIRONMENT_BLOCKED,
     INCONCLUSIVE_VALIDATION,
@@ -1214,7 +1214,8 @@ class Coordinator:
             },
         )
         try:
-            advance_baseline(self.store, self.project, task_id, ref, reason=f"integration recovery: {failure.category}", yes=True)
+            # Stage dispatch already holds this task's lock for integration recovery.
+            _advance_baseline_owned(self.store, self.project, task_id, ref, reason=f"integration recovery: {failure.category}", yes=True)
         except RecoveryRefusal as exc:
             self.store.advance_task(task_id, Stage.INTEGRATE)
             if exc.code == "baseline_not_ancestor" and hasattr(self.integrator, "reconstruct_onto_current_tip"):

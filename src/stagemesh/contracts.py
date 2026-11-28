@@ -94,6 +94,8 @@ class ChangeContract:
     scope_exceptions: tuple[str, ...] = ()
     scope_write_enabled: bool = True
     forbid_new_imports: bool = False
+    scope_file_operations: tuple[tuple[str, str], ...] = ()
+    scope_manifest_ref: str | None = None
     agent_policy_exceptions: tuple[str, ...] = ()
     agent_policy_owner: str | None = None
 
@@ -277,6 +279,12 @@ def contract_admission_problem(contract: ChangeContract) -> str | None:
             return "allowed_symbols may only target files already present in allowed_files"
         if contract.approved_scope_expansions and not contract.scope_exceptions:
             return "approved_scope_expansions require a recorded scope_exceptions justification"
+    if (contract.scope_manifest_ref or contract.scope_file_operations) and (
+        not contract.scope_manifest_ref or contract.scope_mode != "STRICT"
+        or set(dict(contract.scope_file_operations)) != set(contract.allowed_files)
+        or contract.allowed_generated_files or contract.approved_scope_expansions
+    ):
+        return "a manifest binding requires a strict contract with exactly one operation per allowed file"
     if contract.agent_policy_exceptions:
         if contract.agent_policy_owner is None:
             return "agent policy exceptions require agent_policy_owner"
@@ -328,6 +336,8 @@ def bind_contract(
     candidate_sha: str | None = None,
 ) -> BoundChangeContract:
     contract = load_contract(project, task_id)
+    if contract.scope_manifest_ref or contract.scope_file_operations:
+        raise ContractError("use rebind-contract --from-manifest to create a manifest binding")
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     return BoundChangeContract(contract, CONTRACT_VERSION, digest, canonical_json, baseline_sha, candidate_sha)
@@ -369,6 +379,11 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
     if not isinstance(payload, dict):
         raise ContractError("change contract must be a JSON object")
     objective = _required_text(payload.get("objective"), "objective")
+    operations = payload.get("scope_file_operations", {})
+    if not isinstance(operations, dict) or any(
+        not isinstance(path, str) or operation not in ("create", "modify", "delete") for path, operation in operations.items()
+    ):
+        raise ContractError("scope_file_operations must map paths to create, modify or delete")
     return ChangeContract(
         objective=objective,
         explicit=bool(payload.get("explicit", True)),
@@ -404,6 +419,8 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
         scope_exceptions=_texts(payload.get("scope_exceptions", ()), "scope_exceptions"),
         scope_write_enabled=_optional_bool(payload.get("scope_write_enabled"), "scope_write_enabled", default=True),
         forbid_new_imports=_optional_bool(payload.get("forbid_new_imports"), "forbid_new_imports", default=False),
+        scope_file_operations=tuple(sorted(operations.items())),
+        scope_manifest_ref=_optional_text(payload.get("scope_manifest_ref"), "scope_manifest_ref"),
         agent_policy_exceptions=_texts(payload.get("agent_policy_exceptions", ()), "agent_policy_exceptions"),
         agent_policy_owner=_optional_text(payload.get("agent_policy_owner"), "agent_policy_owner"),
     )
@@ -979,7 +996,7 @@ def _gate_environment(run_dir: Path, gate: GateCommand) -> dict[str, str] | None
 
 def scope_policy_payload(contract: ChangeContract) -> dict[str, Any]:
     """Canonical provider-neutral write policy embedded in a bound task contract."""
-    return {
+    payload = {
         "mode": contract.scope_mode,
         "allowed_write_files": list(contract.allowed_files),
         "allowed_read_files": list(contract.allowed_read_files),
@@ -992,6 +1009,10 @@ def scope_policy_payload(contract: ChangeContract) -> dict[str, Any]:
         "write_enabled": contract.scope_write_enabled,
         "forbid_new_imports": contract.forbid_new_imports,
     }
+    if contract.scope_manifest_ref:
+        payload["manifest_ref"] = contract.scope_manifest_ref
+        payload["file_operations"] = dict(contract.scope_file_operations)
+    return payload
 
 
 def scope_policy_hash(contract: ChangeContract) -> str:
@@ -1011,6 +1032,8 @@ def _atomic_scope_findings(
     changed: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    if contract.scope_file_operations:
+        findings.extend(_file_operation_findings(project, baseline_sha, candidate_sha, contract))
     symbol_policy = dict(contract.allowed_symbols)
     for path in changed:
         symbols = symbol_policy.get(path.replace("\\", "/"))
@@ -1040,6 +1063,32 @@ def _atomic_scope_findings(
                     }
                 )
     return findings
+
+
+def _file_operation_findings(
+    project: Path, baseline: str | None, candidate: str, contract: ChangeContract,
+) -> list[dict[str, str]]:
+    if not baseline:
+        return [{"severity": "error", "code": "scope_operation_unverified", "message": "manifest validation needs a frozen baseline"}]
+    git = GitWorkspace(project)
+    try:
+        from .scope_manifest import validate_manifest_binding
+
+        validate_manifest_binding(project, baseline, contract)
+        diff = git.run("diff", "--name-status", "--no-renames", "-z", baseline, candidate, encoding="utf-8").stdout
+    except ContractError as exc:
+        return [{"severity": "error", "code": "manifest_scope_stale", "message": str(exc)}]
+    except (GitError, OSError, UnicodeDecodeError):
+        return [{"severity": "error", "code": "scope_operation_unverified", "message": "manifest operations could not be read from Git"}]
+    tokens = diff.split("\0")[:-1]
+    expected = dict(contract.scope_file_operations)
+    actions = {"A": "create", "M": "modify", "D": "delete"}
+    return [
+        {"severity": "error", "code": "scope_operation_not_approved", "path": path,
+         "message": f"{path} changed with Git status {status}; manifest permits {expected.get(path, 'no operation')}"}
+        for status, path in zip(tokens[::2], tokens[1::2], strict=True)
+        if expected.get(path, "") != actions.get(status, "unknown")
+    ]
 
 
 def _git_source(project: Path, sha: str | None, path: str) -> str | None:
@@ -1146,6 +1195,9 @@ def contract_prompt(contract: ChangeContract) -> str:
     ]
     if contract.forbidden_files:
         lines.append(f"- Forbidden files: {', '.join(contract.forbidden_files)}")
+    if contract.scope_manifest_ref:
+        lines.append(f"- Approved file operations from {contract.scope_manifest_ref}:")
+        lines.extend(f"  - {operation} {path}" for path, operation in contract.scope_file_operations)
     if contract.exclusions:
         lines.append(f"- Exclusions: {', '.join(contract.exclusions)}")
     if contract.protected_files:
@@ -1412,6 +1464,9 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
     if contract.agent_policy_exceptions:
         payload["agent_policy_exceptions"] = list(contract.agent_policy_exceptions)
         payload["agent_policy_owner"] = contract.agent_policy_owner
+    if contract.scope_manifest_ref:
+        payload["scope_manifest_ref"] = contract.scope_manifest_ref
+        payload["scope_file_operations"] = dict(contract.scope_file_operations)
     return payload
 
 

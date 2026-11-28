@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import outside_label_selector
+from .auto_plan import AutoPlanError, _github_scope, outside_label_selector
 from .autonomy.destructive_git import execute_preserved_cleanup
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
 from .capabilities import (
@@ -22,10 +25,12 @@ from .capabilities import (
     capability_policy_snapshot,
     task_capability_summary,
 )
+from .concurrency import IntegrationLockTimeout
 from .config import AdverseReviewPolicy, ConfigValidationError, load_config
 from .contract_binding import contract_for_candidate
 from .contracts import (
     CONTRACT_VERSION,
+    ChangeContract,
     ContractError,
     _invariant_gate,
     bound_contract_from_record,
@@ -53,6 +58,7 @@ from .planning_execution import planning_execution_receipts
 from .redaction import redact_mapping
 from .remediation import finding_identity, latest_candidate_findings
 from .review import adverse_gate, adverse_outcome
+from .scope_manifest import manifest_contract, validate_manifest_binding
 from .spec_planning import (
     NEXT_APPROVE_SPEC,
     NEXT_CHALLENGE_SPEC,
@@ -62,12 +68,14 @@ from .spec_planning import (
     NEXT_RESOLVE_DECISIONS,
     NEXT_REVISE_SPEC,
     NEXT_WRITE_SPEC,
+    PROVIDER_PROCESS_ENV,
     evaluate_planning_gate,
     load_planning_artifacts,
     load_planning_challenge,
     planning_artifact_paths,
     planning_challenge_path,
 )
+from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .timing import format_task_summary, task_timing
 from .validation import Validator
 from .validation_services import (
@@ -201,9 +209,67 @@ def _revalidate(store: Store, project: Path, task_id: str) -> dict[str, Any]:
 # --- rebind-contract -------------------------------------------------------------------------------------------------------------
 
 
+def _contract_from_manifest(
+    store: Store, project: Path, task: Any, contract: ChangeContract, reference: str, allow_workflow: bool,
+) -> tuple[ChangeContract, str]:
+    task_id = str(task["id"])
+    baseline = store.task_baseline(task_id)
+    if not baseline or task["stage"] not in (Stage.PLAN, Stage.IMPLEMENT) or task["status"] != TaskStatus.OPEN or store.latest_candidate(task_id):
+        raise RecoveryRefusal("manifest_rebind_started_task", "a manifest rebind requires an open task with a frozen baseline and no candidate")
+    try:
+        config = load_config(project)
+        target = resolve_integration_ref(project, config.integration_ref) or "HEAD"
+        baseline = _baseline_for_manifest(project, task_id, baseline, reference.partition(":")[0], target)
+        authority = config.approval_authority
+        resolved = manifest_contract(
+            project, baseline, reference, contract, scope_owner=authority.approver_id if authority else _operator(),
+            allow_workflow_modification=allow_workflow,
+        )
+        declared = _github_scope(store, task) if task["source"] == "github" else None
+        if task["source"] == "github" and set(declared or ()) != set(resolved.allowed_files):
+            raise ContractError("the manifest must match the GitHub issue's explicit file list; refresh source or resolve the difference")
+        return resolved, baseline
+    except (AutoPlanError, OSError, ValueError) as exc:
+        raise RecoveryRefusal("manifest_rebind_refused", str(exc)) from exc
+
+
+def _baseline_for_manifest(project: Path, task_id: str, current: str, revision: str, integration_ref: str) -> str:
+    from .workspaces import task_workspace
+
+    git = GitWorkspace(project)
+    if (
+        re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", revision) and revision != current
+        and git.run("merge-base", "--is-ancestor", current, revision, check=False).returncode == 0
+    ):
+        if git.run("merge-base", "--is-ancestor", revision, integration_ref, check=False).returncode:
+            raise ContractError("the newer manifest pin must be reachable from the project integration ref")
+        if task_workspace(project, task_id).exists():
+            raise ContractError("the task has a workspace on its old baseline; preserve it before moving to a newer manifest pin")
+        return revision
+    return current
+
+
 def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool = False, reason: str | None = None,
                     force: bool = False, review_invariants: tuple[int, ...] = (), command_invariants: tuple[int, ...] = (),
-                    plan: bool = False) -> dict[str, Any]:
+                    plan: bool = False, from_manifest: str | None = None,
+                    allow_workflow_modification: bool = False) -> dict[str, Any]:
+    if from_manifest is not None and (os.environ.get(PROVIDER_PROCESS_ENV) or not re.fullmatch(r"[\w-]+", task_id)):
+        raise RecoveryRefusal("manifest_operator_required", "manifest rebind requires an operator and a plain task ID")
+    database = connected_dispatch_database(store.conn) if from_manifest is not None and not plan else None
+    lock = stage_dispatch_lock(database, task_id).hold("manifest rebind") if database is not None else nullcontext()
+    try:
+        with lock:
+            return _rebind_contract(store, project, task_id, validate=validate, reason=reason, force=force,
+                                    review_invariants=review_invariants, command_invariants=command_invariants,
+                                    plan=plan, from_manifest=from_manifest,
+                                    allow_workflow_modification=allow_workflow_modification)
+    except IntegrationLockTimeout as exc:
+        raise RecoveryRefusal("active_dispatch", "the task has an active dispatch; retry the manifest rebind once it is idle") from exc
+
+
+def _rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool, reason: str | None,
+                     force: bool, review_invariants: tuple[int, ...], command_invariants: tuple[int, ...],
+                     plan: bool, from_manifest: str | None, allow_workflow_modification: bool) -> dict[str, Any]:
     """Re-read .stagemesh/contracts/<id>.json, canonicalize it and replace the task's frozen contract with it.
 
     The stored version is always this build's CONTRACT_VERSION: it is not read from the old row, so a hand-edited row
@@ -213,14 +279,18 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     old = store.task_contract(task_id)
     path = task_contract_path(project, task_id)
     classifying = bool(review_invariants or command_invariants)
+    if allow_workflow_modification and from_manifest is None:
+        raise RecoveryRefusal("manifest_required", "--allow-workflow-modification requires --from-manifest")
+    if from_manifest is not None and (classifying or force or validate):
+        raise RecoveryRefusal("conflicting_rebind_options", "a manifest rebind must be performed before candidate validation or invariant classification")
     if classifying and not (reason or "").strip():
         raise RecoveryRefusal("reason_required", "classifying legacy invariants requires --reason")
-    if path is None and not (classifying and old is not None):
+    if path is None and not ((classifying or from_manifest is not None) and old is not None):
         raise RecoveryRefusal("missing_contract_file", f"no contract file at .stagemesh/contracts/{task_id}.json to rebind")
     try:
         # Classification starts from the verified frozen payload, never a possibly
         # edited file. Only selected prefixes may change; all requirements survive.
-        if classifying and old is not None:
+        if (classifying or from_manifest is not None) and old is not None:
             original_canonical = str(old["canonical_json"])
             contract = bound_contract_from_record(dict(old)).contract
         else:
@@ -234,6 +304,14 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         previous_contract = parse_contract(json.loads(str(old["canonical_json"]))) if old is not None else None
     except (ContractError, ValueError):
         previous_contract = None  # legacy repair still proceeds; an unreadable old policy cannot authorize a widening
+    manifest_baseline = None
+    if from_manifest is not None:
+        contract, manifest_baseline = _contract_from_manifest(store, project, task, contract, from_manifest, allow_workflow_modification)
+        reason = reason or f"operator bound the reviewed manifest {from_manifest}"
+    elif (contract.scope_manifest_ref or contract.scope_file_operations or (
+        previous_contract and previous_contract.scope_manifest_ref
+    )) and contract != previous_contract:
+        raise RecoveryRefusal("manifest_rebind_required", "use --from-manifest to introduce or revise a manifest binding")
     scope_revised = bool(
         previous_contract is not None
         and previous_contract.scope_mode is not None
@@ -297,7 +375,8 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
                 "capability_policy_digest": capability_policy["digest"],
                 "classification": classification, "invalidated_evidence": [str(r["id"]) for r in at_risk],
                 "requires_force": bool(at_risk), "new_canonical_json": canonical,
-                "stage": task["stage"], "status": task["status"]}
+                "stage": task["stage"], "status": task["status"],
+                **({"manifest": from_manifest, "manifest_baseline": manifest_baseline} if from_manifest is not None else {})}
     if at_risk and not force:
         kinds = sorted({str(r["kind"]) for r in at_risk})
         raise RecoveryRefusal(
@@ -316,30 +395,6 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
             "invariant_classification": classification, "candidate_sha": candidate_sha,
             "reason": reason.strip(), "operator": _operator(), "forced": bool(force),
         })
-    store.rebind_task_contract(
-        task_id,
-        CONTRACT_VERSION,
-        digest,
-        canonical,
-        candidate_sha if binding is not None else None,
-        capability_digest=str(capability_policy["digest"]),
-        capability_json=str(capability_policy["canonical_json"]),
-    )
-    changes = _resume_at_validate(store, task_id, task)
-    # Even an unchanged rebind must repair a stage that has no current validation.
-    if (
-        candidate_sha is not None
-        and store.get_task(task_id)["stage"] in (Stage.REVIEW, Stage.INTEGRATE)
-        and not store.has_bound_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED)
-    ):
-        store.advance_task(task_id, Stage.VALIDATE)
-        record_audit(store, "task.advance", {
-            "task_id": task_id,
-            "stage": Stage.VALIDATE,
-            "candidate_sha": candidate_sha,
-            "reason": "operator rebind: current candidate and contract require passed validation",
-        })
-        changes["stage_reset"] = True
     payload: dict[str, Any] = {
         "task_id": task_id,
         "old_digest": old_digest,
@@ -357,10 +412,21 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         "reason": (reason or "").strip() or f"operator rebound the contract from {path.name}",
         "operator": _operator(),
         "operator_action": "REBIND_CONTRACT",
-        **changes,
+        **({"manifest": from_manifest, "previous_baseline": store.task_baseline(task_id), "manifest_baseline": manifest_baseline}
+           if from_manifest is not None else {}),
     }
-    record_audit(store, REBIND_EVENT, payload)
-    if scope_revised and previous_contract is not None:
+    if from_manifest is not None:
+        payload.update(unblocked=False, stage_reset=False)
+    store.rebind_task_contract(
+        task_id, CONTRACT_VERSION, digest, canonical, candidate_sha if binding is not None else None,
+        capability_digest=str(capability_policy["digest"]), capability_json=str(capability_policy["canonical_json"]),
+        audit_event=(REBIND_EVENT, redact_mapping(payload)) if from_manifest is not None else None,
+        new_baseline=manifest_baseline,
+    )
+    if from_manifest is None:
+        payload.update(_resume_after_contract_rebind(store, task_id, task, candidate_sha, digest))
+        record_audit(store, REBIND_EVENT, payload)
+    if scope_revised and previous_contract is not None and from_manifest is None:
         record_audit(
             store,
             "task.scope_policy_revised",
@@ -383,6 +449,22 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     current = store.get_task(task_id)
     report["stage"], report["status"] = current["stage"], current["status"]
     return report
+
+
+def _resume_after_contract_rebind(store: Store, task_id: str, task: Any, candidate_sha: str | None, digest: str) -> dict[str, Any]:
+    changes = _resume_at_validate(store, task_id, task)
+    if (
+        candidate_sha is not None
+        and store.get_task(task_id)["stage"] in (Stage.REVIEW, Stage.INTEGRATE)
+        and not store.has_bound_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED)
+    ):
+        store.advance_task(task_id, Stage.VALIDATE)
+        record_audit(store, "task.advance", {
+            "task_id": task_id, "stage": Stage.VALIDATE, "candidate_sha": candidate_sha,
+            "reason": "operator rebind: current candidate and contract require passed validation",
+        })
+        changes["stage_reset"] = True
+    return changes
 
 
 # --- rebaseline-task -------------------------------------------------------------------------------------------------------------
@@ -469,6 +551,28 @@ def advance_baseline(
     yes: bool = False,
     allow_integrating: bool = False,
 ) -> dict[str, Any]:
+    """Advance the baseline while excluding dispatch and reviewed scope changes for the same task."""
+    database = connected_dispatch_database(store.conn)
+    lock = stage_dispatch_lock(database, task_id).hold("baseline advance") if database is not None else nullcontext()
+    try:
+        with lock:
+            return _advance_baseline_owned(
+                store, project, task_id, target_ref, reason=reason, yes=yes, allow_integrating=allow_integrating,
+            )
+    except IntegrationLockTimeout as exc:
+        raise RecoveryRefusal("active_dispatch", "the task has an active dispatch; retry the baseline advance once it is idle") from exc
+
+
+def _advance_baseline_owned(
+    store: Store,
+    project: Path,
+    task_id: str,
+    target_ref: str | None = None,
+    *,
+    reason: str | None = None,
+    yes: bool = False,
+    allow_integrating: bool = False,
+) -> dict[str, Any]:
     """Move a task's baseline forward to `target_ref` (default: the integration ref) so the next run starts fresh from current code.
 
     Everything is validated before anything changes. Old candidates, evidence and findings are kept as history: they stay bound to the
@@ -505,6 +609,11 @@ def advance_baseline(
         raise RecoveryRefusal("already_at_target", f"task {task_id}: baseline is already {new_base[:12]}")
     if not facts.exists(old_base) or not facts.is_ancestor(old_base, new_base):
         raise RecoveryRefusal("baseline_not_ancestor", f"task {task_id}: baseline {old_base[:12]} is not an ancestor of {ref} ({new_base[:12]}); refusing to move it sideways or backwards")
+    if (record := store.task_contract(task_id)) is not None:
+        try:
+            validate_manifest_binding(project, new_base, bound_contract_from_record(dict(record)).contract)
+        except ContractError as exc:
+            raise RecoveryRefusal("manifest_scope_stale", f"{exc}; rebind the reviewed scope before advancing") from exc
 
     worktree = task_workspace(project, task_id)
     has_worktree = (worktree / ".git").exists()

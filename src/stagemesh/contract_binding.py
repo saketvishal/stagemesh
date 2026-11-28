@@ -25,6 +25,7 @@ from .contracts import (
 )
 from .git import GitError, GitWorkspace
 from .persistence import Store
+from .scope_manifest import validate_manifest_binding
 
 
 class ContractRejected(ContractError):
@@ -47,6 +48,10 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         if problem:
             raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
         _require_source_scope(store, task_id, bound.contract)
+        try:
+            validate_manifest_binding(project, baseline_sha, bound.contract)
+        except ContractError as exc:
+            raise ContractRejected("manifest_scope_stale", f"{exc}; rebind the reviewed scope before planning") from exc
         if store.latest_candidate(task_id) is None:
             _require_feasible(project, task_id, bound.contract)
         return bound
@@ -59,6 +64,8 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         raise ContractRejected("invalid_contract", f"change contract is invalid: {exc}") from exc
     if not contract.explicit:
         raise ContractRejected("missing_explicit_contract", "change contract must be explicit")
+    if contract.scope_manifest_ref or contract.scope_file_operations:
+        raise ContractRejected("manifest_rebind_required", "use rebind-contract --from-manifest to create a manifest binding")
     problem = contract_admission_problem(contract)
     if problem:
         raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)

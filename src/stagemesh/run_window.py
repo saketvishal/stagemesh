@@ -62,6 +62,7 @@ from .readiness import PrLister, build_readiness, format_provider_health, gh_ope
 from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .scheduling import Scheduler
+from .scope_manifest import validate_manifest_binding
 from .spec_planning import (
     BOUNDARY_PROMOTION,
     check_accountable_approval,
@@ -622,21 +623,32 @@ def continuation(
 _PLANNING_PROVIDER_FIX = "configure distinct authorized REVIEW commands in .stagemesh/config.json before requesting new planning"
 
 
-def _governed_window_planning_block(
+def _window_pickup_block(
     store: Store, project: Path, config: StageMeshConfig, options: WindowOptions,
     planned_baseline: Callable[[str], str | None],
-) -> Callable[[str], str | None] | None:
-    if config.governance_profile != "governed-sdd":
-        return None
+) -> Callable[[str], str | None]:
     from .planning_execution import governed_pickup_error, governed_planning_pool
 
     pool = governed_planning_pool(
         config, unattended=True, live_acceptance="required" if options.strict_live else "skip_failed",
-    )
+    ) if config.governance_profile == "governed-sdd" else None
 
     def blocked(task_id: str) -> str | None:
-        error = governed_pickup_error(store, project, task_id, config, pool, planned_baseline(task_id))
-        return f"{error}; next: {_PLANNING_PROVIDER_FIX}" if error is not None else None
+        baseline = planned_baseline(task_id)
+        record = store.task_contract(task_id)
+        if record is not None and baseline and baseline != record["baseline_sha"]:
+            try:
+                validate_manifest_binding(project, baseline, bound_contract_from_record(dict(record)).contract)
+            except ContractError as exc:
+                return f"proposed baseline conflicts with frozen scope: {exc}; next: rebind task {task_id} to the reviewed scope"
+        if pool is None:
+            return None
+        error = governed_pickup_error(store, project, task_id, config, pool, baseline)
+        if error is None:
+            return None
+        if error.code == "planning_decision_required":
+            return f"{error}; next: record the decision in the governing task/spec for task {task_id} and revise the frozen plan"
+        return f"{error}; next: {_PLANNING_PROVIDER_FIX}"
 
     return blocked
 
@@ -1550,7 +1562,7 @@ def run_window(
                     else store.task_baseline(task_id)
                 )
 
-            planning_block = _governed_window_planning_block(store, project, config, options, planned_baseline)
+            planning_block = _window_pickup_block(store, project, config, options, planned_baseline)
             continuing, deferred = select_tasks(
                 store, attempted=set(), limit=room, only=list(resume), fingerprint=fingerprint,
                 project=project, compatible_with=[], required_label=options.required_label, materialize_contracts=True, planning_block=planning_block,
@@ -2101,7 +2113,7 @@ def planned_selection(
     """What a window would pick right now ('run-window --plan'): the same selection, nothing started."""
     fingerprint = None if project is None else runtime_fingerprint(project)
     planning_block = None
-    if project is not None and config is not None and config.governance_profile == "governed-sdd":
+    if project is not None and config is not None:
         git = GitFacts(project)
         target = (
             staging_target(project, base_ref or "HEAD")[0]
@@ -2113,7 +2125,7 @@ def planned_selection(
                 return target
             return store.task_baseline(task_id)
 
-        planning_block = _governed_window_planning_block(store, project, config, options, planned_baseline)
+        planning_block = _window_pickup_block(store, project, config, options, planned_baseline)
     return select_tasks(
         store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint,
         project=project, required_label=options.required_label, planning_block=planning_block,

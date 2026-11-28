@@ -200,6 +200,15 @@ def contract_state(store: Store, project: Path, task_id: str, auto_plan: bool) -
             size = len(canonical_contract_json(contract))
         except (OSError, ValueError, ContractError):
             return "unplannable:contract file or frozen binding is invalid"
+        if contract.scope_manifest_ref or contract.scope_file_operations:
+            if record is None:
+                return "unplannable:use rebind-contract --from-manifest to create a manifest binding"
+            from .scope_manifest import validate_manifest_binding
+
+            try:
+                validate_manifest_binding(project, str(record["baseline_sha"]), contract)
+            except ContractError as exc:
+                return f"unplannable:{exc}; rebind the reviewed scope before planning"
         problem = contract_admission_problem(contract)
         if problem:
             return f"unplannable:{problem}"

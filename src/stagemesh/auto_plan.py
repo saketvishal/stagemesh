@@ -522,7 +522,7 @@ def refresh_stale_generated_contract(store: Store, project: Path, task_id: str) 
             return None
         if frozen is not None:
             frozen_contract = parse_contract(json.loads(str(frozen["canonical_json"])))
-            if source_file_scope_problem(store, task_id, frozen_contract):
+            if frozen_contract.scope_manifest_ref or source_file_scope_problem(store, task_id, frozen_contract):
                 return None
         payload = build_contract(store, project, task_id, gates)
         size = validate_generated(payload)
