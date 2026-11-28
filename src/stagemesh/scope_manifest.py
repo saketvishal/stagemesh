@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
+from typing import TypeGuard
 
 from .contracts import ChangeContract, ContractError, _matches
 from .git import GitWorkspace
@@ -88,7 +89,7 @@ def _operations(source: str) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(paths.items()))
 
 
-def _literal_path(path: object) -> bool:
+def _literal_path(path: object) -> TypeGuard[str]:
     return bool(
         isinstance(path, str) and path.strip() == path and len(path) <= 1024
         and not any(c in path for c in '\\:*?[]<>|"\r\n\t\0')
