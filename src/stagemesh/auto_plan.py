@@ -271,14 +271,14 @@ def _scope_within_profile(source: str, profile_scope: tuple[str, ...]) -> bool:
         return True
     if not any(char in source for char in "*?["):
         return _matches(source, profile_scope)
-    source_prefix = source.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0].rstrip("/")
+    source_prefix = source.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
     for profile_pattern in profile_scope:
         normalized = profile_pattern.replace("\\", "/")
         if source == normalized:
             return True
         if normalized.endswith("/**"):
             profile_prefix = normalized[:-3].rstrip("/")
-            if source_prefix == profile_prefix or source_prefix.startswith(profile_prefix + "/"):
+            if source_prefix.startswith(profile_prefix + "/"):
                 return True
     return False
 

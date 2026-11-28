@@ -182,6 +182,12 @@ def test_github_scope_accepts_extensionless_files_and_checks_each_pattern(tmp_pa
     assert auto_plan_module.source_file_scope_problem(store, "43", allowed) is None
     outside = parse_contract({**payload, "allowed_files": ["scripts/**", "docs/other.md"]})
     assert "docs/other.md, scripts/**" in auto_plan_module.source_file_scope_problem(store, "43", outside)
+    sibling_prefix = {**payload, "allowed_files": ["scripts/quality*"]}
+    path = project / ".stagemesh" / "contracts" / "43.json"
+    path.write_text(json.dumps(sibling_prefix), encoding="utf-8")
+    assert "outside the issue's explicit file scope: scripts/quality*" in contract_state(store, project, "43", True)
+    with pytest.raises(ContractRejected, match=r"outside the issue's explicit file scope: scripts/quality\*"):
+        bind_task_contract(store, project, "43", GitWorkspace(project).head())
     store.close()
 
 
