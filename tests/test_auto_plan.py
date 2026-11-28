@@ -17,6 +17,7 @@ from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.task_selection import contract_state
+from stagemesh.task_sources import DiscoveredTask, sync_source
 
 GATE = {"name": "project-acceptance-fake", "command": [sys.executable, "-c", "pass"], "timeout_seconds": 60}
 
@@ -119,7 +120,10 @@ Do not change provider selection, task source sync, GitHub sync, worktree cleanu
     ]
 
 
-def test_github_workflow_scope_is_checked_before_planning_and_binding(tmp_path: Path, fake_gates: None) -> None:
+@pytest.mark.parametrize("long_plain_issue", [False, True])
+def test_github_workflow_scope_is_checked_before_planning_and_binding(
+    tmp_path: Path, fake_gates: None, long_plain_issue: bool,
+) -> None:
     project = _project(tmp_path)
     paths = [
         ".github/workflows/quality.yml",
@@ -128,13 +132,17 @@ def test_github_workflow_scope_is_checked_before_planning_and_binding(tmp_path: 
         "scripts/quality/evaluate-gate.test.mjs",
         "docs/operations/ci/exact-head-gate-evidence.md",
     ]
-    objective = "## Scope\nRead `docs/governance.md`.\n\n## Allowed files\n" + "\n".join(
-        f"- `{path}`" for path in paths
-    )
+    description = "## Scope\nRead `docs/governance.md`.\n\n"
+    if long_plain_issue:
+        description += "Additional background.\n" * 300
+    objective = description + "## Allowed files\n" + "\n".join(
+        f"- {path}" if long_plain_issue else f"- `{path}`" for path in paths
+    ) + "\n\nRead `docs/reference.md` for background."
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     store.migrate()
-    store.upsert_task("CI quality gates", source="github", source_id="43")
-    store.cache_source("github", "43", {"objective": objective}, "OPEN")
+    sync_source(store, [DiscoveredTask("github", "43", "CI quality gates", labels=("stagemesh:ready",), body=objective)])
+    if long_plain_issue:
+        assert "## Allowed files" not in store.source_state("github", "43")["objective"]
     payload = auto_plan_module.build_contract(store, project, "43", [GATE])
     assert payload["allowed_files"] == paths and payload["max_changed_files"] == 5
     assert "contract scope conflict: allowed edit target .github/workflows/quality.yml" in contract_state(store, project, "43", True)
@@ -144,7 +152,7 @@ def test_github_workflow_scope_is_checked_before_planning_and_binding(tmp_path: 
     stale = {**payload, "allowed_files": [paths[0][1:], *paths[1:]]}
     stale_json = canonical_contract_json(parse_contract(stale))
     store.bind_task_contract("43", baseline, 1, hashlib.sha256(stale_json.encode()).hexdigest(), stale_json)
-    issue_scope_error = "contract paths outside the issue's literal file scope: github/workflows/quality.yml"
+    issue_scope_error = "contract paths outside the issue's explicit file scope: github/workflows/quality.yml"
     assert issue_scope_error in contract_state(store, project, "43", True)
     with pytest.raises(ContractRejected, match=issue_scope_error):
         bind_task_contract(store, project, "43", baseline)
@@ -159,6 +167,52 @@ def test_github_workflow_scope_is_checked_before_planning_and_binding(tmp_path: 
     assert scope_classification(bound.contract, [".github/workflows/release.yml"])["outside_allowed"] == [
         ".github/workflows/release.yml"
     ]
+    store.close()
+
+
+def test_github_scope_accepts_extensionless_files_and_checks_each_pattern(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    body = "## Allowed paths\n1. Makefile\n2. `docs/Operator Runbook.md`\n3. `scripts/quality/**`"
+    sync_source(store, [DiscoveredTask("github", "43", "CI quality gates", labels=("stagemesh:ready",), body=body)])
+    payload = auto_plan_module.build_contract(store, project, "43", [GATE])
+    assert payload["allowed_files"] == ["Makefile", "docs/Operator Runbook.md", "scripts/quality/**"]
+    allowed = parse_contract({**payload, "allowed_files": ["Makefile", "scripts/quality/test.mjs"]})
+    assert auto_plan_module.source_file_scope_problem(store, "43", allowed) is None
+    outside = parse_contract({**payload, "allowed_files": ["scripts/**", "docs/other.md"]})
+    assert "docs/other.md, scripts/**" in auto_plan_module.source_file_scope_problem(store, "43", outside)
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "section",
+    ["", "- Run `npm test`", "- `Makefile` and `other.mk`", "- *", "- ***", "- ?*", "- Makefile\n## Allowed paths\n- other.mk"],
+)
+def test_github_scope_rejects_invalid_explicit_sections_instead_of_using_default_scope(tmp_path: Path, section: str) -> None:
+    project = _project(tmp_path)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    body = f"## Allowed files\n{section}"
+    sync_source(store, [DiscoveredTask("github", "43", "CI quality gates", labels=("stagemesh:ready",), body=body)])
+    with pytest.raises(auto_plan_module.AutoPlanError, match="Allowed files|stay inside"):
+        auto_plan_module.build_contract(store, project, "43", [GATE])
+    broad = parse_contract({"objective": "CI quality gates", "allowed_files": ["**"], "required_tests": [GATE]})
+    assert auto_plan_module.source_file_scope_problem(store, "43", broad)
+    store.close()
+
+
+def test_github_scope_requires_refresh_for_a_possibly_truncated_legacy_row(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("CI quality gates", source="github", source_id="43")
+    body = "x" * auto_plan_module.SOURCE_OBJECTIVE_LIMIT
+    store.cache_source("github", "43", {"objective": body}, "OPEN")
+    broad = parse_contract({"objective": "CI quality gates", "allowed_files": ["**"], "required_tests": [GATE]})
+    assert "refresh its source" in auto_plan_module.source_file_scope_problem(store, "43", broad)
+    with pytest.raises(auto_plan_module.AutoPlanError, match="refresh its source"):
+        auto_plan_module.build_contract(store, project, "43", [GATE])
     store.close()
 
 
@@ -262,6 +316,29 @@ def test_frozen_legacy_generated_contract_refreshes_when_no_evidence_exists(tmp_
     bound = json.loads(store.contract_binding("T-1", "abc123")["canonical_json"])
     assert frozen["required_tests"][0]["name"] == "stagemesh-lifecycle-smoke"
     assert bound["required_tests"][0]["name"] == "stagemesh-lifecycle-smoke"
+
+
+@pytest.mark.parametrize("old_path", ["github/workflows/quality.yml", ".github/workflows/quality.yml"])
+def test_refresh_preserves_github_contract_when_scope_disagrees_or_replacement_is_forbidden(
+    tmp_path: Path, old_path: str,
+) -> None:
+    project = _stagemesh_project(tmp_path)
+    legacy = _legacy_generated_contract(project)
+    legacy["allowed_files"] = [old_path]
+    path = project / ".stagemesh" / "contracts" / "43.json"
+    original = json.dumps(legacy)
+    path.write_text(original, encoding="utf-8")
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    body = "## Allowed files\n- .github/workflows/quality.yml"
+    sync_source(store, [DiscoveredTask("github", "43", "CI quality gates", labels=("stagemesh:ready",), body=body)])
+    canonical = canonical_contract_json(parse_contract(legacy))
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    store.bind_task_contract("43", GitWorkspace(project).head(), 1, digest, canonical)
+    assert auto_plan_module.refresh_stale_generated_contract(store, project, "43") is None
+    assert path.read_text(encoding="utf-8") == original
+    assert store.task_contract("43")["digest"] == digest
+    store.close()
 
 
 def test_frozen_legacy_generated_contract_with_evidence_preserves_history(tmp_path: Path) -> None:

@@ -39,7 +39,10 @@ LEGACY_PYTEST_GATE = {
     "timeout_seconds": 1800,
 }
 MAX_OBJECTIVE_CHARS = 4000
+SOURCE_OBJECTIVE_LIMIT = 6000
 _PATH_TOKEN_RE = re.compile(r"`([^`\r\n]+)`")
+_FILE_BULLET_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.+)$")
+_EXPLICIT_SCOPE_HEADINGS = {"allowed files", "allowed paths"}
 _SCOPE_HEADINGS = (
     "allowed files",
     "allowed paths",
@@ -249,7 +252,7 @@ def _safe_task_scope_token(token: str) -> str:
     while normalized.startswith("./"):
         normalized = normalized[2:]
     if (
-        normalized == "**"
+        (normalized and not normalized.strip("*?"))
         or normalized.startswith("/")
         or re.match(r"^[A-Za-z]:", normalized)
         or ".." in normalized.split("/")
@@ -280,12 +283,8 @@ def _scope_within_profile(source: str, profile_scope: tuple[str, ...]) -> bool:
     return False
 
 
-def _task_suggested_allowed_files(objective: str, *, explicit_only: bool = False) -> list[str]:
-    """Extract explicit file/glob bullets from a task-provided scope section.
-
-    Auto-planning may fall back to a broad contract when the task has no scope, but if the source issue gives a concrete
-    implementation scope, the generated contract should honor it instead of admitting the whole repository.
-    """
+def _suggested_file_scope(objective: str) -> list[str]:
+    """Read the legacy scope hints that can accompany a task without an explicit GitHub allowlist."""
     allowed: list[str] = []
     seen: set[str] = set()
     in_scope = False
@@ -294,8 +293,7 @@ def _task_suggested_allowed_files(objective: str, *, explicit_only: bool = False
         if not stripped:
             continue
         if stripped.startswith("#"):
-            heading = _heading_text(stripped)
-            if heading in {"allowed files", "allowed paths"} or (not explicit_only and _scope_heading(stripped)):
+            if _scope_heading(stripped):
                 in_scope = True
                 continue
             if in_scope:
@@ -314,23 +312,96 @@ def _task_suggested_allowed_files(objective: str, *, explicit_only: bool = False
     return allowed
 
 
+def explicit_github_file_scope(body: str) -> list[str] | None:
+    """An explicit section has one repository-relative path per Markdown bullet."""
+    paths: list[str] = []
+    found = False
+    in_scope = False
+    for raw in body.splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            in_scope = _heading_text(line) in _EXPLICIT_SCOPE_HEADINGS
+            if in_scope and found:
+                raise _invalid_scope_list()
+            found = found or in_scope
+            continue
+        bullet = _FILE_BULLET_RE.fullmatch(line) if in_scope else None
+        if bullet is None:
+            continue
+        entry = bullet[1].strip()
+        quoted = _PATH_TOKEN_RE.fullmatch(entry)
+        if quoted:
+            entry = quoted[1]
+        elif "`" in entry or any(char.isspace() for char in entry):
+            raise _invalid_scope_list()
+        path = _safe_task_scope_token(entry)
+        if not path or path == "." or path.endswith("/"):
+            raise _invalid_scope_list()
+        paths.append(path)
+    if found and not paths:
+        raise _invalid_scope_list()
+    return list(dict.fromkeys(paths)) if found else None
+
+
+def _invalid_scope_list() -> AutoPlanError:
+    return AutoPlanError(
+        "invalid_task_scope",
+        "the GitHub issue needs one Allowed files section with one repository-relative file or bounded glob per bullet",
+        "list each approved path in its own Markdown bullet; use inline code for paths containing spaces",
+    )
+
+
+def _task_suggested_allowed_files(objective: str) -> list[str]:
+    """Read GitHub scope, retaining legacy hints when the issue has no explicit list."""
+    scope = explicit_github_file_scope(objective)
+    return scope if scope is not None else _suggested_file_scope(objective)
+
+
+def _github_scope(store: Store, task: Any) -> list[str] | None:
+    cached = cached_state(store, task)
+    if "github_file_scope_error" in cached:
+        raise AutoPlanError("invalid_task_scope", str(cached["github_file_scope_error"]), "correct the GitHub issue and refresh it")
+    if "github_file_scope" in cached:
+        scope = cached["github_file_scope"]
+        if scope is None or (isinstance(scope, list) and scope and all(isinstance(path, str) and path for path in scope)):
+            return scope
+        raise AutoPlanError("incomplete_task_scope", "the cached GitHub file scope is invalid; refresh its source", "refresh GitHub tasks")
+    body = str(cached.get("objective") or "")
+    if len(body) >= SOURCE_OBJECTIVE_LIMIT:
+        raise AutoPlanError(
+            "incomplete_task_scope", "the cached GitHub issue may be truncated; refresh its source before planning", "refresh GitHub tasks",
+        )
+    return explicit_github_file_scope(body)
+
+
+def _scope_for_task(store: Store, task_id: str, body: str) -> list[str]:
+    task = store.get_task(task_id)
+    if task is not None and task["source"] == "github":
+        scope = _github_scope(store, task)
+        return scope if scope is not None else _task_suggested_allowed_files(body)
+    return _suggested_file_scope(body)
+
+
 def source_file_scope_problem(store: Store, task_id: str, contract: ChangeContract) -> str | None:
-    """An exact GitHub allowlist constrains the writable paths of an existing contract."""
+    """An explicit GitHub allowlist constrains the writable paths of an existing contract."""
     task = store.get_task(task_id)
     if task is None or task["source"] != "github":
         return None
     try:
-        _, body = task_text(store, task_id)
-        source_files = _task_suggested_allowed_files(body, explicit_only=True)
+        source_files = _github_scope(store, task)
     except AutoPlanError as exc:
         return exc.message
-    if not source_files or any(any(char in path for char in "*?[") for path in source_files):
+    if source_files is None:
         return None
-    writable = (*contract.allowed_files, *contract.allowed_generated_files, *contract.approved_scope_expansions)
-    outside = sorted({path for path in writable if path.replace("\\", "/") not in source_files})
+    patterns = tuple(path for path in source_files if any(char in path for char in "*?["))
+    writable = {
+        path.replace("\\", "/")
+        for path in (*contract.allowed_files, *contract.allowed_generated_files, *contract.approved_scope_expansions)
+    }
+    outside = sorted(path for path in writable if path not in source_files and not _scope_within_profile(path, patterns))
     if outside:
         return (
-            f"contract paths outside the issue's literal file scope: {', '.join(outside)}; "
+            f"contract paths outside the issue's explicit file scope: {', '.join(outside)}; "
             f"expected paths from: {', '.join(source_files)}; correct the contract and run `stagemesh rebind-contract --task {task_id}`"
         )
     return None
@@ -339,7 +410,7 @@ def source_file_scope_problem(store: Store, task_id: str, contract: ChangeContra
 def build_contract(store: Store, project: Path, task_id: str, gates: list[dict[str, Any]]) -> dict[str, Any]:
     objective = task_objective(store, task_id)
     _, body = task_text(store, task_id)
-    allowed_files = _task_suggested_allowed_files(body, explicit_only=True) or _task_suggested_allowed_files(body) or ["**"]
+    allowed_files = _scope_for_task(store, task_id, body) or ["**"]
     no_scope = allowed_files == ["**"]
     return {
         "objective": objective,
@@ -446,9 +517,20 @@ def refresh_stale_generated_contract(store: Store, project: Path, task_id: str) 
     if frozen is not None and _task_has_passed_evidence(store, task_id):
         return None
 
-    payload = build_contract(store, project, task_id, gates)
-    size = validate_generated(payload)
-    contract = parse_contract(payload)
+    try:
+        if source_file_scope_problem(store, task_id, parse_contract(existing)):
+            return None
+        if frozen is not None:
+            frozen_contract = parse_contract(json.loads(str(frozen["canonical_json"])))
+            if source_file_scope_problem(store, task_id, frozen_contract):
+                return None
+        payload = build_contract(store, project, task_id, gates)
+        size = validate_generated(payload)
+        contract = parse_contract(payload)
+    except (ValueError, AutoPlanError):
+        return None
+    if contract_admission_problem(contract):
+        return None
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     names = tuple(str(gate["name"]) for gate in gates)
@@ -505,7 +587,7 @@ def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str
         decision = resolve_type(profile, task_labels(store, task), title, body)
         objective = task_objective(store, task_id)
         payload = build_profile_contract(profile, decision, objective, task_id, GENERATED_BY)
-        source_scope = _task_suggested_allowed_files(body, explicit_only=True) or _task_suggested_allowed_files(body)
+        source_scope = _scope_for_task(store, task_id, body)
         if source_scope:
             profile_scope = tuple(str(path) for path in payload["allowed_files"])
             narrowed = [path for path in source_scope if _scope_within_profile(path, profile_scope)]

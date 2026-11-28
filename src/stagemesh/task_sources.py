@@ -489,6 +489,8 @@ def sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_
 
 
 def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_dependencies: bool) -> list[str]:
+    from .auto_plan import SOURCE_OBJECTIVE_LIMIT, AutoPlanError, explicit_github_file_scope
+
     ids: list[str] = []
     publications: list[tuple[str, str, dict[str, object], str]] = []
     dependency_tasks: list[tuple[str, set[str], tuple[tuple[str, str], ...]]] = []
@@ -558,7 +560,12 @@ def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing
             cached["created_at"] = task.created_at
         if task.body:
             # Lets auto-planning build a contract from the issue text.
-            cached["objective"] = task.body[:6000]
+            cached["objective"] = task.body[:SOURCE_OBJECTIVE_LIMIT]
+        if is_github:
+            try:
+                cached["github_file_scope"] = explicit_github_file_scope(task.body)
+            except AutoPlanError as exc:
+                cached["github_file_scope_error"] = exc.message
         if task.dependencies:
             cached["dependencies"] = list(task.dependencies)
         if task.satisfied_dependencies:
