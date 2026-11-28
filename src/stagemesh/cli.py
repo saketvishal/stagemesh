@@ -1679,8 +1679,21 @@ def _repair_command(args: argparse.Namespace, action) -> int:  # type: ignore[no
 
 def command_rebind_contract(args: argparse.Namespace) -> int:
     def run(store, project):  # type: ignore[no-untyped-def]
-        report = rebind_contract(store, project, args.task, validate=args.validate, reason=args.reason, force=args.force,
-                                 review_invariants=tuple(args.review_invariant), command_invariants=tuple(args.command_invariant), plan=args.plan)
+        from contextlib import nullcontext
+
+        from .concurrency import IntegrationLockTimeout
+        from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
+
+        database = connected_dispatch_database(store.conn) if args.from_manifest and not args.plan else None
+        lock = stage_dispatch_lock(database, args.task).hold("manifest rebind") if database is not None else nullcontext()
+        try:
+            with lock:
+                report = rebind_contract(store, project, args.task, validate=args.validate, reason=args.reason, force=args.force,
+                                         review_invariants=tuple(args.review_invariant), command_invariants=tuple(args.command_invariant),
+                                         plan=args.plan, from_manifest=args.from_manifest,
+                                         allow_workflow_modification=args.allow_workflow_modification)
+        except IntegrationLockTimeout as exc:
+            raise RecoveryRefusal("active_dispatch", "the task has an active dispatch; retry the manifest rebind once it is idle") from exc
         if report.get("plan"):
             if not args.json:
                 print(f"task {args.task}: rebind plan only; no task, contract file, evidence or binding changed")
@@ -6491,6 +6504,8 @@ def build_parser() -> argparse.ArgumentParser:
     rebind.add_argument("--validate", action="store_true", help="Validate the latest candidate against the new contract and advance if it passes")
     rebind.add_argument("--force", action="store_true", help="Accept that passed evidence bound to the old contract stops counting (it is kept as history)")
     rebind.add_argument("--reason", help="Why the contract changed (recorded in the audit event)")
+    rebind.add_argument("--from-manifest", metavar="COMMIT:PATH", help="Bind a reviewed implementation-files.json from an exact merged commit")
+    rebind.add_argument("--allow-workflow-modification", action="store_true", help="Allow only the existing workflow modifications named in the reviewed manifest")
     rebind.add_argument("--review-invariant", type=int, action="append", default=[], metavar="INDEX", help="Explicitly classify an ambiguous legacy invariant as a review requirement (one-based frozen index; repeatable; --reason required)")
     rebind.add_argument("--command-invariant", type=int, action="append", default=[], metavar="INDEX", help="Explicitly classify a legacy invariant as an executable command (one-based frozen index; repeatable)")
     rebind.add_argument("--plan", action="store_true", help="Preview the rebind and evidence invalidation without changing task bindings or running validation")

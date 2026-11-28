@@ -636,7 +636,11 @@ def _governed_window_planning_block(
 
     def blocked(task_id: str) -> str | None:
         error = governed_pickup_error(store, project, task_id, config, pool, planned_baseline(task_id))
-        return f"{error}; next: {_PLANNING_PROVIDER_FIX}" if error is not None else None
+        if error is None:
+            return None
+        if error.code == "planning_decision_required":
+            return f"{error}; next: record the decision in the governing task/spec for task {task_id} and revise the frozen plan"
+        return f"{error}; next: {_PLANNING_PROVIDER_FIX}"
 
     return blocked
 

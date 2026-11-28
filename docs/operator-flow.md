@@ -112,6 +112,19 @@ An infrastructure task that edits a normally forbidden workflow needs a project-
 contract naming that workflow and its other approved files. Keep the default profile protection for
 other tasks. Rebind any stale contract through the audited rebind command before starting the window.
 
+For an existing planning task with a reviewed `implementation-files.json`, apply the file list with
+`stagemesh rebind-contract --task ID --from-manifest COMMIT:PATH`. Supply the full merge SHA and
+the repository-relative path. The merge must be in the frozen task baseline and the GitHub issue's
+literal allowlist must match the manifest. Use `--plan` to preview before writing. For a reviewed
+manifest that modifies an existing GitHub Actions workflow, explicitly pass
+`--allow-workflow-modification`. The strict contract grants only the named paths and operations and
+retains its validation commands. The binding records the manifest pin and cannot overwrite passed
+candidate evidence. Spec approval, task eligibility, and implementation review still apply.
+
+An independently confirmed unanswered planning decision holds its exact plan before a later window
+claims it. The report keeps the question and the task's next action visible, and the window can
+select other work. A changed baseline or contract goes through fresh planning checks.
+
 This discipline lives in `src/stagemesh/providers.py` so it applies to Codex, Claude, Grok, Agy and any configured command provider. It is covered by `tests/test_canary_regression.py`.
 
 StageMesh also selects [bundled agent skills](agent-skills.md) automatically from the task title, bound contract and remediation state.

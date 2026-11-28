@@ -190,9 +190,21 @@ def governed_pickup_error(
                 frozen = freeze_planning_challenge(challenge)
                 receipt = _trusted_receipt(store, CHALLENGER_RECEIPT, task_id, frozen.digest)
                 if receipt is not None and receipt.get("planning_spec_hash") == plan_digest:
+                    decisions = frozen.challenge.required_decisions
+                    if (
+                        decisions and baseline_sha is not None and contract_hash is not None
+                        and frozen.challenge.planning_spec_hash == plan_digest
+                        and _receipt_matches(planner, provider=str(planner["provider"]), baseline_sha=baseline_sha, contract_hash=contract_hash)
+                        and _receipt_matches(receipt, provider=str(receipt["provider"]), baseline_sha=baseline_sha, contract_hash=contract_hash)
+                        and not _identities_overlap(planner, receipt)
+                    ):
+                        return PlanningExecutionError(
+                            "planning_decision_required",
+                            "independent planning challenge requires a human decision: " + json.dumps(decisions, ensure_ascii=False),
+                        )
                     if (
                         frozen.challenge.verdict != "revise"
-                        or frozen.challenge.required_decisions
+                        or decisions
                         or automatic_planning_revision_count(store, task_id, plan_digest) >= MAX_AUTOMATIC_PLANNING_REVISIONS
                     ):
                         return None

@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 from test_run_ready import _project, _run
-from test_spec_planning_gate import _contract_digest, _spec
+from test_spec_planning_gate import _challenge, _contract_digest, _spec
 
 import stagemesh.cli as cli_module
 from stagemesh.config import ConfigValidationError, load_config
+from stagemesh.contract_binding import bind_task_contract
+from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.planning_execution import (
@@ -19,9 +21,11 @@ from stagemesh.planning_execution import (
     PLANNING_PROTOCOL_RETRY,
     PlanningExecutionError,
     _freeze_planner,
+    _record_receipt,
     planning_execution_receipts,
 )
 from stagemesh.recovery import task_doctor
+from stagemesh.review_identity import command_snapshot
 from stagemesh.run_window import WindowOptions, planned_selection, run_window
 from stagemesh.runtime_freshness import RuntimeFreshness
 from stagemesh.spec_planning import (
@@ -553,6 +557,53 @@ def test_current_protocol_human_decision_cannot_be_rerolled(tmp_path: Path):
     try:
         with pytest.raises(PlanningChallengeRefreshRefusal, match="already used the contract-aware review protocol"):
             retire_planning_challenge(store, project, "T-1", reason="try the same review again")
+    finally:
+        store.close()
+
+
+def test_window_skips_verified_decision_wait_and_selects_independent_work(tmp_path: Path) -> None:
+    settings = _config(_script(tmp_path), challenger_mode="human")
+    settings["governance_profile"] = "governed-sdd"
+    settings["planning_gate"]["approval_authority"] = {
+        "version": 1, "authority_id": "project-owner:example", "approver_id": "owner:example",
+    }
+    project = _project(tmp_path, ["T-1", "T-2"], config=settings)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        store.migrate()
+        for task_id in ("T-1", "T-2"):
+            store.upsert_task(task_id, source_id=task_id)
+        baseline = store.set_task_baseline("T-1", GitWorkspace(project).head())
+        bound = bind_task_contract(store, project, "T-1", baseline)
+        spec = _spec(baseline_sha=baseline, contract_hash=bound.digest)
+        question = "Confirm whether this task is authorized"
+        challenge = _challenge(spec, planner_provider="planner", challenger_provider="challenger", verdict="revise",
+                               findings=[{"kind": "scope-risk", "summary": "The governing scope depends on an owner decision"}],
+                               required_decisions=[question])
+        spec_path, _ = planning_artifact_paths(project, "T-1")
+        spec_path.parent.mkdir(exist_ok=True)
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        spec_path.with_name("T-1.challenge.json").write_text(json.dumps(challenge), encoding="utf-8")
+        spec_hash = freeze_planning_spec(spec).digest
+        frozen = freeze_planning_challenge(challenge).digest
+        for provider, event, digest, plan in (("planner", PLANNER_RECEIPT, spec_hash, None),
+                                             ("challenger", CHALLENGER_RECEIPT, frozen, spec_hash)):
+            argv = (sys.executable, str(tmp_path / f"{provider}.py"))
+            execution_id = store.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.REVIEW, actor=provider)
+            store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED)
+            _record_receipt(store, event, "T-1", baseline, bound.digest, digest,
+                            {**command_snapshot(provider, argv, (argv,)), "execution_id": execution_id}, planning_spec_hash=plan)
+        config = load_config(project)
+        options = WindowOptions(tasks=["T-1", "T-2"], integration_mode=INTEGRATION_LOCAL)
+        picked, skipped = planned_selection(store, options, project, config=config)
+        assert picked == ["T-2"]
+        assert question in skipped["T-1"]
+        assert "record the decision in the governing task/spec" in skipped["T-1"]
+        assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 2
+        (project / "README.md").write_text("updated approved context\n", encoding="utf-8")
+        GitWorkspace(project).commit_all("revise baseline")
+        revised, _ = planned_selection(store, options, project, config=config)
+        assert revised == ["T-1", "T-2"]
     finally:
         store.close()
 
