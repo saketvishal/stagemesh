@@ -801,6 +801,7 @@ class Store:
         capability_digest: str | None = None,
         capability_json: str | None = None,
         audit_event: tuple[str, dict[str, Any]] | None = None,
+        new_baseline: str | None = None,
     ) -> None:
         """Replace the frozen task contract (and the binding of `candidate_sha`, if any) in one transaction.
 
@@ -819,10 +820,18 @@ class Store:
             )
         if not isinstance(version, int) or isinstance(version, bool) or version < 1:
             raise StoreValidationError("contract version must be a positive integer")
+        if new_baseline is not None:
+            new_baseline = _validate_text(new_baseline, "baseline sha")
+            if candidate_sha is not None:
+                raise StoreValidationError("a manifest rebind cannot move a candidate baseline")
         with self.conn:
+            if new_baseline is not None:
+                self.conn.execute(
+                    "UPDATE task_baselines SET baseline_sha=? WHERE task_id=?", (new_baseline, task_id),
+                )
             updated = self.conn.execute(
-                "UPDATE task_contracts SET version=?, digest=?, canonical_json=? WHERE task_id=?",
-                (version, digest, canonical_json, task_id),
+                "UPDATE task_contracts SET version=?, digest=?, canonical_json=?, baseline_sha=COALESCE(?, baseline_sha) WHERE task_id=?",
+                (version, digest, canonical_json, new_baseline, task_id),
             ).rowcount
             if updated == 0:
                 baseline = self.task_baseline(task_id)

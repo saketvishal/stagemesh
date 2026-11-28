@@ -122,6 +122,9 @@ manifest that modifies an existing GitHub Actions workflow, explicitly pass
 retains its validation commands. The ledger records the new binding and its audit event together.
 StageMesh verifies the pin again at admission and candidate validation. Spec approval, task
 eligibility, and implementation review still apply.
+When the integration baseline changes the manifest or its operation targets, the window holds that
+task. For a task with no candidate or workspace, a rebind can advance its baseline to a newer
+reviewed manifest commit reachable from the integration ref.
 
 An independently confirmed unanswered planning decision holds its exact plan before a later window
 claims it. The report keeps the question and the task's next action visible, and the window can

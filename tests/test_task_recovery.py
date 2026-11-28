@@ -24,6 +24,7 @@ import stagemesh.cli as cli_module
 from stagemesh.audit import record_audit
 from stagemesh.autonomy.provenance import claim_workspace, load_ownership
 from stagemesh.baseline import analyze_baseline
+from stagemesh.config import load_config
 from stagemesh.contract_binding import ContractRejected, bind_task_contract, contract_for_candidate
 from stagemesh.contracts import CONTRACT_VERSION, ContractError, changed_files, evaluate_contract
 from stagemesh.coordinator import Coordinator, TargetSelection
@@ -41,6 +42,8 @@ from stagemesh.recovery import (
 )
 from stagemesh.remediation import finding_identity, remediation_context
 from stagemesh.run_ready import RunSummary, format_stop
+from stagemesh.run_window import WindowOptions, planned_selection
+from stagemesh.survivor_wave import INTEGRATION_LOCAL
 from stagemesh.validation import Validator
 from stagemesh.workspaces import prepare_task_workspace
 
@@ -209,6 +212,35 @@ def test_local_manifest_binding_is_atomic_and_cannot_be_forged_from_a_contract_f
     report = rebind_contract(store, project, TASK, from_manifest=ref)
     assert store.task_contract(TASK)["digest"] == report["new_digest"]
     assert events(store, "task.contract_rebound")[-1]["new_digest"] == report["new_digest"]
+    store.close()
+
+
+def test_window_holds_prospective_manifest_drift_and_rebind_can_move_the_baseline(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    path = "docs/approved-scope.json"
+    manifest = project / path
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "modify"}]}', encoding="utf-8")
+    original = store.set_task_baseline(TASK, git.commit_all("record first approved manifest"))
+    rebind_contract(store, project, TASK, from_manifest=f"{original}:{path}")
+
+    manifest.write_text('{"files": [{"path": "docs/a.md", "operation": "delete"}]}', encoding="utf-8")
+    updated = git.commit_all("record replacement manifest")
+    options = WindowOptions(tasks=[TASK], integration_mode=INTEGRATION_LOCAL)
+    selected, skipped = planned_selection(store, options, project, config=load_config(project))
+    assert not selected and "proposed baseline conflicts with frozen scope" in skipped[TASK]
+    with pytest.raises(RecoveryRefusal, match="rebind the reviewed scope before advancing"):
+        advance_baseline(store, project, TASK, updated, yes=True)
+    assert store.task_baseline(TASK) == original
+
+    # A candidate-free task left in IMPLEMENT by an older build can recover too.
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    report = rebind_contract(store, project, TASK, from_manifest=f"{updated}:{path}")
+    assert report["previous_baseline"] == original and report["manifest_baseline"] == updated
+    assert store.task_baseline(TASK) == store.task_contract(TASK)["baseline_sha"] == updated
+    selected, _ = planned_selection(store, options, project, config=load_config(project))
+    assert selected == [TASK]
     store.close()
 
 

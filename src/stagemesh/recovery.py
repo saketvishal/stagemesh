@@ -58,7 +58,7 @@ from .planning_execution import planning_execution_receipts
 from .redaction import redact_mapping
 from .remediation import finding_identity, latest_candidate_findings
 from .review import adverse_gate, adverse_outcome
-from .scope_manifest import manifest_contract
+from .scope_manifest import manifest_contract, validate_manifest_binding
 from .spec_planning import (
     NEXT_APPROVE_SPEC,
     NEXT_CHALLENGE_SPEC,
@@ -211,13 +211,16 @@ def _revalidate(store: Store, project: Path, task_id: str) -> dict[str, Any]:
 
 def _contract_from_manifest(
     store: Store, project: Path, task: Any, contract: ChangeContract, reference: str, allow_workflow: bool,
-) -> ChangeContract:
+) -> tuple[ChangeContract, str]:
     task_id = str(task["id"])
     baseline = store.task_baseline(task_id)
-    if not baseline or task["stage"] != Stage.PLAN or task["status"] != TaskStatus.OPEN or store.latest_candidate(task_id):
-        raise RecoveryRefusal("manifest_rebind_started_task", "a manifest rebind requires an open planning task with a frozen baseline and no candidate")
+    if not baseline or task["stage"] not in (Stage.PLAN, Stage.IMPLEMENT) or task["status"] != TaskStatus.OPEN or store.latest_candidate(task_id):
+        raise RecoveryRefusal("manifest_rebind_started_task", "a manifest rebind requires an open task with a frozen baseline and no candidate")
     try:
-        authority = load_config(project).approval_authority
+        config = load_config(project)
+        target = resolve_integration_ref(project, config.integration_ref) or "HEAD"
+        baseline = _baseline_for_manifest(project, task_id, baseline, reference.partition(":")[0], target)
+        authority = config.approval_authority
         resolved = manifest_contract(
             project, baseline, reference, contract, scope_owner=authority.approver_id if authority else _operator(),
             allow_workflow_modification=allow_workflow,
@@ -225,9 +228,25 @@ def _contract_from_manifest(
         declared = _github_scope(store, task) if task["source"] == "github" else None
         if task["source"] == "github" and set(declared or ()) != set(resolved.allowed_files):
             raise ContractError("the manifest must match the GitHub issue's explicit file list; refresh source or resolve the difference")
-        return resolved
+        return resolved, baseline
     except (AutoPlanError, OSError, ValueError) as exc:
         raise RecoveryRefusal("manifest_rebind_refused", str(exc)) from exc
+
+
+def _baseline_for_manifest(project: Path, task_id: str, current: str, revision: str, integration_ref: str) -> str:
+    from .workspaces import task_workspace
+
+    git = GitWorkspace(project)
+    if (
+        re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", revision) and revision != current
+        and git.run("merge-base", "--is-ancestor", current, revision, check=False).returncode == 0
+    ):
+        if git.run("merge-base", "--is-ancestor", revision, integration_ref, check=False).returncode:
+            raise ContractError("the newer manifest pin must be reachable from the project integration ref")
+        if task_workspace(project, task_id).exists():
+            raise ContractError("the task has a workspace on its old baseline; preserve it before moving to a newer manifest pin")
+        return revision
+    return current
 
 
 def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool = False, reason: str | None = None,
@@ -285,8 +304,9 @@ def _rebind_contract(store: Store, project: Path, task_id: str, *, validate: boo
         previous_contract = parse_contract(json.loads(str(old["canonical_json"]))) if old is not None else None
     except (ContractError, ValueError):
         previous_contract = None  # legacy repair still proceeds; an unreadable old policy cannot authorize a widening
+    manifest_baseline = None
     if from_manifest is not None:
-        contract = _contract_from_manifest(store, project, task, contract, from_manifest, allow_workflow_modification)
+        contract, manifest_baseline = _contract_from_manifest(store, project, task, contract, from_manifest, allow_workflow_modification)
         reason = reason or f"operator bound the reviewed manifest {from_manifest}"
     elif (contract.scope_manifest_ref or contract.scope_file_operations or (
         previous_contract and previous_contract.scope_manifest_ref
@@ -356,7 +376,7 @@ def _rebind_contract(store: Store, project: Path, task_id: str, *, validate: boo
                 "classification": classification, "invalidated_evidence": [str(r["id"]) for r in at_risk],
                 "requires_force": bool(at_risk), "new_canonical_json": canonical,
                 "stage": task["stage"], "status": task["status"],
-                **({"manifest": from_manifest} if from_manifest is not None else {})}
+                **({"manifest": from_manifest, "manifest_baseline": manifest_baseline} if from_manifest is not None else {})}
     if at_risk and not force:
         kinds = sorted({str(r["kind"]) for r in at_risk})
         raise RecoveryRefusal(
@@ -392,7 +412,8 @@ def _rebind_contract(store: Store, project: Path, task_id: str, *, validate: boo
         "reason": (reason or "").strip() or f"operator rebound the contract from {path.name}",
         "operator": _operator(),
         "operator_action": "REBIND_CONTRACT",
-        **({"manifest": from_manifest} if from_manifest is not None else {}),
+        **({"manifest": from_manifest, "previous_baseline": store.task_baseline(task_id), "manifest_baseline": manifest_baseline}
+           if from_manifest is not None else {}),
     }
     if from_manifest is not None:
         payload.update(unblocked=False, stage_reset=False)
@@ -400,6 +421,7 @@ def _rebind_contract(store: Store, project: Path, task_id: str, *, validate: boo
         task_id, CONTRACT_VERSION, digest, canonical, candidate_sha if binding is not None else None,
         capability_digest=str(capability_policy["digest"]), capability_json=str(capability_policy["canonical_json"]),
         audit_event=(REBIND_EVENT, redact_mapping(payload)) if from_manifest is not None else None,
+        new_baseline=manifest_baseline,
     )
     if from_manifest is None:
         payload.update(_resume_after_contract_rebind(store, task_id, task, candidate_sha, digest))
@@ -565,6 +587,11 @@ def advance_baseline(
         raise RecoveryRefusal("already_at_target", f"task {task_id}: baseline is already {new_base[:12]}")
     if not facts.exists(old_base) or not facts.is_ancestor(old_base, new_base):
         raise RecoveryRefusal("baseline_not_ancestor", f"task {task_id}: baseline {old_base[:12]} is not an ancestor of {ref} ({new_base[:12]}); refusing to move it sideways or backwards")
+    if (record := store.task_contract(task_id)) is not None:
+        try:
+            validate_manifest_binding(project, new_base, bound_contract_from_record(dict(record)).contract)
+        except ContractError as exc:
+            raise RecoveryRefusal("manifest_scope_stale", f"{exc}; rebind the reviewed scope before advancing") from exc
 
     worktree = task_workspace(project, task_id)
     has_worktree = (worktree / ".git").exists()
