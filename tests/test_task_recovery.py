@@ -43,9 +43,10 @@ from stagemesh.recovery import (
 from stagemesh.remediation import finding_identity, remediation_context
 from stagemesh.run_ready import RunSummary, format_stop
 from stagemesh.run_window import WindowOptions, planned_selection
+from stagemesh.stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from stagemesh.survivor_wave import INTEGRATION_LOCAL
 from stagemesh.validation import Validator
-from stagemesh.workspaces import prepare_task_workspace
+from stagemesh.workspaces import prepare_task_workspace, task_workspace
 
 PY = sys.executable
 # a docs-only change plans a "docs-static" check, which must exist as a gate for the validation to be able to pass
@@ -241,6 +242,37 @@ def test_window_holds_prospective_manifest_drift_and_rebind_can_move_the_baselin
     assert store.task_baseline(TASK) == store.task_contract(TASK)["baseline_sha"] == updated
     selected, _ = planned_selection(store, options, project, config=load_config(project))
     assert selected == [TASK]
+    store.close()
+
+
+def test_manifest_rebind_and_baseline_advance_share_stage_dispatch_lock(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    store.advance_task(TASK, Stage.PLAN)
+    git = GitWorkspace(project)
+    path = "docs/approved-scope.json"
+    (project / path).write_text('{"files": [{"path": "docs/a.md", "operation": "modify"}]}', encoding="utf-8")
+    original = store.set_task_baseline(TASK, git.commit_all("reviewed scope"))
+    rebind_contract(store, project, TASK, from_manifest=f"{original}:{path}")
+    digest = store.task_contract(TASK)["digest"]
+    (project / "docs/b.md").write_text("unrelated addition\n", encoding="utf-8")
+    advance_target = git.commit_all("unrelated integration")
+    (project / path).write_text('{"files": [{"path": "docs/a.md", "operation": "delete"}]}', encoding="utf-8")
+    updated = git.commit_all("reviewed replacement scope")
+
+    database = connected_dispatch_database(store.conn)
+    assert database is not None
+    with stage_dispatch_lock(database, TASK).hold("concurrent recovery"):
+        with pytest.raises(RecoveryRefusal, match="retry the baseline advance") as advance:
+            advance_baseline(store, project, TASK, advance_target, yes=True)
+        with pytest.raises(RecoveryRefusal, match="retry the manifest rebind") as rebind:
+            rebind_contract(store, project, TASK, from_manifest=f"{updated}:{path}")
+        assert advance.value.code == rebind.value.code == "active_dispatch"
+    assert store.task_baseline(TASK) == original
+    assert store.task_contract(TASK)["digest"] == digest
+    assert not task_workspace(project, TASK).exists()
+
+    rebind_contract(store, project, TASK, from_manifest=f"{updated}:{path}")
+    assert store.task_baseline(TASK) == store.task_contract(TASK)["baseline_sha"] == updated
     store.close()
 
 

@@ -551,6 +551,28 @@ def advance_baseline(
     yes: bool = False,
     allow_integrating: bool = False,
 ) -> dict[str, Any]:
+    """Advance the baseline while excluding dispatch and reviewed scope changes for the same task."""
+    database = connected_dispatch_database(store.conn)
+    lock = stage_dispatch_lock(database, task_id).hold("baseline advance") if database is not None else nullcontext()
+    try:
+        with lock:
+            return _advance_baseline_owned(
+                store, project, task_id, target_ref, reason=reason, yes=yes, allow_integrating=allow_integrating,
+            )
+    except IntegrationLockTimeout as exc:
+        raise RecoveryRefusal("active_dispatch", "the task has an active dispatch; retry the baseline advance once it is idle") from exc
+
+
+def _advance_baseline_owned(
+    store: Store,
+    project: Path,
+    task_id: str,
+    target_ref: str | None = None,
+    *,
+    reason: str | None = None,
+    yes: bool = False,
+    allow_integrating: bool = False,
+) -> dict[str, Any]:
     """Move a task's baseline forward to `target_ref` (default: the integration ref) so the next run starts fresh from current code.
 
     Everything is validated before anything changes. Old candidates, evidence and findings are kept as history: they stay bound to the
